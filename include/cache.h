@@ -91,4 +91,34 @@ cache_entry_t *cache_fetch_by_path(const char *path);
  */
 cache_entry_t *cache_fetch_by_cached_url(const char *cached_url);
 
+/**
+ * @brief Resolves a cached URL to its original URL via persistent index.
+ * Used when cache entry is not in memory (e.g. after restart with cache disabled).
+ *
+ * @param cached_url The cached URL (e.g. /cache/xxx.png).
+ * @param original_url_out Buffer to receive the original URL. Caller must free.
+ * @return true if found and original_url_out was set, false otherwise.
+ */
+bool cache_index_lookup(const char *cached_url, char **original_url_out);
+
+/**
+ * @brief Creates a redirect-only cache entry from index lookup and adds to table.
+ * Used when /cache/xxx is requested but entry not in memory (e.g. cache disabled).
+ *
+ * @param cached_url The cached URL.
+ * @param original_url The original URL to redirect to.
+ * @return Pointer to the new entry, or NULL on failure.
+ */
+cache_entry_t *cache_create_redirect_entry(const char *cached_url, const char *original_url);
+
+/**
+ * @brief Fallback when index lookup fails: check if cache file exists on disk.
+ * Used when pic is /cache/xxx but cache_index.txt has no entry (e.g. index lost).
+ *
+ * @param uri The request URI (e.g. /cache/HASH.ext).
+ * @param file_path_out Receives the absolute file path if file exists. Caller must free.
+ * @return true if file exists and path was set, false otherwise.
+ */
+bool cache_get_file_path_for_uri(const char *uri, char **file_path_out);
+
 #endif // _CACHE_H
