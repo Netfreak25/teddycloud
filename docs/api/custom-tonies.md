@@ -107,16 +107,19 @@ curl -sS -X POST "http://127.0.0.1:80/api/toniesCustomJsonDelete" \
 
 ## POST /api/toniesCustomJsonRename
 
-Renames one entry key from `fromModel` to `toModel`.
+Renames one entry key from `fromModel` to `toModel`. Optionally updates all linked `content.json` files (tonies/tags) to reference the new model.
 
 ### Payload
 
 ```json
 {
   "fromModel": "OLD_MODEL",
-  "toModel": "NEW_MODEL"
+  "toModel": "NEW_MODEL",
+  "updateContentJson": true
 }
 ```
+
+- `updateContentJson` (optional, default: `true`): If `true`, all `content.json` files with `tonie_model` matching `fromModel` are updated to `toModel`. If `false`, only `tonies.custom.json` is updated; linked tonies will need to be re-assigned manually.
 
 ### Example
 
@@ -135,6 +138,15 @@ curl -sS -X POST "http://127.0.0.1:80/api/toniesCustomJsonRename" \
 
 - `400`: invalid payload or target model already exists
 - `404`: source model not found
+
+## Test data
+
+Use the dev-sandbox for UI testing (model picker, custom editor):
+
+```bash
+make dev-sandbox-setup   # First time or reset
+make dev-sandbox-up     # Start (Docker or native)
+```
 
 ## Notes
 

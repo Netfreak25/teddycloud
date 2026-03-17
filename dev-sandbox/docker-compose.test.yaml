@@ -1,0 +1,20 @@
+# Dev sandbox: standalone compose, builds local image. Bind mount: dev-sandbox/run/
+# make dev-sandbox-setup   # First time or reset
+# make dev-sandbox-up     # Start
+# make dev-sandbox-down   # Stop
+services:
+  teddycloud-test:
+    build:
+      context: ..
+      dockerfile: DockerfileAlpine
+    image: teddycloud:local
+    container_name: teddycloud-test
+    hostname: teddycloud-test
+    profiles:
+      - test
+    ports:
+      - "80:80"
+      - "8443:8443"
+      - "443:443"
+    volumes:
+      - ./run:/teddycloud:rw

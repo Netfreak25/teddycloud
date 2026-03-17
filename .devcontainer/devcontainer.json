@@ -23,7 +23,8 @@
   },
   "forwardPorts": [
     80,
-    443
+    443,
+    8443
   ],
   "portsAttributes": {
     "80": {
@@ -34,6 +35,10 @@
       "label": "Teddycloud boxinterface",
       "onAutoForward": "notify"
     },
+    "8443": {
+      "label": "Teddycloud HTTPS web",
+      "onAutoForward": "notify"
+    }
   }
   //"postCreateCommand": "yarn install"
   // "remoteUser": "root"
