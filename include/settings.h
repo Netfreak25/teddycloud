@@ -26,7 +26,7 @@
 #define TONIEBOX_CUSTOM_JSON_FILE "tonieboxes.custom.json"
 #define CONFIG_FILE "config.ini"
 #define CONFIG_OVERLAY_FILE "config.overlay.ini"
-#define CONFIG_VERSION 15
+#define CONFIG_VERSION 16
 #define MAX_OVERLAYS 16 + 1
 
 typedef enum
@@ -312,6 +312,7 @@ typedef struct
     char *bind_ip;
 
     uint32_t http_client_timeout;
+    uint32_t file_upload_timeout_ms;
 
     bool new_webgui_as_default;
 

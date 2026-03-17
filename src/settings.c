@@ -84,6 +84,7 @@ static void option_map_init(uint8_t settingsId)
     OPTION_STRING("core.cachedir", &settings->core.cachedir, "cache", "Cache dir", "Directory where to cache files downloaded from internet", LEVEL_DETAIL)
     OPTION_STRING("core.sslkeylogfile", &settings->core.sslkeylogfile, "", "SSL-key logfile", "SSL/TLS key log filename", LEVEL_EXPERT)
     OPTION_UNSIGNED("core.server.http_client_timeout", &settings->core.http_client_timeout, 2000, 250, 10000, "Connection timeout", "HTTP client connection timeout (default: 500ms)", LEVEL_DETAIL)
+    OPTION_UNSIGNED("core.file_upload_timeout_ms", &settings->core.file_upload_timeout_ms, 120000, 15000, 300000, "File upload timeout", "Client-side timeout for file uploads in ms (15s–5min). Default 120s for large audio files.", LEVEL_DETAIL)
     OPTION_BOOL("core.new_webgui_as_default", &settings->core.new_webgui_as_default, TRUE, "New WebGUI", "Use new WebGUI as default", LEVEL_EXPERT)
 
     OPTION_TREE_DESC("core.server_cert", "HTTPS server certificates", LEVEL_EXPERT)
@@ -1093,6 +1094,10 @@ static error_t settings_load_ovl(bool overlay)
                 {
                     Settings_Overlay[i].frontend.use_revvox_flasher = true;
                     Settings_Overlay[i].encode.use_frontend = true;
+                }
+                if (Settings_Overlay[i].configVersion < 16)
+                {
+                    Settings_Overlay[i].core.file_upload_timeout_ms = 120000;
                 }
             }
             mutex_unlock(MUTEX_SETTINGS);
