@@ -3795,6 +3795,22 @@ static bool isHexStringLocal(const char *buf, size_t maxLen)
     return isHex;
 }
 
+static bool isContentBaseOrJsonName(const char *name)
+{
+    size_t nameLen = osStrlen(name);
+    if (nameLen == 8)
+    {
+        return isHexStringLocal(name, 8);
+    }
+
+    if (nameLen == 13 && osStrcasecmp(name + 8, ".json") == 0)
+    {
+        return isHexStringLocal(name, 8);
+    }
+
+    return false;
+}
+
 static error_t updateContentJsonFilesForRename(const char *fromModel, const char *toModel, settings_t *settings)
 {
     const char *contentDir = settings->internal.contentdirfull;
@@ -3841,7 +3857,7 @@ static error_t updateContentJsonFilesForRename(const char *fromModel, const char
             {
                 continue;
             }
-            if (!isHexStringLocal(subEntry.name, 8))
+            if (!isContentBaseOrJsonName(subEntry.name))
             {
                 continue;
             }
@@ -3851,21 +3867,32 @@ static error_t updateContentJsonFilesForRename(const char *fromModel, const char
             {
                 continue;
             }
+            /* load_content_json expects path without .json – it appends .json itself */
+            {
+                char *jsonExt = osStrstr(contentPath, ".json");
+                if (jsonExt != NULL && jsonExt[5] == '\0')
+                {
+                    *jsonExt = '\0';
+                }
+            }
 
             contentJson_t contentJson = {0};
             error_t loadErr = load_content_json(contentPath, &contentJson, false, settings);
             if (loadErr == NO_ERROR && contentJson._valid && contentJson.tonie_model != NULL)
             {
-                if (osStrcasecmp(contentJson.tonie_model, fromModel) == 0)
+                if (osStrlen(contentJson.tonie_model) > 0 && osStrcasecmp(contentJson.tonie_model, fromModel) == 0)
                 {
                     osFreeMem(contentJson.tonie_model);
                     contentJson.tonie_model = strdup(toModel);
-                    contentJson._updated = true;
-                    char *jsonPath = custom_asprintf("%s.json", contentPath);
-                    if (jsonPath != NULL)
+                    if (contentJson.tonie_model != NULL)
                     {
-                        save_content_json(jsonPath, &contentJson);
-                        osFreeMem(jsonPath);
+                        contentJson._updated = true;
+                        char *jsonPath = custom_asprintf("%s.json", contentPath);
+                        if (jsonPath != NULL)
+                        {
+                            save_content_json(jsonPath, &contentJson);
+                            osFreeMem(jsonPath);
+                        }
                     }
                 }
             }
@@ -3900,6 +3927,8 @@ error_t handleApiToniesCustomJsonRename(HttpConnection *connection, const char_t
 
     cJSON *fromModel = cJSON_GetObjectItemCaseSensitive(requestJson, "fromModel");
     cJSON *toModel = cJSON_GetObjectItemCaseSensitive(requestJson, "toModel");
+    char *fromModelCopy = NULL;
+    char *toModelCopy = NULL;
     if (!jsonIsNonEmptyString(fromModel) || !jsonIsNonEmptyString(toModel))
     {
         cJSON_Delete(requestJson);
@@ -3958,6 +3987,27 @@ error_t handleApiToniesCustomJsonRename(HttpConnection *connection, const char_t
     }
 
     error_t saveError = saveToniesCustomJsonRoot(configDir, root, message, sizeof(message));
+    if (saveError == NO_ERROR)
+    {
+        /* Keep stable copies because requestJson will be freed before optional content update. */
+        fromModelCopy = strdup(fromModel->valuestring);
+        toModelCopy = strdup(toModel->valuestring);
+        if (fromModelCopy == NULL || toModelCopy == NULL)
+        {
+            if (fromModelCopy != NULL)
+            {
+                osFreeMem(fromModelCopy);
+                fromModelCopy = NULL;
+            }
+            if (toModelCopy != NULL)
+            {
+                osFreeMem(toModelCopy);
+                toModelCopy = NULL;
+            }
+            saveError = ERROR_OUT_OF_MEMORY;
+            osStrcpy(message, "Out of memory");
+        }
+    }
     cJSON_Delete(root);
     cJSON_Delete(requestJson);
     if (saveError != NO_ERROR)
@@ -3965,9 +4015,19 @@ error_t handleApiToniesCustomJsonRename(HttpConnection *connection, const char_t
         return writeApiStatusText(connection, (saveError == ERROR_OUT_OF_MEMORY) ? 500 : 400, message);
     }
 
-    if (updateContentJson && client_ctx != NULL && client_ctx->settings != NULL)
+    if (updateContentJson && client_ctx != NULL && client_ctx->settings != NULL &&
+        fromModelCopy != NULL && toModelCopy != NULL)
     {
-        updateContentJsonFilesForRename(fromModel->valuestring, toModel->valuestring, client_ctx->settings);
+        /* Use default settings for content dir iteration to avoid overlay-specific path issues */
+        updateContentJsonFilesForRename(fromModelCopy, toModelCopy, get_settings());
+    }
+    if (fromModelCopy != NULL)
+    {
+        osFreeMem(fromModelCopy);
+    }
+    if (toModelCopy != NULL)
+    {
+        osFreeMem(toModelCopy);
     }
 
     return writeApiStatusText(connection, 200, "OK");

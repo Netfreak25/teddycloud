@@ -31,4 +31,3 @@ fake-server-tb2/*
 # Dev sandbox runtime data (make dev-sandbox-setup)
 /dev-sandbox/run/
 /dev-sandbox/.teddycloud-native.pid
-

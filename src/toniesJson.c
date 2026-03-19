@@ -295,22 +295,18 @@ void tonies_readJson(char *source, toniesJson_item_t **retCache, size_t *retCoun
 
         cJSON *toniesJson = cJSON_ParseWithLengthOpts(data, fileSize, 0, 0);
         cJSON *tonieJson;
-        osFreeMem(data);
         if (toniesJson == NULL)
         {
+            osFreeMem(data);
             if (fileSize > 0)
             {
-                const char *error_ptr = cJSON_GetErrorPtr();
                 TRACE_ERROR("Json parse error\r\n");
-                if (error_ptr != NULL)
-                {
-                    // TRACE_ERROR(" before: %s\r\n", error_ptr); //TODO is crashing
-                }
             }
             cJSON_Delete(toniesJson);
         }
         else
         {
+            osFreeMem(data);
             size_t line = 0;
             toniesCount = cJSON_GetArraySize(toniesJson);
             toniesCache = osAllocMem(toniesCount * sizeof(toniesJson_item_t));
