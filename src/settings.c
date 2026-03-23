@@ -1095,10 +1095,6 @@ static error_t settings_load_ovl(bool overlay)
                     Settings_Overlay[i].frontend.use_revvox_flasher = true;
                     Settings_Overlay[i].encode.use_frontend = true;
                 }
-                if (Settings_Overlay[i].configVersion < 16)
-                {
-                    Settings_Overlay[i].core.file_upload_timeout_ms = 120000;
-                }
             }
             mutex_unlock(MUTEX_SETTINGS);
             settings_save();
