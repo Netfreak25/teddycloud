@@ -88,6 +88,7 @@ error_t handleSecMitDomain(HttpConnection *connection, const char_t *uri, const 
         "daf5880dbf7f73bde5d3287d4be22c8e5c1fba21", // 16ax
         "0e71920910bd10d50c22d2494892085d9eb7d7e4", // kirner
         "1ed20761da4be8801c8a8dc1abd95b7c62db4e87", // t861
+        "7ee274a4722145a936eaa7dbc1f6f66749758463", // flks
         //"b26f5cd0a1a9845fd5bb8fba7a48b0b3d011ac07"  // dev
     };
     size_t numHashes = sizeof(hashes) / sizeof(hashes[0]);

@@ -125,7 +125,7 @@ static void option_map_init(uint8_t settingsId)
     OPTION_TREE_DESC("security_mit", "Security mitigation", LEVEL_EXPERT)
     OPTION_BOOL("security_mit.warnAccess", &settings->security_mit.warnAccess, TRUE, "Warning on unwanted access", "If teddyCloud detects unusal access, warn on frontend until restart. (See on*)", LEVEL_EXPERT)
     OPTION_BOOL("security_mit.lockAccess", &settings->security_mit.lockAccess, TRUE, "Lock on unwanted access", "If teddyCloud detects a unusal access, lock frontend until restart. (See on*)", LEVEL_EXPERT)
-    OPTION_BOOL("security_mit.httpsOnly", &settings->security_mit.httpsOnly, TRUE, "On HTTPS only", "Lock/Warn on HTTPS port only.", LEVEL_EXPERT)
+    OPTION_BOOL("security_mit.httpsOnly", &settings->security_mit.httpsOnly, FALSE, "On HTTPS only", "Lock/Warn on HTTPS port only.", LEVEL_EXPERT)
     OPTION_BOOL("security_mit.onBlacklistDomain", &settings->security_mit.onBlacklistDomain, TRUE, "Detect blacklist domains", "Lock/Warn, if domain is known to be public.", LEVEL_EXPERT)
     OPTION_BOOL("security_mit.onCrawler", &settings->security_mit.onCrawler, TRUE, "Detect crawlers", "Lock/Warn, if crawler is detected (User-Agent).", LEVEL_EXPERT)
     // OPTION_BOOL("security_mit.onExternal", &settings->security_mit.onExternal, TRUE, "Detect external access", "Lock/Warn, if external access is detected.", LEVEL_EXPERT)
@@ -1102,6 +1102,10 @@ static error_t settings_load_ovl(bool overlay)
                 {
                     Settings_Overlay[i].frontend.use_revvox_flasher = true;
                     Settings_Overlay[i].encode.use_frontend = true;
+                }
+                if (Settings_Overlay[i].configVersion < 16)
+                {
+                    Settings_Overlay[i].security_mit.httpsOnly = false;
                 }
             }
             mutex_unlock(MUTEX_SETTINGS);
