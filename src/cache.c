@@ -3,15 +3,9 @@
 #include "cache.h"
 #include "web.h"
 #include "fs_port.h"
-#include "fs_ext.h"
 #include "os_port.h"
 #include "server_helpers.h"
 #include "hash/sha256.h" // for sha256Update, sha256Final, sha256Init
-
-#define CACHE_INDEX_FILENAME "cache_index.txt"
-#define CACHE_INDEX_SEP '\t'
-
-static void cache_index_append(const char *cached_url, const char *original_url);
 
 cache_entry_t cache_table = {.next = NULL, .hash = 0, .original_url = NULL, .cached_url = NULL, .file_path = NULL};
 uint32_t cache_entries = 0;
@@ -205,161 +199,8 @@ cache_entry_t *cache_add(const char *url)
 
     cache_entry_add(entry);
 
-    cache_index_append(entry->cached_url, entry->original_url);
-
     osFreeMem(extension);
 
-    return entry;
-}
-
-static void cache_index_append(const char *cached_url, const char *original_url)
-{
-    const char *cachePath = get_settings()->internal.cachedirfull;
-    if (!cachePath || !cached_url || !original_url)
-        return;
-
-    char *indexPath = custom_asprintf("%s%c%s", cachePath, PATH_SEPARATOR, CACHE_INDEX_FILENAME);
-    if (!indexPath)
-        return;
-
-    FsFile *f = fsOpenFileEx(indexPath, "a");
-    osFreeMem(indexPath);
-    if (!f)
-        return;
-
-    size_t lineLen = osStrlen(cached_url) + 1 + osStrlen(original_url) + 1;
-    char *line = osAllocMem(lineLen + 1);
-    if (!line)
-    {
-        fsCloseFile(f);
-        return;
-    }
-    osSnprintf(line, lineLen + 1, "%s%c%s\n", cached_url, CACHE_INDEX_SEP, original_url);
-    fsWriteFile(f, line, osStrlen(line));
-    osFreeMem(line);
-    fsCloseFile(f);
-}
-
-bool cache_index_lookup(const char *cached_url, char **original_url_out)
-{
-    if (!cached_url || !original_url_out)
-        return false;
-    *original_url_out = NULL;
-
-    const char *cachePath = get_settings()->internal.cachedirfull;
-    if (!cachePath || !fsDirExists(cachePath))
-        return false;
-
-    char *indexPath = custom_asprintf("%s%c%s", cachePath, PATH_SEPARATOR, CACHE_INDEX_FILENAME);
-    if (!indexPath)
-        return false;
-
-    if (!fsFileExists(indexPath))
-    {
-        osFreeMem(indexPath);
-        return false;
-    }
-
-    uint32_t fileSize32 = 0;
-    if (fsGetFileSize(indexPath, &fileSize32) != NO_ERROR)
-    {
-        osFreeMem(indexPath);
-        return false;
-    }
-    size_t fileSize = fileSize32;
-
-    FsFile *f = fsOpenFile(indexPath, FS_FILE_MODE_READ);
-    osFreeMem(indexPath);
-    if (!f)
-        return false;
-    if (fileSize == 0 || fileSize > 1024 * 1024)
-    {
-        fsCloseFile(f);
-        return false;
-    }
-
-    char *data = osAllocMem(fileSize + 1);
-    if (!data)
-    {
-        fsCloseFile(f);
-        return false;
-    }
-
-    size_t pos = 0;
-    size_t sizeRead = 0;
-    while (pos < fileSize && fsReadFile(f, &data[pos], fileSize - pos, &sizeRead) == NO_ERROR && sizeRead > 0)
-    {
-        pos += sizeRead;
-    }
-    fsCloseFile(f);
-    data[pos] = '\0';
-
-    char *found = NULL;
-    char *line = data;
-    while (line && *line)
-    {
-        char *sep = osStrchr(line, CACHE_INDEX_SEP);
-        char *eol = osStrchr(line, '\n');
-        if (!sep || (eol && sep > eol))
-        {
-            line = eol ? eol + 1 : NULL;
-            continue;
-        }
-        *sep = '\0';
-        if (osStrcmp(line, cached_url) == 0)
-        {
-            char *orig = sep + 1;
-            if (eol)
-                *eol = '\0';
-            osFreeMem(found);
-            found = strdup(orig);
-        }
-        line = eol ? eol + 1 : NULL;
-    }
-    osFreeMem(data);
-    if (found)
-    {
-        *original_url_out = found;
-        return true;
-    }
-    return false;
-}
-
-cache_entry_t *cache_create_redirect_entry(const char *cached_url, const char *original_url)
-{
-    if (!cached_url || !original_url)
-        return NULL;
-
-    const char *cache_pos = osStrstr(cached_url, "/cache/");
-    if (!cache_pos || osStrlen(cache_pos) < 8 + osStrlen("/cache/"))
-        return NULL;
-    cache_pos += osStrlen("/cache/");
-
-    char hash_str[9] = {0};
-    osStrncpy(hash_str, cache_pos, 8);
-    uint32_t hash = (uint32_t)osStrtoul(hash_str, NULL, 16);
-
-    cache_entry_t *entry = osAllocMem(sizeof(cache_entry_t));
-    if (!entry)
-        return NULL;
-
-    entry->next = NULL;
-    entry->hash = hash;
-    entry->statusCode = 0;
-    entry->exists = false;
-    entry->original_url = strdup(original_url);
-    entry->cached_url = strdup(cached_url);
-    entry->file_path = NULL;
-
-    if (!entry->original_url || !entry->cached_url)
-    {
-        osFreeMem((void *)entry->original_url);
-        osFreeMem((void *)entry->cached_url);
-        osFreeMem(entry);
-        return NULL;
-    }
-
-    cache_entry_add(entry);
     return entry;
 }
 
@@ -512,43 +353,4 @@ cache_entry_t *cache_fetch_by_path(const char *path)
 
     TRACE_ERROR("No cache entry found for URI: %s\r\n", path);
     return NULL;
-}
-
-bool cache_get_file_path_for_uri(const char *uri, char **file_path_out)
-{
-    if (!uri || !file_path_out)
-        return false;
-    *file_path_out = NULL;
-
-    const char *cache_pos = osStrstr(uri, "/cache/");
-    if (!cache_pos)
-        return false;
-    cache_pos += osStrlen("/cache/");
-
-    if (osStrlen(cache_pos) < 9) /* min: 8-char hash + dot + 1-char ext */
-        return false;
-
-    /* Reject path traversal: filename must not contain / or \ */
-    for (const char *p = cache_pos; *p; p++)
-    {
-        if (*p == '/' || *p == '\\')
-            return false;
-    }
-
-    const char *cachePath = get_settings()->internal.cachedirfull;
-    if (!cachePath || !fsDirExists(cachePath))
-        return false;
-
-    char *path = custom_asprintf("%s%c%s", cachePath, PATH_SEPARATOR, cache_pos);
-    if (!path)
-        return false;
-
-    if (!fsFileExists(path))
-    {
-        osFreeMem(path);
-        return false;
-    }
-
-    *file_path_out = path;
-    return true;
 }

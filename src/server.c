@@ -249,26 +249,8 @@ error_t handleCacheDownload(HttpConnection *connection, const char_t *uri, const
     cache_entry_t *entry = cache_fetch_by_path(uri);
     if (!entry)
     {
-        /* Try persistent index (e.g. cache disabled, entry not in memory) */
-        char *original_url = NULL;
-        if (cache_index_lookup(uri, &original_url))
-        {
-            entry = cache_create_redirect_entry(uri, original_url);
-            osFreeMem(original_url);
-        }
-        if (!entry)
-        {
-            /* Fallback: index missing but file exists on disk (e.g. index lost) */
-            char *file_path = NULL;
-            if (cache_get_file_path_for_uri(uri, &file_path) && file_path)
-            {
-                error_t err = httpSendResponseUnsafe(connection, uri, file_path);
-                osFreeMem(file_path);
-                return err;
-            }
-            TRACE_ERROR("Failed to find cache entry\r\n");
-            return ERROR_NOT_FOUND;
-        }
+        TRACE_ERROR("Failed to find cache entry\r\n");
+        return ERROR_NOT_FOUND;
     }
 
     if (!entry->exists)

@@ -185,30 +185,10 @@ void addToniesJsonInfoJson(toniesJson_item_t *item, char *fallbackModel, cJSON *
     cJSON_AddItemToObject(tonieInfoJson, "tracks", tracksJson);
     if (item != NULL)
     {
-        const char *pic = item->picture;
-        char *pic_resolved = NULL;
-        if (pic && osStrstr(pic, "/cache/") && !settings_get_bool("tonie_json.cache_images"))
-        {
-            /* Resolve /cache/xxx to original_url so frontend can load directly when cache disabled */
-            cache_entry_t *ce = cache_fetch_by_cached_url(pic);
-            if (ce && ce->original_url)
-                pic = ce->original_url;
-            else if (cache_index_lookup(pic, &pic_resolved))
-                pic = pic_resolved;
-        }
-        else if (pic && settings_get_bool("tonie_json.cache_images") &&
-                 (osStrstr(pic, "http://") || osStrstr(pic, "https://")))
-        {
-            /* Resolve original_url to /cache/xxx when cache enabled (use local cache if available) */
-            cache_entry_t *ce = cache_fetch_by_url(pic);
-            if (ce && ce->cached_url)
-                pic = ce->cached_url;
-        }
         cJSON_AddStringToObject(tonieInfoJson, "model", item->model);
         cJSON_AddStringToObject(tonieInfoJson, "series", item->series);
         cJSON_AddStringToObject(tonieInfoJson, "episode", item->episodes);
-        cJSON_AddStringToObject(tonieInfoJson, "picture", pic ? pic : "/img_unknown.png");
-        osFreeMem(pic_resolved);
+        cJSON_AddStringToObject(tonieInfoJson, "picture", item->picture);
         cJSON_AddStringToObject(tonieInfoJson, "language", item->language);
         for (size_t i = 0; i < item->tracks_count; i++)
         {
@@ -2542,52 +2522,6 @@ error_t handleApiToniesCustomJson(HttpConnection *connection, const char_t *uri,
         return httpWriteResponseString(connection, "[]", false);
     }
 
-    /* Add cachePic = display-ready URL. Transform only when needed; else use pic. */
-    if (cJSON_IsArray(root))
-    {
-        bool cacheOn = settings_get_bool("tonie_json.cache_images");
-        int count = cJSON_GetArraySize(root);
-        for (int i = 0; i < count; i++)
-        {
-            cJSON *entry = cJSON_GetArrayItem(root, i);
-            if (!cJSON_IsObject(entry))
-                continue;
-
-            cJSON *picItem = cJSON_GetObjectItemCaseSensitive(entry, "pic");
-            const char *pic = (picItem && cJSON_IsString(picItem) && picItem->valuestring) ? picItem->valuestring : NULL;
-            if (!pic || osStrlen(pic) == 0)
-                continue;
-
-            cJSON_DeleteItemFromObjectCaseSensitive(entry, "cachePic");
-
-            const char *display = pic; /* default: use pic as-is */
-            char *resolved = NULL;
-
-            if (osStrstr(pic, "/cache/"))
-            {
-                if (cacheOn)
-                    display = pic; /* already local */
-                else if (cache_index_lookup(pic, &resolved) && resolved)
-                    display = resolved;
-            }
-            else if (osStrstr(pic, "http://") || osStrstr(pic, "https://"))
-            {
-                if (cacheOn)
-                {
-                    cache_entry_t *ce = cache_fetch_by_url(pic);
-                    if (!ce)
-                        ce = cache_add(pic);
-                    if (ce && ce->cached_url)
-                        display = ce->cached_url;
-                }
-            }
-
-            cJSON_AddStringToObject(entry, "cachePic", display);
-            if (resolved)
-                osFreeMem(resolved);
-        }
-    }
-
     char *jsonString = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (jsonString == NULL)
@@ -3095,18 +3029,6 @@ static error_t normalizeToniesCustomJsonForStorage(cJSON *root, char *message, s
             {
                 osSnprintf(message, messageSize, "Failed to normalize field '%s' at index %" PRIuSIZE, stringFields[fi], i);
                 return normalizeFieldError;
-            }
-        }
-
-        /* Persist original_url instead of /cache/xxx so images work when cache disabled */
-        cJSON *picNode = cJSON_GetObjectItemCaseSensitive(entry, "pic");
-        if (picNode && cJSON_IsString(picNode) && picNode->valuestring && osStrstr(picNode->valuestring, "/cache/"))
-        {
-            char *original_url = NULL;
-            if (cache_index_lookup(picNode->valuestring, &original_url))
-            {
-                cJSON_ReplaceItemInObjectCaseSensitive(entry, "pic", cJSON_CreateString(original_url));
-                osFreeMem(original_url);
             }
         }
 
