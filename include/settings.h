@@ -325,6 +325,7 @@ typedef struct
     char *bind_ip;
 
     uint32_t http_client_timeout;
+    uint32_t file_upload_timeout_ms;
 
     bool new_webgui_as_default;
 
@@ -373,6 +374,7 @@ typedef struct
 {
     bool cache_images;
     bool cache_preload;
+    uint32_t custom_backup_keep;
 } settings_tonie_json_t;
 
 typedef struct
