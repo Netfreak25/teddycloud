@@ -1,7 +1,4 @@
 {
-  "mounts": [
-    "source=${localEnv:HOME}/.gitconfig,target=/root/.gitconfig,type=bind"
-  ],
   // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
   //"image": "mcr.microsoft.com/devcontainers/javascript-node:0-18",
   "build": {
@@ -16,15 +13,13 @@
       "extensions": [
         "ms-vscode.makefile-tools",
         "ms-azuretools.vscode-docker",
-        "ms-vscode.cpptools-extension-pack",
-        "kylinideteam.cppdebug"
+        "ms-vscode.cpptools-extension-pack"
       ]
     }
   },
   "forwardPorts": [
     80,
-    443,
-    8443
+    443
   ],
   "portsAttributes": {
     "80": {
@@ -35,10 +30,6 @@
       "label": "Teddycloud boxinterface",
       "onAutoForward": "notify"
     },
-    "8443": {
-      "label": "Teddycloud HTTPS web",
-      "onAutoForward": "notify"
-    }
   }
   //"postCreateCommand": "yarn install"
   // "remoteUser": "root"

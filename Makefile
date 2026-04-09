@@ -15,9 +15,6 @@ EXECUTABLE     = $(BIN_DIR)/teddycloud$(EXEC_EXT)
 LINK_LO_FILE   = $(EXECUTABLE).lo
 PLATFORM      ?= linux
 OPTI_LEVEL    ?= -O2
-TEST_API_HTTP_PORT ?= 18080
-TEST_API_HTTPS_PORT ?= 18443
-TEST_API_HTTPS_API_PORT ?= 18444
 
 ifeq ($(OS),Windows_NT)
 	SHELL_ENV ?= cmd
@@ -111,7 +108,7 @@ endif
 build_gitTagPrefix:=$(firstword $(subst _, ,$(build_gitTag)))
 ifeq ($(build_gitTagPrefix),tc)
 	build_version:=$(subst ${build_gitTagPrefix}_,,${build_gitTag})
-	CFLAGS_VERSION+=-DBUILD_VERSION=\"${build_version}\"
+	CFLAGS_VERSION+=-DBUILD_VERSION=\"${build_version}\" 
 endif
 
 WEB_GIT_DIRTY ?= 1
@@ -129,17 +126,17 @@ web_version:=vX.X.X
 CFLAGS_VERSION+=-DWEB_GIT_IS_DIRTY=${web_gitDirty} -DWEB_GIT_DATETIME=\"${web_gitDateTime}\" -DWEB_RAW_DATETIME=\"${web_rawDateTime}\" -DWEB_GIT_SHORT_SHA=\"${web_gitShortSha}\" -DWEB_GIT_SHA=\"${web_gitSha}\" -DWEB_GIT_TAG=\"${web_gitTag}\"
 ifeq ($(web_gitTagPrefix),tcw)
 	web_version:=$(subst ${web_gitTagPrefix}_,,${web_gitTag})
-	CFLAGS_VERSION+=-Dweb_VERSION=\"${web_version}\"
+	CFLAGS_VERSION+=-Dweb_VERSION=\"${web_version}\" 
 endif
 
 ifeq ($(OS),Windows_NT)
 	SHELL       = cmd.exe
 	ECHO        = echo
-	MKDIR       = mkdir
+	MKDIR       = mkdir 
 	RM          = del
 	RM_R        = rd /S /Q
 	CP          = copy
-	CP_R        = xcopy /E /I
+	CP_R        = xcopy /E /I 
 	TO_TRASH    = >NUL 2>NUL
 	# special assignment to have only the backslash in the variable
 	SEP         = \$(strip)
@@ -156,7 +153,7 @@ endif
 
 
 ifeq ($(PLATFORM),linux)
-	EXEC_EXT       =
+	EXEC_EXT       =  
 	LINK_OUT_OPT   = -o $@
 	CC_OUT_OPT     = -o
 	CC_IN_OPT      = -c
@@ -190,12 +187,12 @@ ifeq ($(PLATFORM),windows)
 endif
 
 ## posix/linux specific headers/sources
-HEADERS_linux =
-INCLUDES_linux =
+HEADERS_linux = 
+INCLUDES_linux = 
 SOURCES_linux = \
 	src/platform/platform_$(PLATFORM).c \
 	src/cyclone/common/os_port_posix.c \
-	cyclone/common/fs_port_posix.c
+	cyclone/common/fs_port_posix.c 
 CFLAGS_linux += -Wall
 ifneq ($(NO_WARN_FAIL),1)
 	CFLAGS_linux += -Werror -Wno-error=format-overflow -Wno-error=stringop-truncation -Wno-error=maybe-uninitialized -Wno-error=stringop-overflow= -Wno-error=cpp
@@ -218,14 +215,14 @@ endif
 CFLAGS_linux += $(OPTI_LEVEL)
 
 ## win32 specific headers/sources
-HEADERS_windows =
+HEADERS_windows = 
 INCLUDES_windows = \
 	-Isrc/platform/
 SOURCES_windows = \
 	src/platform/platform_$(PLATFORM).c\
 	src/cyclone/common/os_port_windows.c \
 	src/cyclone/common/fs_port_windows.c \
-	src/platform/getopt.c
+	src/platform/getopt.c 
 LFLAGS_windows = /DEBUG:FULL
 CFLAGS_windows = /DEBUG:FULL /Zi /nologo -DWIN32 /D_UNICODE
 CFLAGS_windows += -DFFMPEG_DECODING
@@ -295,7 +292,7 @@ CJSON_SOURCES = \
 
 CJSON_HEADERS = \
 	cJSON/cJSON.h \
-	cJSON/cJSON_Utils.h
+	cJSON/cJSON_Utils.h 
 
 LIBOGG_SOURCES = \
 	ogg/src/framing.c \
@@ -313,7 +310,7 @@ LIBOPUS_SOURCES = \
 	$(addprefix opus/,$(SILK_SOURCES_FLOAT)) \
 	$(addprefix opus/,$(CELT_SOURCES)) \
 	$(addprefix opus/,$(OPUS_SOURCES)) \
-	$(addprefix opus/,$(OPUS_SOURCES_FLOAT))
+	$(addprefix opus/,$(OPUS_SOURCES_FLOAT)) 
 
 LIBOPUS_SOURCES := \
 	$(filter-out \
@@ -499,7 +496,7 @@ else
 	QUIET=@
 endif
 
-all: check_dependencies submodules web build
+all: check_dependencies submodules web build 
 
 echo_info:
 	$(QUIET)$(ECHO) '[ ${GREEN}PLAT${NC} ] ${CYAN}$(build_platform)${NC}'
@@ -507,7 +504,7 @@ echo_info:
 	$(QUIET)$(ECHO) '[ ${GREEN}ARCH${NC} ] ${CYAN}$(build_arch)${NC}'
 	$(QUIET)$(ECHO) '[ ${GREEN}BITS${NC} ] ${CYAN}$(build_arch_bits)${NC}'
 
-build: echo_info $(EXECUTABLE)
+build: echo_info $(EXECUTABLE)	
 
 ifeq ($(OS),Windows_NT)
 .PHONY: check_dependencies
@@ -543,7 +540,7 @@ $(LINK_LO_FILE): $$(dir $$@)
 
 workdirs: certs/server/ certs/client/ config/ data/www/ data/content/ data/library/ data/www/web/ data/firmware/ data/cache/
 	$(QUIET)$(ECHO) '[ ${YELLOW}DIRS${NC}  ] ${CYAN}$@${NC}'
-	$(QUIET)$(CP_R) $(subst /,$(SEP),$(CONTRIB_DIR)/data/www/*) $(subst /,$(SEP),data/www/)
+	$(QUIET)$(CP_R) $(subst /,$(SEP),$(CONTRIB_DIR)/data/www/*) $(subst /,$(SEP),data/www/) 
 
 .SECONDEXPANSION:
 $(EXECUTABLE): $(LINK_LO_FILE) $(OBJECTS) $(HEADERS) $(THIS_MAKEFILE) workdirs | $$(dir $$@)
@@ -649,22 +646,22 @@ preinstall: clean build web_copy $(INSTALL_DIR)/ $(PREINSTALL_DIR)/
 		&& find . -name ".gitkeep" -type f -delete \
 		&& cd -
 
-ifeq ($(OS),Windows_NT)
-web:
-web_copy:
+ifeq ($(OS),Windows_NT)	
+web: 
+web_copy: 
 else
 web_version:
 
-web_clean:
+web_clean: 
 	$(QUIET)$(ECHO) '[ ${GREEN}WEB${NC}  ] Clean TeddyCloud Web'
 	$(RM_R) $(CONTRIB_DIR)/$(WEB_DIR)
-
+		
 web: web_clean
 	$(QUIET)$(ECHO) '[ ${GREEN}WEB${NC}  ] Build TeddyCloud Web'
 	$(QUIET) $(MKDIR) $(CONTRIB_DIR)/$(WEB_DIR)/
 	$(QUIET)cd $(WEB_SRC_DIR) \
-		&& PATH="/usr/bin:/bin:/usr/local/bin:$$PATH" npm install \
-		&& PATH="/usr/bin:/bin:/usr/local/bin:$$PATH" npm run build \
+		&& npm install \
+		&& npm run build \
 		&& $(CP_R) $(WEB_BUILD_DIR)/* ../$(CONTRIB_DIR)/$(WEB_DIR)/ \
 		&& cd -
 	$(QUIET)$(ECHO) '[ ${GREEN}WEB${NC}  ] Generate TeddyCloud Web version info'
@@ -674,12 +671,12 @@ web: web_clean
 			(echo '  "$(var)": "'${$(var)}'",';) >> $(CONTRIB_DIR)/$(WEB_DIR)/web_version.json; \
 		) \
 	)
-	$(QUIET)printf '  "_eof":""\n}\n' >> $(CONTRIB_DIR)/$(WEB_DIR)/web_version.json
+	$(QUIET)echo "  \"_eof\":\"\"\n}" >> $(CONTRIB_DIR)/$(WEB_DIR)/web_version.json
 
-web_copy:
+web_copy: 
 	$(QUIET)$(ECHO) '[ ${GREEN}WEB${NC}  ] Copy TeddyCloud Web'
 	$(QUIET) $(MKDIR) $(PREINSTALL_DIR)/$(WEB_DIR)/
-	$(QUIET) $(CP_R) $(CONTRIB_DIR)/$(WEB_DIR)/* $(PREINSTALL_DIR)/$(WEB_DIR)/
+	$(QUIET) $(CP_R) $(CONTRIB_DIR)/$(WEB_DIR)/* $(PREINSTALL_DIR)/$(WEB_DIR)/ 
 endif
 
 zip: preinstall
@@ -720,87 +717,3 @@ cppcheck:
 	$(QUIET)$(ECHO)  "[ ${CYAN}CHK${NC} ] Running cppcheck"
 	cppcheck -j6 --enable=all --inconclusive --std=c99 --language=c --platform=unspecified --report-progress --suppress=missingIncludeSystem --xml --output-file=cppcheck.xml $(wildcard $(SRC_DIR)/*.c) $(INCLUDES) -D GPL_LICENSE_TERMS_ACCEPTED -D TRACE_NOPATH_FILE
 	cppcheck-htmlreport --file=cppcheck.xml --report-dir=cppcheck
-
-# Dev sandbox: local run with mock data (Docker or native)
-TEST_DATA_DST = dev-sandbox/run
-DEV_SANDBOX_NATIVE_PID = dev-sandbox/.teddycloud-native.pid
-
-.PHONY: dev-sandbox-setup dev-sandbox-up dev-sandbox-down dev-sandbox-sync-web dev-sandbox-restart
-dev-sandbox-setup:
-	$(QUIET)bash dev-sandbox/setup.sh
-
-dev-sandbox-up: build web
-	$(QUIET)if [ ! -d $(TEST_DATA_DST)/config ]; then $(MAKE) dev-sandbox-setup; fi
-	$(QUIET)if command -v docker >/dev/null 2>&1; then \
-		$(ECHO) "[ ${CYAN}DEV${NC}   ] Start dev-sandbox (Docker)"; \
-		cd dev-sandbox && docker compose -f docker-compose.yaml up -d teddycloud-test; \
-	else \
-		$(ECHO) "[ ${CYAN}DEV${NC}   ] Start dev-sandbox (native)"; \
-		bash dev-sandbox/start-native.sh; \
-	fi
-
-dev-sandbox-down:
-	$(QUIET)if [ -f $(DEV_SANDBOX_NATIVE_PID) ]; then \
-		kill $$(cat $(DEV_SANDBOX_NATIVE_PID)) 2>/dev/null || true; \
-		$(RM) $(DEV_SANDBOX_NATIVE_PID); \
-	elif command -v docker >/dev/null 2>&1; then \
-		cd dev-sandbox && docker compose -f docker-compose.yaml down; \
-	fi
-
-dev-sandbox-sync-web:
-	$(QUIET)if [ ! -d $(TEST_DATA_DST)/config ]; then $(MAKE) dev-sandbox-setup; fi
-	$(QUIET)if [ -d $(CONTRIB_DIR)/$(WEB_DIR) ] && [ -d $(TEST_DATA_DST)/data/www ]; then \
-		rm -rf $(TEST_DATA_DST)/data/www/web; \
-		$(MKDIR) $(TEST_DATA_DST)/data/www/web; \
-		$(CP_R) $(CONTRIB_DIR)/$(WEB_DIR)/. $(TEST_DATA_DST)/data/www/web/; \
-	fi
-
-dev-sandbox-restart: dev-sandbox-down
-	$(QUIET)$(MAKE) build web && $(MAKE) dev-sandbox-sync-web || ( $(ECHO) "[ ${RED}ERR${NC}  ] Rebuild failed."; exit 1 )
-	$(QUIET)if command -v docker >/dev/null 2>&1; then \
-		cd dev-sandbox && docker compose -f docker-compose.yaml build --no-cache teddycloud-test && docker compose -f docker-compose.yaml --profile test up -d teddycloud-test; \
-	else \
-		$(MAKE) dev-sandbox-up; \
-	fi
-
-.PHONY: test_api_custom_json
-test_api_custom_json:
-	$(QUIET)$(ECHO) "[ ${CYAN}TEST${NC} ] Run custom JSON API tests against running server"
-	$(QUIET)TEDDYCLOUD_BASE_URL=http://127.0.0.1:80 python3 tests/test_tonies_custom_json_api.py
-
-.PHONY: test_api_custom_json_with_server
-test_api_custom_json_with_server: build
-	$(QUIET)$(ECHO) "[ ${CYAN}TEST${NC} ] Start server, run custom JSON API tests, stop server"
-	$(QUIET)python3 -c 'import socket,sys; ports=[$(TEST_API_HTTP_PORT),$(TEST_API_HTTPS_PORT),$(TEST_API_HTTPS_API_PORT)]; used=[]; [used.append(p) for p in ports if (lambda s: (s.settimeout(0.2), s.connect_ex(("127.0.0.1", p)), s.close()))(socket.socket(socket.AF_INET, socket.SOCK_STREAM))[1] == 0]; sys.exit(1 if used else 0)' || { \
-		$(ECHO) "[ ${RED}ERR${NC}  ] One or more test ports are already in use: $(TEST_API_HTTP_PORT), $(TEST_API_HTTPS_PORT), $(TEST_API_HTTPS_API_PORT)"; \
-		$(ECHO) "[ ${RED}ERR${NC}  ] Please free them manually first. Example:"; \
-		$(ECHO) "             ps -ef | awk '/teddycloud/ && !/awk/ {print}'"; \
-		$(ECHO) "             kill <PID>"; \
-		exit 1; \
-	}
-	$(QUIET)tmp_log=/tmp/teddycloud_test_api_custom_json.log; \
-	srv_pid_file=/tmp/teddycloud_test_api_custom_json.pid; \
-	./bin/teddycloud --config-set "core.server.http_port=$(TEST_API_HTTP_PORT),core.server.https_web_port=$(TEST_API_HTTPS_PORT),core.server.https_api_port=$(TEST_API_HTTPS_API_PORT)" > "$$tmp_log" 2>&1 & \
-	srv_pid=$$!; \
-	echo $$srv_pid > "$$srv_pid_file"; \
-	trap 'kill $$srv_pid >/dev/null 2>&1 || true; rm -f "$$srv_pid_file"' EXIT INT TERM; \
-	ready=0; \
-	for i in $$(seq 1 60); do \
-		if ! kill -0 $$srv_pid >/dev/null 2>&1; then \
-			$(ECHO) "[ ${RED}ERR${NC}  ] Test server exited during startup. Log:"; \
-			sed -n '1,140p' "$$tmp_log"; \
-			exit 1; \
-		fi; \
-		http_code=$$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$(TEST_API_HTTP_PORT)/web/" || true); \
-		if [ "$$http_code" = "200" ]; then \
-			ready=1; \
-			break; \
-		fi; \
-		sleep 0.2; \
-	done; \
-	if [ "$$ready" != "1" ]; then \
-		$(ECHO) "[ ${RED}ERR${NC}  ] Test server did not become ready on port $(TEST_API_HTTP_PORT). Log:"; \
-		sed -n '1,140p' "$$tmp_log"; \
-		exit 1; \
-	fi; \
-	TEDDYCLOUD_BASE_URL=http://127.0.0.1:$(TEST_API_HTTP_PORT) python3 tests/test_tonies_custom_json_api.py

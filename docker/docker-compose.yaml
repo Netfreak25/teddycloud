@@ -17,7 +17,6 @@ services:
       - cache:/teddycloud/data/cache #img cache for content images
       - plugins:/teddycloud/data/www/plugins #location to store web plugins for teddyCloud
     restart: unless-stopped
-
 volumes:
   certs:
   config:
