@@ -733,7 +733,7 @@ dev-sandbox-up: build web
 	$(QUIET)if [ ! -d $(TEST_DATA_DST)/config ]; then $(MAKE) dev-sandbox-setup; fi
 	$(QUIET)if command -v docker >/dev/null 2>&1; then \
 		$(ECHO) "[ ${CYAN}DEV${NC}   ] Start dev-sandbox (Docker)"; \
-		cd dev-sandbox && docker compose -f docker-compose.yaml up -d teddycloud-test; \
+		cd dev-sandbox && docker compose -f docker-compose.yaml up -d teddycloud; \
 	else \
 		$(ECHO) "[ ${CYAN}DEV${NC}   ] Start dev-sandbox (native)"; \
 		bash dev-sandbox/start-native.sh; \
@@ -758,7 +758,7 @@ dev-sandbox-sync-web:
 dev-sandbox-restart: dev-sandbox-down
 	$(QUIET)$(MAKE) build web && $(MAKE) dev-sandbox-sync-web || ( $(ECHO) "[ ${RED}ERR${NC}  ] Rebuild failed."; exit 1 )
 	$(QUIET)if command -v docker >/dev/null 2>&1; then \
-		cd dev-sandbox && docker compose -f docker-compose.yaml build --no-cache teddycloud-test && docker compose -f docker-compose.yaml --profile test up -d teddycloud-test; \
+		cd dev-sandbox && docker compose -f docker-compose.yaml build --no-cache teddycloud && docker compose -f docker-compose.yaml up -d teddycloud; \
 	else \
 		$(MAKE) dev-sandbox-up; \
 	fi
