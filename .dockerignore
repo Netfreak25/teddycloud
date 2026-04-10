@@ -14,7 +14,6 @@ config
 bin
 obj
 install
-contrib/data/www/web
 teddycloud_web/dist
 
 # Python / test caches
