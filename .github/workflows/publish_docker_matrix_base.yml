@@ -120,12 +120,13 @@ jobs:
           context: .
           file: ${{ inputs.dockerfile }}
           platforms: ${{ matrix.platform }}
-          # Fork PRs: load locally (can't push to GHCR). All others: push to GHCR.
-          load: ${{ github.event.pull_request.head.repo.fork == true }}
-          push: ${{ github.event.pull_request.head.repo.fork != true }}
-          tags: ${{ github.event.pull_request.head.repo.fork == true && 'teddycloud-test:local' || '' }}
+          # PRs (fork or non-fork): load locally to avoid pushing intermediate digests to GHCR.
+          # Non-PR events (push to branch, tag): push by digest to GHCR for the merge job.
+          load: ${{ github.event_name == 'pull_request' }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ github.event_name == 'pull_request' && 'teddycloud-test:local' || '' }}
           labels: ${{ steps.matrix_meta.outputs.labels }}
-          outputs: ${{ github.event.pull_request.head.repo.fork != true && format('type=image,name={0},push-by-digest=true,name-canonical=true', env.REGISTRY_IMAGE) || '' }}
+          outputs: ${{ github.event_name != 'pull_request' && format('type=image,name={0},push-by-digest=true,name-canonical=true', env.REGISTRY_IMAGE) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
@@ -142,7 +143,7 @@ jobs:
         id: docker-test
         run: |
           docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
-          if [ "${{ github.event.pull_request.head.repo.fork }}" = "true" ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
             docker run -e DOCKER_TEST=1 --platform ${{ matrix.platform }} --name teddyCloud-test teddycloud-test:local
           else
             docker run -e DOCKER_TEST=1 --platform ${{ matrix.platform }} --name teddyCloud-test ${{ env.REGISTRY_IMAGE }}@${{ steps.build.outputs.digest }}
@@ -155,7 +156,7 @@ jobs:
         continue-on-error: ${{ contains(fromJson(inputs.error_platforms), matrix.platform) }}
 
       - name: Export digest
-        if: ${{ github.event.pull_request.head.repo.fork != true && steps.docker-test.outcome == 'success' }}
+        if: ${{ github.event_name != 'pull_request' && steps.docker-test.outcome == 'success' }}
         run: |
           mkdir -p /tmp/digests/${{ github.sha }}
           digest="${{ steps.build.outputs.digest }}"
@@ -179,7 +180,7 @@ jobs:
             TEDDYCLOUD_VERSION=${{ steps.matrix_meta.outputs.version }}
 
       - name: Upload digest
-        if: ${{ github.event.pull_request.head.repo.fork != true && steps.docker-test.outcome == 'success' }}
+        if: ${{ github.event_name != 'pull_request' && steps.docker-test.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
           name: digests-${{ inputs.system }}-${{ steps.platform_strip.outputs.platform }}
