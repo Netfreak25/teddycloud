@@ -57,7 +57,7 @@ void cbrCloudOtaHeader(void *src_ctx, HttpClientContext *cloud_ctx, const char *
                     char *prefix = "attachment;filename=";
                     if (osStrncmp(value, prefix, osStrlen(prefix)) == 0)
                     {
-                        const char *filename = &value[osStrlen(prefix)];
+                        char *filename = (char *)(&value[osStrlen(prefix)]); // Dirty hack
                         // search for PATH_SERPERATOR_LINUX / PATH_SERPERATOR_LINUX and replace with null
                         char *p1 = osStrchr(filename, PATH_SEPARATOR_LINUX);
                         char *p2 = osStrchr(filename, PATH_SEPARATOR_WINDOWS);
