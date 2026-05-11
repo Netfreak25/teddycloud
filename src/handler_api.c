@@ -4546,7 +4546,7 @@ error_t handleApiTagIndex(HttpConnection *connection, const char_t *uri, const c
             }
 
             /* fill rest of reverse UID */
-            osStrncpy(&ruid[8], subEntry.name, 8);
+            osMemcpy(&ruid[8], subEntry.name, 8);
             ruid[16] = '\0';
             for (size_t i = 0; ruid[i] != '\0'; i++)
             {
