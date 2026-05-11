@@ -1838,7 +1838,7 @@ error_t handleApiContentDownload(HttpConnection *connection, const char_t *uri, 
         return NO_ERROR;
     }
 
-    char *json_extension = osStrstr(uri, ".json");
+    char *json_extension = (char *)osStrstr(uri, ".json");
     if (json_extension != NULL)
     {
         *json_extension = '\0';
