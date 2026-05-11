@@ -78,8 +78,8 @@ bool parse_url(const char *url, char **hostname, uint16_t *port, char **uri, Pro
         return false;
     }
 
-    char *port_start = strchr(url, ':');
-    char *path_start = strchr(url, '/');
+    const char *port_start = strchr(url, ':');
+    const char *path_start = strchr(url, '/');
     if (path_start == NULL)
     {
         TRACE_ERROR("URL must contain a path\r\n");
