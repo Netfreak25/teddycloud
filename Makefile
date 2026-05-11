@@ -551,6 +551,9 @@ $(EXECUTABLE): $(LINK_LO_FILE) $(OBJECTS) $(HEADERS) $(THIS_MAKEFILE) workdirs |
 	$(QUIET)$(LD) $(LFLAGS) $(LINK_LO_OPT) $(LINK_OUT_OPT)
 
 .SECONDEXPANSION:
+$(OBJ_DIR)/cyclone/%$(OBJ_EXT): CFLAGS += -Wno-error=discarded-qualifiers -Wno-discarded-qualifiers
+$(OBJ_DIR)/src/cyclone/%$(OBJ_EXT): CFLAGS += -Wno-error=discarded-qualifiers -Wno-discarded-qualifiers
+
 $(OBJ_DIR)/%$(OBJ_EXT): %.c $(HEADERS) $(THIS_MAKEFILE) | $$(dir $$@)
 	$(QUIET)$(ECHO) '[ ${GREEN}CC${NC}   ] ${CYAN}$<${NC}'
 	$(QUIET)$(CC) $(CFLAGS) $(CC_IN_OPT) $< $(CC_OUT_OPT)$@
