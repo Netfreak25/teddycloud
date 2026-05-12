@@ -64,6 +64,7 @@ typedef struct
 #define TONIE_HEADER_LENGTH 0x1000
 #define TONIE_LENGTH_MAX (CONTENT_LENGTH_MAX - TONIE_HEADER_LENGTH)
 
+#define HTTP_CLIENT_BUFFER_SIZE 1024 * 16
 #define HTTP_CLIENT_PRIVATE_CONTEXT \
     const char *serverName;         \
     http_client_private_t private;  \
