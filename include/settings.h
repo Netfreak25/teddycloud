@@ -164,7 +164,7 @@ typedef struct
 typedef struct
 {
     bool baby_mode; 
-    uint8_t lightring_brightness;
+    uint32_t lightring_brightness;
 } settings_toniebox2_t;
 
 typedef struct
