@@ -325,7 +325,18 @@ void tonies_readJson(char *source, toniesJson_item_t **retCache, size_t *retCoun
                 for (size_t i = 0; i < item->audio_ids_count; i++)
                 {
                     cJSON *arrayItemJson = cJSON_GetArrayItem(arrayJson, i);
-                    item->audio_ids[i] = atoi(arrayItemJson->valuestring);
+                    if (arrayItemJson != NULL && cJSON_IsString(arrayItemJson) && arrayItemJson->valuestring != NULL)
+                    {
+                        item->audio_ids[i] = atoi(arrayItemJson->valuestring);
+                    }
+                    else if (arrayItemJson != NULL && cJSON_IsNumber(arrayItemJson))
+                    {
+                        item->audio_ids[i] = (uint32_t)arrayItemJson->valuedouble;
+                    }
+                    else
+                    {
+                        item->audio_ids[i] = 0;
+                    }
                 }
                 arrayJson = cJSON_GetObjectItem(tonieJson, "hash");
                 item->hashes_count = (uint8_t)cJSON_GetArraySize(arrayJson);
@@ -333,7 +344,7 @@ void tonies_readJson(char *source, toniesJson_item_t **retCache, size_t *retCoun
                 for (size_t i = 0; i < item->hashes_count; i++)
                 {
                     cJSON *arrayItemJson = cJSON_GetArrayItem(arrayJson, i);
-                    if (arrayItemJson->valuestring == NULL || osStrlen(arrayItemJson->valuestring) != 40)
+                    if (arrayItemJson == NULL || arrayItemJson->valuestring == NULL || osStrlen(arrayItemJson->valuestring) != 40)
                     {
                         break;
                     }
@@ -355,7 +366,14 @@ void tonies_readJson(char *source, toniesJson_item_t **retCache, size_t *retCoun
                     const cJSON *track;
                     cJSON_ArrayForEach(track, tracks)
                     {
-                        item->tracks[i++] = strdup(track->valuestring);
+                        if (track != NULL && cJSON_IsString(track) && track->valuestring != NULL)
+                        {
+                            item->tracks[i++] = strdup(track->valuestring);
+                        }
+                        else
+                        {
+                            item->tracks[i++] = strdup("");
+                        }
                     }
                 }
 
