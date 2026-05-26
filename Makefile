@@ -668,8 +668,8 @@ web: web_clean
 	$(QUIET)$(ECHO) '[ ${GREEN}WEB${NC}  ] Build TeddyCloud Web'
 	$(QUIET) $(MKDIR) $(CONTRIB_DIR)/$(WEB_DIR)/
 	$(QUIET)cd $(WEB_SRC_DIR) \
-		&& PATH="/usr/bin:/bin:/usr/local/bin:$$PATH" npm install \
-		&& PATH="/usr/bin:/bin:/usr/local/bin:$$PATH" npm run build \
+		&& PATH="/usr/local/bin:/usr/bin:/bin:$$PATH" npm install \
+		&& PATH="/usr/local/bin:/usr/bin:/bin:$$PATH" npm run build \
 		&& $(CP_R) $(WEB_BUILD_DIR)/* ../$(CONTRIB_DIR)/$(WEB_DIR)/ \
 		&& cd -
 	$(QUIET)$(ECHO) '[ ${GREEN}WEB${NC}  ] Generate TeddyCloud Web version info'
@@ -680,6 +680,8 @@ web: web_clean
 		) \
 	)
 	$(QUIET)printf '  "_eof":""\n}\n' >> $(CONTRIB_DIR)/$(WEB_DIR)/web_version.json
+	$(QUIET)cat $(CONTRIB_DIR)/$(WEB_DIR)/web_version.json
+
 
 web_copy:
 	$(QUIET)$(ECHO) '[ ${GREEN}WEB${NC}  ] Copy TeddyCloud Web'
