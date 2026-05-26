@@ -59,7 +59,7 @@ build_gitDirty:=$(shell git diff --quiet 2>/dev/null && echo '0' || echo $(GIT_D
 build_gitDateTime:="$(shell git log -1 --format=%ai 2>/dev/null || echo $(GIT_BUILD_TIME))"
 build_gitShortSha:=${shell git rev-parse --short HEAD 2>/dev/null || echo $(GIT_SHORT_SHA)}
 build_gitSha:=${shell git rev-parse HEAD 2>/dev/null || echo $(GIT_SHA)}
-build_gitTag:=${shell git name-rev --tags --name-only $(build_gitSha) 2>/dev/null || echo $(GIT_TAG)}
+build_gitTag:=${shell git describe --tags --exact-match $(build_gitSha) 2>/dev/null || echo $(GIT_TAG)}
 build_platform:=$(PLATFORM)
 build_os:="$(OS)"
 
@@ -108,6 +108,7 @@ CFLAGS_VERSION+=-DSANITIZER_CAN_USE_ALLOCATOR64=0
 endif
 endif
 
+build_version:=vX.X.X
 build_gitTagPrefix:=$(firstword $(subst _, ,$(build_gitTag)))
 ifeq ($(build_gitTagPrefix),tc)
 	build_version:=$(subst ${build_gitTagPrefix}_,,${build_gitTag})
@@ -123,7 +124,7 @@ web_gitDirty:=${shell cd $(WEB_SRC_DIR) && git diff --quiet 2>/dev/null && echo 
 web_gitDateTime:="${shell cd $(WEB_SRC_DIR) && git log -1 --format=%ai 2>/dev/null || echo $(WEB_GIT_BUILD_TIME)}"
 web_gitShortSha:=${shell cd $(WEB_SRC_DIR) && git rev-parse --short HEAD 2>/dev/null || echo $(WEB_GIT_SHORT_SHA)}
 web_gitSha:=${shell cd $(WEB_SRC_DIR) && git rev-parse HEAD 2>/dev/null || echo $(WEB_GIT_SHA)}
-web_gitTag:=${shell cd $(WEB_SRC_DIR) && git name-rev --tags --name-only $(web_gitSha) 2>/dev/null || echo $(WEB_GIT_TAG)}
+web_gitTag:=${shell cd $(WEB_SRC_DIR) && git describe --tags --exact-match $(web_gitSha) 2>/dev/null || echo $(WEB_GIT_TAG)}
 web_gitTagPrefix:=$(firstword $(subst _, ,$(web_gitTag)))
 web_version:=vX.X.X
 CFLAGS_VERSION+=-DWEB_GIT_IS_DIRTY=${web_gitDirty} -DWEB_GIT_DATETIME=\"${web_gitDateTime}\" -DWEB_RAW_DATETIME=\"${web_rawDateTime}\" -DWEB_GIT_SHORT_SHA=\"${web_gitShortSha}\" -DWEB_GIT_SHA=\"${web_gitSha}\" -DWEB_GIT_TAG=\"${web_gitTag}\"
@@ -506,6 +507,8 @@ echo_info:
 	$(QUIET)$(ECHO) '[ ${GREEN}OSID${NC} ] ${CYAN}$(build_os_id)${NC}'
 	$(QUIET)$(ECHO) '[ ${GREEN}ARCH${NC} ] ${CYAN}$(build_arch)${NC}'
 	$(QUIET)$(ECHO) '[ ${GREEN}BITS${NC} ] ${CYAN}$(build_arch_bits)${NC}'
+	$(QUIET)$(ECHO) '[ ${GREEN}VERN${NC} ] ${CYAN}$(build_version) ($(build_gitSha)$(if $(filter 1,$(build_gitDirty)),-dirty))${NC}'
+	$(QUIET)$(ECHO) '[ ${GREEN}WVER${NC} ] ${CYAN}$(web_version) ($(web_gitSha)$(if $(filter 1,$(web_gitDirty)),-dirty))${NC}'
 
 build: echo_info $(EXECUTABLE)
 
