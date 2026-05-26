@@ -2,7 +2,7 @@
 FROM alpine:latest AS buildenv
 
 # Default to not using ASAN
-ARG NO_SANITIZERS=1
+ARG NO_SANITIZERS=1 # No libsanitizie support in alpine
 
 # Install necessary dependencies
 RUN apk --no-cache add gcc protobuf-c-dev build-base git zip curl
@@ -11,11 +11,10 @@ RUN apk --no-cache add gcc protobuf-c-dev build-base git zip curl
 COPY . /buildenv
 WORKDIR /buildenv
 
-RUN git update-index --assume-unchanged contrib/config/tonies.json contrib/config/tonieboxes.json || true
-RUN curl -f https://raw.githubusercontent.com/toniebox-reverse-engineering/tonies-json/release/tonies.json -o /buildenv/contrib/config/tonies.json || true
-RUN curl -f https://raw.githubusercontent.com/toniebox-reverse-engineering/tonies-json/release/tonieboxes.json -o /buildenv/contrib/config/tonieboxes.json || true
-# No libsanitizie support in alpine
+RUN curl -f https://raw.githubusercontent.com/toniebox-reverse-engineering/tonies-json/release/tonies.json -o /tmp/tonies.json || true
+RUN curl -f https://raw.githubusercontent.com/toniebox-reverse-engineering/tonies-json/release/tonieboxes.json -o /tmp/tonieboxes.json || true
 RUN make test_git_version && make zip NO_SANITIZERS=${NO_SANITIZERS}
+RUN cp /tmp/tonies.json /tmp/tonieboxes.json /buildenv/contrib/config/
 #RUN make preinstall
 
 # Use Alpine Linux as base image for the final image
