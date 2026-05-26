@@ -511,16 +511,16 @@ echo_info:
 	$(QUIET)$(ECHO) '[ ${GREEN}WVER${NC} ] ${CYAN}$(web_version) ($(web_gitSha)$(if $(filter 1,$(web_gitDirty)),-dirty))${NC}'
 
 .PHONY: test_git_version
-test_git_version:
+test_git_version: echo_info
 	$(QUIET)if [ "$(build_gitSha)" = "unknown" ] || [ -z "$(build_gitSha)" ]; then \
-		echo "Error: Invalid build_gitSha version data!"; \
+		$(ECHO) '[  ${RED}ERR${NC}  ] ${RED}Invalid build_gitSha version data!${NC}'; \
 		exit 1; \
 	fi
 	$(QUIET)if [ "$(web_gitSha)" = "unknown" ] || [ -z "$(web_gitSha)" ]; then \
-		echo "Error: Invalid web_gitSha version data!"; \
+		$(ECHO) '[  ${RED}ERR${NC}  ] ${RED}Invalid web_gitSha version data!${NC}'; \
 		exit 1; \
 	fi
-	$(QUIET)echo "Git version data is valid: build_gitSha=$(build_gitSha), web_gitSha=$(web_gitSha)"
+	$(QUIET)$(ECHO) '[ ${GREEN}TEST${NC} ] ${CYAN}Git version data is valid!${NC}'
 
 build: echo_info $(EXECUTABLE)
 
