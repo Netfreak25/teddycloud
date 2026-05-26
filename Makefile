@@ -512,12 +512,28 @@ echo_info:
 
 .PHONY: test_git_version
 test_git_version: echo_info
-	$(QUIET)if [ "$(build_gitSha)" = "unknown" ] || [ -z "$(build_gitSha)" ]; then \
+	$(QUIET)failed=0; \
+	if [ "$(build_gitSha)" = "unknown" ] || [ -z "$(build_gitSha)" ]; then \
 		$(ECHO) '[  ${RED}ERR${NC}  ] ${RED}Invalid build_gitSha version data!${NC}'; \
-		exit 1; \
-	fi
-	$(QUIET)if [ "$(web_gitSha)" = "unknown" ] || [ -z "$(web_gitSha)" ]; then \
+		failed=1; \
+	fi; \
+	if [ "$(web_gitSha)" = "unknown" ] || [ -z "$(web_gitSha)" ]; then \
 		$(ECHO) '[  ${RED}ERR${NC}  ] ${RED}Invalid web_gitSha version data!${NC}'; \
+		failed=1; \
+	fi; \
+	if [ "$(build_gitDirty)" != "0" ]; then \
+		$(ECHO) '[  ${RED}ERR${NC}  ] ${RED}Git repository is dirty!${NC}'; \
+		$(ECHO) '[  ${RED}ERR${NC}  ] ${RED}Dirty files in parent repository:${NC}'; \
+		git status --porcelain || true; \
+		failed=1; \
+	fi; \
+	if [ "$(web_gitDirty)" != "0" ]; then \
+		$(ECHO) '[  ${RED}ERR${NC}  ] ${RED}Web submodule repository is dirty!${NC}'; \
+		$(ECHO) '[  ${RED}ERR${NC}  ] ${RED}Dirty files in web submodule:${NC}'; \
+		git -C $(WEB_SRC_DIR) status --porcelain || true; \
+		failed=1; \
+	fi; \
+	if [ "$$failed" -ne 0 ]; then \
 		exit 1; \
 	fi
 	$(QUIET)$(ECHO) '[ ${GREEN}TEST${NC} ] ${CYAN}Git version data is valid!${NC}'
