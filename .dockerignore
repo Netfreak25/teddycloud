@@ -1,5 +1,7 @@
-.git
-.gitmodules
+# Don't add it, this breaks version information for the docker build.
+# .git
+# .gitmodules
+
 .github
 .vscode
 .cursor

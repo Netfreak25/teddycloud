@@ -14,7 +14,7 @@ WORKDIR /buildenv
 RUN curl -f https://raw.githubusercontent.com/toniebox-reverse-engineering/tonies-json/release/tonies.json -o /buildenv/contrib/config/tonies.json || true
 RUN curl -f https://raw.githubusercontent.com/toniebox-reverse-engineering/tonies-json/release/tonieboxes.json -o /buildenv/contrib/config/tonieboxes.json || true
 # No libsanitizie support in alpine
-RUN make zip NO_SANITIZERS=${NO_SANITIZERS}
+RUN make test_git_version && make zip NO_SANITIZERS=${NO_SANITIZERS}
 #RUN make preinstall
 
 # Use Alpine Linux as base image for the final image
