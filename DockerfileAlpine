@@ -11,6 +11,7 @@ RUN apk --no-cache add gcc protobuf-c-dev build-base git zip curl
 COPY . /buildenv
 WORKDIR /buildenv
 
+RUN git update-index --assume-unchanged contrib/config/tonies.json contrib/config/tonieboxes.json || true
 RUN curl -f https://raw.githubusercontent.com/toniebox-reverse-engineering/tonies-json/release/tonies.json -o /buildenv/contrib/config/tonies.json || true
 RUN curl -f https://raw.githubusercontent.com/toniebox-reverse-engineering/tonies-json/release/tonieboxes.json -o /buildenv/contrib/config/tonieboxes.json || true
 # No libsanitizie support in alpine
