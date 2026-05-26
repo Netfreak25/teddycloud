@@ -4,7 +4,7 @@ FROM debian:latest AS buildenv
 ARG NO_SANITIZERS=0
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc protobuf-c-compiler build-essential git zip curl
+    && apt-get install -y --no-install-recommends gcc protobuf-c-compiler build-essential git zip curl ca-certificates
 
 COPY . /buildenv
 WORKDIR /buildenv
@@ -12,7 +12,7 @@ WORKDIR /buildenv
 RUN curl -f https://raw.githubusercontent.com/toniebox-reverse-engineering/tonies-json/release/tonies.json -o /tmp/tonies.json || true
 RUN curl -f https://raw.githubusercontent.com/toniebox-reverse-engineering/tonies-json/release/tonieboxes.json -o /tmp/tonieboxes.json || true
 RUN make test_git_version && make zip NO_SANITIZERS=${NO_SANITIZERS}
-RUN cp /tmp/tonies.json /tmp/tonieboxes.json /buildenv/contrib/config/
+RUN cp /tmp/tonies.json /tmp/tonieboxes.json /buildenv/contrib/config/ || true
 
 FROM debian:latest
 ARG TEDDYCLOUD_VERSION=unknown
