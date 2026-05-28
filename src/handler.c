@@ -4,6 +4,7 @@
 #include "fs_ext.h"
 #include "mutex_manager.h"
 #include "cJSON.h"
+#include "mqtt_server.h"
 
 void fillBaseCtx(HttpConnection *connection, const char_t *uri, const char_t *queryString, cloudapi_t api, cbr_ctx_t *ctx, client_ctx_t *client_ctx)
 {
@@ -475,6 +476,8 @@ void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const 
 
             TRACE_INFO("Setting freshnessCache with %" PRIuSIZE " entries\r\n", freshResp->n_tonie_marked);
             settings_set_u64_array_id("internal.freshnessCache", freshResp->tonie_marked, freshResp->n_tonie_marked, ctx->client_ctx->settings->internal.overlayNumber);
+            settings_set_bool_id("internal.freshnessCacheChanged", true, ctx->client_ctx->settings->internal.overlayNumber);
+            mqtt_server_publish_fresh_tonies(ctx->client_ctx);
 
             // Re-build json response from updated freshResp
             cJSON *newRespJson = cJSON_CreateObject();
@@ -591,6 +594,8 @@ void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const 
 
             TRACE_INFO("Setting freshnessCache with %" PRIuSIZE " entries\r\n", freshResp->n_tonie_marked);
             settings_set_u64_array_id("internal.freshnessCache", freshResp->tonie_marked, freshResp->n_tonie_marked, ctx->client_ctx->settings->internal.overlayNumber);
+            settings_set_bool_id("internal.freshnessCacheChanged", true, ctx->client_ctx->settings->internal.overlayNumber);
+            mqtt_server_publish_fresh_tonies(ctx->client_ctx);
 
             char line[128];
             osSnprintf(line, 128, "Content-Length: %" PRIuSIZE "\r\n\r\n", ctx->bufferLen);

@@ -284,6 +284,7 @@ typedef struct
     settings_internal_security_mit_t security_mit;
 
     uint64_t *freshnessCache;
+    bool freshnessCacheChanged;
 
     time_t last_connection;
     char *last_ruid;

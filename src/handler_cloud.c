@@ -11,6 +11,7 @@
 #include "http/http_client.h"
 
 #include "mqtt.h"
+#include "mqtt_server.h"
 #include "server_helpers.h"
 
 #include "toniefile.h"
@@ -1036,6 +1037,8 @@ error_t handleCloudFreshnessCheck(HttpConnection *connection, const char_t *uri,
 
             TRACE_INFO("Setting freshnessCache with %" PRIuSIZE " entries\r\n", freshResp.n_tonie_marked);
             settings_set_u64_array_id("internal.freshnessCache", freshResp.tonie_marked, freshResp.n_tonie_marked, client_ctx->settings->internal.overlayNumber);
+            settings_set_bool_id("internal.freshnessCacheChanged", true, client_ctx->settings->internal.overlayNumber);
+            mqtt_server_publish_fresh_tonies(client_ctx);
 
             tonie_freshness_check_request__free_unpacked(freshReq, NULL);
             setTonieboxSettings(&freshResp, client_ctx->settings);
@@ -1188,6 +1191,8 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
 
     TRACE_INFO("Setting freshnessCache with %" PRIuSIZE " entries\r\n", freshResp.n_tonie_marked);
     settings_set_u64_array_id("internal.freshnessCache", freshResp.tonie_marked, freshResp.n_tonie_marked, client_ctx->settings->internal.overlayNumber);
+    settings_set_bool_id("internal.freshnessCacheChanged", true, client_ctx->settings->internal.overlayNumber);
+    mqtt_server_publish_fresh_tonies(client_ctx);
 
     // No settings for TB2 in freshnessCheck
     // setTonieboxSettings(&freshResp, client_ctx->settings); 

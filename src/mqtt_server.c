@@ -11,6 +11,9 @@
 #include "tls.h"
 #include "rand.h"
 #include "tls_adapter.h"
+#include "cJSON.h"
+#include "handler.h"
+#include "toniebox_state.h"
 
 // Forward declaration of platform-specific function
 uint_t tcpWaitForEvents(Socket *socket, uint_t eventMask, systime_t timeout);
@@ -263,7 +266,7 @@ static void mqtt_server_publish(const char *topic, const char *payload)
         socketSend(connection.socket, packet, packet_size, &written, 0);
     }
 
-    // TRACE_INFO("MQTT PUBLISH: %s -> %s (len %zu)\r\n", topic, payload, payload_len);
+    TRACE_INFO("MQTT PUBLISH: %s -> %s (len %zu)\r\n", topic, payload, payload_len);
 
     osFreeMem(packet);
 }
@@ -438,6 +441,38 @@ void mqtt_server_task()
                             p += topic_len;
                             uint8_t qos = pkt[p++];
                             TRACE_INFO("  Topic='%s', QoS=%u\r\n", topic, qos);
+
+                            // Check if this is the fresh-tonies topic subscription
+                            bool is_fresh_tonies_sub = false;
+                            char mac[32] = {0};
+                            if (strncmp(topic, "toniebox/", 9) == 0 && topic_len > 22)
+                            {
+                                const char *suffix = "/fresh-tonies";
+                                size_t suffix_len = strlen(suffix);
+                                if (strcmp(topic + topic_len - suffix_len, suffix) == 0)
+                                {
+                                    size_t mac_len = topic_len - 9 - suffix_len;
+                                    if (mac_len < sizeof(mac))
+                                    {
+                                        memcpy(mac, topic + 9, mac_len);
+                                        mac[mac_len] = '\0';
+                                        is_fresh_tonies_sub = true;
+                                    }
+                                }
+                            }
+
+                            if (is_fresh_tonies_sub)
+                            {
+                                settings_t *box_settings = get_settings_cn(mac);
+                                if (box_settings != NULL && box_settings->internal.config_used)
+                                {
+                                    client_ctx_t temp_ctx;
+                                    temp_ctx.settings = box_settings;
+                                    temp_ctx.state = get_toniebox_state_id(box_settings->internal.overlayNumber);
+                                    
+                                    mqtt_server_publish_fresh_tonies(&temp_ctx);
+                                }
+                            }
                         }
                         
                         // Responding with SUBACK (0x90)
@@ -550,5 +585,52 @@ void mqtt_server_deinit() {
     {
         osFreeMem(mqtt_server_key);
         mqtt_server_key = NULL;
+    }
+}
+
+void mqtt_server_publish_fresh_tonies(client_ctx_t *client_ctx)
+{
+    if (client_ctx == NULL || client_ctx->state == NULL || client_ctx->settings == NULL)
+    {
+        return;
+    }
+
+    if (!client_ctx->settings->internal.freshnessCacheChanged)
+    {
+        return;
+    }
+
+    settings_set_bool_id("internal.freshnessCacheChanged", false, client_ctx->settings->internal.overlayNumber);
+
+    size_t freshnessCacheLen = 0;
+    uint64_t *freshnessCache = settings_get_u64_array_id("internal.freshnessCache", client_ctx->settings->internal.overlayNumber, &freshnessCacheLen);
+
+    for (size_t i = 0; i < freshnessCacheLen; i++)
+    {
+        char ruidStr[17];
+        char uidStr[17];
+        osSnprintf(uidStr, sizeof(uidStr), "%016" PRIX64, freshnessCache[i]);
+        for (int j = 0; j < 8; j++)
+        {
+            ruidStr[j * 2] = uidStr[14 - j * 2];
+            ruidStr[j * 2 + 1] = uidStr[15 - j * 2];
+        }
+        ruidStr[16] = '\0';
+
+        cJSON *obj = cJSON_CreateObject();
+        if (obj != NULL)
+        {
+            cJSON_AddStringToObject(obj, "tonie", ruidStr);
+            char *payload = cJSON_PrintUnformatted(obj);
+            cJSON_Delete(obj);
+
+            if (payload != NULL)
+            {
+                char topic[128];
+                osSnprintf(topic, sizeof(topic), "toniebox/%s/fresh-tonies", client_ctx->state->box.id);
+                mqtt_server_publish(topic, payload);
+                osFreeMem(payload);
+            }
+        }
     }
 }
