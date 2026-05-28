@@ -1088,20 +1088,20 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
     }
 
     cJSON *contentObj = cJSON_GetObjectItem(inputJson, "content");
+    int count = 0;
+    cJSON *item = NULL;
     if (!contentObj) {
-        TRACE_ERROR("V3 Freshness JSON missing 'content' object\n");
-        cJSON_Delete(inputJson);
-        return ERROR_FAILURE;
+        TRACE_WARNING("V3 Freshness JSON missing 'content' object\n");
+    } else {
+        count = cJSON_GetArraySize(contentObj);
+        item = contentObj->child;
     }
-
-    int count = cJSON_GetArraySize(contentObj);
     
     TonieFreshnessCheckRequest freshReq = TONIE_FRESHNESS_CHECK_REQUEST__INIT;
     freshReq.n_tonie_infos = count;
     TonieFCInfo *fcInfos = malloc(sizeof(TonieFCInfo) * count);
     freshReq.tonie_infos = malloc(sizeof(TonieFCInfo *) * count);
     
-    cJSON *item = contentObj->child;
     int i = 0;
     while (item && i < count) {
         tonie_fcinfo__init(&fcInfos[i]);
