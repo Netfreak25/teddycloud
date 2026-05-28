@@ -159,6 +159,115 @@ void mqtt_server_init() {
     osMemset(&connection, 0, sizeof(connection));
 }
 
+static const char *settings_json = "{\n"
+"  \"settings_history\": {\n"
+"    \"bi_tracking\": 0,\n"
+"    \"max_headphone_volume\": 0,\n"
+"    \"battery_threshold\": 0,\n"
+"    \"scrubbing_enabled\": 0,\n"
+"    \"fleet_obs_enabled\": 0,\n"
+"    \"bedtime_max_headphone_volume\": 0,\n"
+"    \"timezone_transitions\": 0,\n"
+"    \"log_level\": 0,\n"
+"    \"timezone\": 0,\n"
+"    \"bedtime_lightring_color\": 0,\n"
+"    \"bedtime_max_volume\": 0,\n"
+"    \"skipping_direction\": 0,\n"
+"    \"max_volume\": 1773690866874,\n"
+"    \"bedtime_schedules\": 0,\n"
+"    \"alarms\": 0,\n"
+"    \"bedtime_lightring_brightness\": 1773690530304,\n"
+"    \"age_mode\": 1773690456997,\n"
+"    \"skipping_enabled\": 0,\n"
+"    \"lightring_brightness\": 1773306190892\n"
+"  },\n"
+"  \"settings_applied\": false,\n"
+"  \"bi_tracking\": true,\n"
+"  \"max_headphone_volume\": 100,\n"
+"  \"battery_threshold\": 1,\n"
+"  \"scrubbing_enabled\": false,\n"
+"  \"fleet_obs_enabled\": true,\n"
+"  \"bedtime_max_headphone_volume\": 75,\n"
+"  \"timezone_transitions\": [\n"
+"    {\n"
+"      \"time\": 0,\n"
+"      \"offset\": 0\n"
+"    }\n"
+"  ],\n"
+"  \"log_level\": \"info\",\n"
+"  \"timezone\": null,\n"
+"  \"bedtime_lightring_color\": \"#ffffff\",\n"
+"  \"bedtime_max_volume\": 75,\n"
+"  \"skipping_direction\": \"right\",\n"
+"  \"max_volume\": 100,\n"
+"  \"bedtime_schedules\": [],\n"
+"  \"alarms\": [],\n"
+"  \"bedtime_lightring_brightness\": 75,\n"
+"  \"age_mode\": \"1+\",\n"
+"  \"skipping_enabled\": true,\n"
+"  \"lightring_brightness\": 100\n"
+"}";
+
+static void mqtt_server_publish(const char *topic, const char *payload)
+{
+    if (!connection.active) return;
+
+    size_t topic_len = strlen(topic);
+    size_t payload_len = strlen(payload);
+    size_t remaining_len = 2 + topic_len + payload_len;
+
+    // Allocate memory for the packet
+    size_t header_len = 1; // 0x30
+    uint8_t length_bytes[4];
+    size_t length_count = 0;
+    size_t temp_len = remaining_len;
+    do {
+        uint8_t encoded_byte = temp_len % 128;
+        temp_len /= 128;
+        if (temp_len > 0) {
+            encoded_byte |= 128;
+        }
+        length_bytes[length_count++] = encoded_byte;
+    } while (temp_len > 0);
+
+    size_t packet_size = header_len + length_count + remaining_len;
+    uint8_t *packet = osAllocMem(packet_size);
+    if (packet == NULL)
+    {
+        TRACE_ERROR("Failed to allocate memory for MQTT PUBLISH packet\r\n");
+        return;
+    }
+
+    size_t p = 0;
+    packet[p++] = 0x30; // PUBLISH (QoS 0)
+    
+    memcpy(&packet[p], length_bytes, length_count);
+    p += length_count;
+
+    packet[p++] = (topic_len >> 8) & 0xFF;
+    packet[p++] = topic_len & 0xFF;
+
+    memcpy(&packet[p], topic, topic_len);
+    p += topic_len;
+
+    memcpy(&packet[p], payload, payload_len);
+    p += payload_len;
+
+    size_t written = 0;
+    if (connection.tlsContext)
+    {
+        tlsWrite(connection.tlsContext, packet, packet_size, &written, 0);
+    }
+    else
+    {
+        socketSend(connection.socket, packet, packet_size, &written, 0);
+    }
+
+    // TRACE_INFO("MQTT PUBLISH: %s -> %s (len %zu)\r\n", topic, payload, payload_len);
+
+    osFreeMem(packet);
+}
+
 void mqtt_server_task()
 {
     if (serverSocket == NULL)
@@ -261,6 +370,32 @@ void mqtt_server_task()
                         else
                         {
                             TRACE_INFO("PUBLISH topic='%s', payload='%s' (QoS %u, len %zu)\r\n", topic, payload, qos, payload_len);
+                        }
+
+                        bool is_settings_request = false;
+                        char mac[32] = {0};
+                        if (strncmp(topic, "toniebox/", 9) == 0 && topic_len > 26)
+                        {
+                            const char *suffix = "/settings/request";
+                            size_t suffix_len = strlen(suffix);
+                            if (strcmp(topic + topic_len - suffix_len, suffix) == 0)
+                            {
+                                size_t mac_len = topic_len - 9 - suffix_len;
+                                if (mac_len < sizeof(mac))
+                                {
+                                    memcpy(mac, topic + 9, mac_len);
+                                    mac[mac_len] = '\0';
+                                    is_settings_request = true;
+                                }
+                            }
+                        }
+
+                        if (is_settings_request)
+                        {
+                            char response_topic[128];
+                            TRACE_INFO("Settings request from mac=%s\r\n", mac);
+                            osSnprintf(response_topic, sizeof(response_topic), "toniebox/%s/settings/desired", mac);
+                            mqtt_server_publish(response_topic, settings_json);
                         }
 
                         if (qos == 1)
