@@ -283,10 +283,14 @@ bool checkCustomTonie(char *ruid, uint8_t *token, settings_t *settings)
     }
     if (settings->cloud.markCustomTagByUid)
     {
-        if (ruid[15] != '0' || ruid[14] != 'e' || ruid[13] != '4' || ruid[12] != '0' || ruid[11] != '3' || ruid[10] != '0')
+        // Ignore TB2 special files 00000af0 (00000001)
+        if (!(ruid[0] == '0' && ruid[1] == '0' && ruid[2] == '0' && ruid[3] == '0' && ruid[4] == '0' && ruid[5] == 'a' && ruid[6] == 'f' && ruid[7] == '0'))
         {
-            TRACE_INFO("Found possible custom tonie by uid\r\n");
-            return true;
+            if (ruid[15] != '0' || ruid[14] != 'e' || ruid[13] != '4' || ruid[12] != '0' || ruid[11] != '3' || ruid[10] != '0')
+            {
+                TRACE_INFO("Found possible custom tonie by uid\r\n");
+                return true;
+            }
         }
     }
     return false;
