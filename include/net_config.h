@@ -49,6 +49,7 @@ typedef struct
     settings_t *settingsNoOverlay;
     toniebox_state_t *state;
     bool skip_taf_header;
+    void *mqtt_connection;
 } client_ctx_t;
 
 typedef struct
