@@ -744,6 +744,62 @@ error_t handleCloudContentExt(HttpConnection *connection, const char_t *uri, con
             TRACE_INFO("Found incomplete TAF, streaming...\r\n");
         }
 
+        if (api == V3_CHAPTER)
+        {
+            char *chapter_pos = osStrstr(uri, "teddycloud_");
+            if (chapter_pos != NULL)
+            {
+                char chapter_id_str[3];
+                osStrncpy(chapter_id_str, chapter_pos + 11, 2);
+                chapter_id_str[2] = '\0';
+                int chapter_id = atoi(chapter_id_str);
+                
+                TonieboxAudioFileHeader *tafHeader = tonieInfo->tafHeader;
+                if (tafHeader != NULL && chapter_id < tafHeader->n_track_page_nums)
+                {
+                    uint32_t start_block = tafHeader->track_page_nums[chapter_id];
+                    uint32_t end_block = 0;
+                    if (chapter_id + 1 < tafHeader->n_track_page_nums)
+                    {
+                        end_block = tafHeader->track_page_nums[chapter_id + 1];
+                    }
+                    else
+                    {
+                        end_block = tafHeader->num_bytes / 4096;
+                    }
+                    
+                    connection->private.client_ctx.taf_chapter_split = true;
+                    connection->private.client_ctx.taf_chapter_start_offset = 4096 + start_block * 4096;
+                    connection->private.client_ctx.taf_chapter_end_offset = 4096 + end_block * 4096;
+                    
+                    if (chapter_id > 0)
+                    {
+                        connection->private.client_ctx.taf_chapter_header_size = 512;
+                    }
+                    else
+                    {
+                        connection->private.client_ctx.taf_chapter_header_size = 0;
+                    }
+                    
+                    TRACE_INFO("Splitting TAF for chapter %d: start=%u, end=%u, header_size=%u\n",
+                               chapter_id,
+                               connection->private.client_ctx.taf_chapter_start_offset,
+                               connection->private.client_ctx.taf_chapter_end_offset,
+                               connection->private.client_ctx.taf_chapter_header_size);
+                }
+            }
+        }
+
+        if (api == V3_CHAPTER && !connection->private.client_ctx.taf_chapter_split)
+        {
+            TRACE_WARNING(" >> Invalid chapter ID requested for %s\n", uri);
+            httpPrepareHeader(connection, NULL, 0);
+            connection->response.statusCode = 404;
+            error_t response_error = httpWriteResponse(connection, NULL, 0, false);
+            freeTonieInfo(tonieInfo);
+            return response_error;
+        }
+
         size_t dataPathLen = osStrlen(client_ctx->settings->internal.datadirfull);
         if (osStrncmp(tonieInfo->contentPath, client_ctx->settings->internal.datadirfull, dataPathLen) == 0)
         {
@@ -1366,27 +1422,69 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
         cJSON *contentArray = cJSON_CreateArray();
         cJSON_AddItemToObject(respJson, "content", contentArray);
 
-        cJSON *contentItem = cJSON_CreateObject();
-        cJSON_AddItemToArray(contentArray, contentItem);
-
-        cJSON_AddStringToObject(contentItem, "type", "audio");
-        char name[64];
-        osSprintf(name, "teddycloud_00_%s", ruid);
-        cJSON_AddStringToObject(contentItem, "name", name);
-        cJSON_AddStringToObject(contentItem, "auth", "");
-        cJSON_AddItemToObject(contentItem, "analytics", cJSON_CreateObject());
-
-        uint32_t fileSize = 0;
-        fsGetFileSize(tonieInfo->contentPath, &fileSize);
-        if (fileSize > 4 + TAF_HEADER_SIZE)
+        int n_chapters = tonieInfo->tafHeader->n_track_page_nums;
+        if (n_chapters == 0)
         {
-            fileSize -= 4 + TAF_HEADER_SIZE; // 4 is protobuf header size
+            n_chapters = 1;
         }
-        else
+
+        uint32_t total_audio_bytes = 0;
+        uint32_t ogg_headers_size = 0;
+        if (n_chapters > 1)
         {
-            fileSize = 0;
+            ogg_headers_size = 512;
+            total_audio_bytes = tonieInfo->tafHeader->num_bytes;
         }
-        cJSON_AddNumberToObject(contentItem, "fileSize", (double)fileSize);
+
+        for (int i = 0; i < n_chapters; i++)
+        {
+            cJSON *contentItem = cJSON_CreateObject();
+            cJSON_AddItemToArray(contentArray, contentItem);
+
+            cJSON_AddStringToObject(contentItem, "type", "audio");
+            char name[64];
+            osSprintf(name, "teddycloud_%02d_%s", i, ruid);
+            cJSON_AddStringToObject(contentItem, "name", name);
+            cJSON_AddStringToObject(contentItem, "auth", "");
+            cJSON_AddItemToObject(contentItem, "analytics", cJSON_CreateObject());
+
+            uint32_t fileSize = 0;
+            if (n_chapters == 1)
+            {
+                fsGetFileSize(tonieInfo->contentPath, &fileSize);
+                if (fileSize > 4096)
+                {
+                    fileSize -= 4096;
+                }
+                else
+                {
+                    fileSize = 0;
+                }
+            }
+            else
+            {
+                uint32_t start_block = tonieInfo->tafHeader->track_page_nums[i];
+                uint32_t end_block = 0;
+                if (i + 1 < n_chapters)
+                {
+                    end_block = tonieInfo->tafHeader->track_page_nums[i + 1];
+                }
+                else
+                {
+                    end_block = total_audio_bytes / 4096;
+                }
+
+                if (i == 0)
+                {
+                    fileSize = (end_block - start_block) * 4096;
+                }
+                else
+                {
+                    fileSize = ogg_headers_size + (end_block - start_block) * 4096;
+                }
+            }
+            cJSON_AddNumberToObject(contentItem, "fileSize", (double)fileSize);
+        }
 
         char *response_json = cJSON_PrintUnformatted(respJson);
         size_t dataLen = osStrlen(response_json);

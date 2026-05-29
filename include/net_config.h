@@ -49,6 +49,10 @@ typedef struct
     settings_t *settingsNoOverlay;
     toniebox_state_t *state;
     bool skip_taf_header;
+    bool taf_chapter_split;
+    uint32_t taf_chapter_start_offset;
+    uint32_t taf_chapter_end_offset;
+    uint32_t taf_chapter_header_size;
     void *mqtt_connection;
 } client_ctx_t;
 
