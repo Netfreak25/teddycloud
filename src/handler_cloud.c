@@ -746,7 +746,7 @@ error_t handleCloudContentExt(HttpConnection *connection, const char_t *uri, con
 
         if (api == V3_CHAPTER)
         {
-            char *chapter_pos = osStrstr(uri, "teddycloud_");
+            const char_t *chapter_pos = osStrstr(uri, "teddycloud_");
             if (chapter_pos != NULL)
             {
                 char chapter_id_str[3];
