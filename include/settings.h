@@ -252,6 +252,7 @@ typedef struct
     bool exit;
     int32_t returncode;
     settings_cert_t server;
+    settings_cert_t server_tb2;
     settings_cert_t client;
     bool config_init;
     bool config_used;
@@ -316,6 +317,7 @@ typedef struct
     char *pluginsdir;
     char *sslkeylogfile;
     settings_cert_opt_t server_cert;
+    settings_cert_opt_t server_cert_tb2;
     settings_cert_opt_t client_cert;
     char *allowOrigin;
     bool boxCertAuth;

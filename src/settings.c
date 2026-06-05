@@ -100,6 +100,19 @@ static void option_map_init(uint8_t settingsId)
     OPTION_INTERNAL_STRING("core.server_cert.data.crt", &settings->core.server_cert.data.crt, "", "Server certificate data", LEVEL_EXPERT)
     OPTION_INTERNAL_STRING("core.server_cert.data.key", &settings->core.server_cert.data.key, "", "Server key data", LEVEL_EXPERT)
 
+    OPTION_TREE_DESC("core.server_cert_tb2", "HTTPS server certificates (TB2)", LEVEL_EXPERT)
+    OPTION_TREE_DESC("core.server_cert_tb2.file", "File certificates (TB2)", LEVEL_EXPERT)
+    OPTION_STRING("core.server_cert_tb2.file.ca", &settings->core.server_cert_tb2.file.ca, "certs/server_tb2/ca-root.pem", "CA certificate (TB2)", "CA certificate (TB2)", LEVEL_EXPERT)
+    OPTION_STRING("core.server_cert_tb2.file.ca_der", &settings->core.server_cert_tb2.file.ca_der, "certs/server_tb2/ca.der", "CA certificate as DER (TB2)", "CA certificate as DER (TB2)", LEVEL_EXPERT)
+    OPTION_STRING("core.server_cert_tb2.file.ca_key", &settings->core.server_cert_tb2.file.ca_key, "certs/server_tb2/ca-key.pem", "CA key (TB2)", "CA key (TB2)", LEVEL_EXPERT)
+    OPTION_STRING("core.server_cert_tb2.file.crt", &settings->core.server_cert_tb2.file.crt, "certs/server_tb2/teddy-cert.pem", "Server certificate (TB2)", "Server certificate (TB2)", LEVEL_EXPERT)
+    OPTION_STRING("core.server_cert_tb2.file.key", &settings->core.server_cert_tb2.file.key, "certs/server_tb2/teddy-key.pem", "Server key (TB2)", "Server key (TB2)", LEVEL_EXPERT)
+    OPTION_TREE_DESC("core.server_cert_tb2.data", "Raw certificates (TB2)", LEVEL_EXPERT)
+    OPTION_STRING("core.server_cert_tb2.data.ca", &settings->core.server_cert_tb2.data.ca, "", "CA certificate data (TB2)", "CA certificate data (TB2)", LEVEL_EXPERT)
+    OPTION_INTERNAL_STRING("core.server_cert_tb2.data.ca_key", &settings->core.server_cert_tb2.data.ca_key, "", "CA key data (TB2)", LEVEL_EXPERT)
+    OPTION_INTERNAL_STRING("core.server_cert_tb2.data.crt", &settings->core.server_cert_tb2.data.crt, "", "Server certificate data (TB2)", LEVEL_EXPERT)
+    OPTION_INTERNAL_STRING("core.server_cert_tb2.data.key", &settings->core.server_cert_tb2.data.key, "", "Server key data (TB2)", LEVEL_EXPERT)
+
     /* settings for HTTPS/cloud client */
     OPTION_TREE_DESC("core.client_cert", "Cloud client certificates", LEVEL_DETAIL)
     OPTION_TREE_DESC("core.client_cert.file", "File certificates", LEVEL_DETAIL)
@@ -139,6 +152,11 @@ static void option_map_init(uint8_t settingsId)
     OPTION_INTERNAL_STRING("internal.server.crt", &settings->internal.server.crt, "", "Server certificate data", LEVEL_SECRET)
     OPTION_INTERNAL_STRING("internal.server.key", &settings->internal.server.key, "", "Server key data", LEVEL_SECRET)
     OPTION_INTERNAL_STRING("internal.server.cert_chain", &settings->internal.server.cert_chain, "", "TLS certificate chain", LEVEL_SECRET)
+    OPTION_INTERNAL_STRING("internal.server_tb2.ca", &settings->internal.server_tb2.ca, "", "CA certificate data (TB2)", LEVEL_SECRET)
+    OPTION_INTERNAL_STRING("internal.server_tb2.ca_key", &settings->internal.server_tb2.ca_key, "", "Server CA key data (TB2)", LEVEL_SECRET)
+    OPTION_INTERNAL_STRING("internal.server_tb2.crt", &settings->internal.server_tb2.crt, "", "Server certificate data (TB2)", LEVEL_SECRET)
+    OPTION_INTERNAL_STRING("internal.server_tb2.key", &settings->internal.server_tb2.key, "", "Server key data (TB2)", LEVEL_SECRET)
+    OPTION_INTERNAL_STRING("internal.server_tb2.cert_chain", &settings->internal.server_tb2.cert_chain, "", "TLS certificate chain (TB2)", LEVEL_SECRET)
     OPTION_INTERNAL_STRING("internal.client.ca", &settings->internal.client.ca, "", "Client CA", LEVEL_SECRET)
     OPTION_INTERNAL_STRING("internal.client.crt", &settings->internal.client.crt, "", "Client certificate data", LEVEL_SECRET)
     OPTION_INTERNAL_STRING("internal.client.key", &settings->internal.client.key, "", "Client key data", LEVEL_SECRET)
@@ -1690,6 +1708,12 @@ error_t settings_try_load_certs_id(uint8_t settingsId)
     ERR_RETURN(load_cert("internal.server.crt", "core.server_cert.file.crt", "core.server_cert.data.crt", settingsId));
     ERR_RETURN(load_cert("internal.server.key", "core.server_cert.file.key", "core.server_cert.data.key", settingsId));
 
+    /* do not fail if TB2 certs are missing, just load them if they exist */
+    load_cert("internal.server_tb2.ca", "core.server_cert_tb2.file.ca", "core.server_cert_tb2.data.ca", settingsId);
+    load_cert("internal.server_tb2.ca_key", "core.server_cert_tb2.file.ca_key", "core.server_cert_tb2.data.ca_key", settingsId);
+    load_cert("internal.server_tb2.crt", "core.server_cert_tb2.file.crt", "core.server_cert_tb2.data.crt", settingsId);
+    load_cert("internal.server_tb2.key", "core.server_cert_tb2.file.key", "core.server_cert_tb2.data.key", settingsId);
+
     /* do not fail when client-role certs are missing */
     load_cert("internal.client.ca", "core.client_cert.file.ca", "core.client_cert.data.ca", settingsId);
     load_cert("internal.client.crt", "core.client_cert.file.crt", "core.client_cert.data.crt", settingsId);
@@ -1703,6 +1727,14 @@ error_t settings_try_load_certs_id(uint8_t settingsId)
     char *chain = custom_asprintf("%s%s", server_crt, server_ca_crt);
     settings_set_string_id("internal.server.cert_chain", chain, settingsId);
     osFreeMem(chain);
+
+    const char *server_crt_tb2 = settings_get_string("internal.server_tb2.crt");
+    const char *server_ca_crt_tb2 = settings_get_string("internal.server_tb2.ca");
+    if (server_crt_tb2 && server_ca_crt_tb2 && osStrlen(server_crt_tb2) > 0) {
+        char *chain_tb2 = custom_asprintf("%s%s", server_crt_tb2, server_ca_crt_tb2);
+        settings_set_string_id("internal.server_tb2.cert_chain", chain_tb2, settingsId);
+        osFreeMem(chain_tb2);
+    }
     return NO_ERROR;
 }
 
