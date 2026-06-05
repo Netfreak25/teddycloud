@@ -330,8 +330,8 @@ static void option_map_init(uint8_t settingsId)
     OPTION_TREE_DESC("mqtt_server", "MQTT Server", LEVEL_DETAIL)
     OPTION_BOOL("mqtt_server.enabled", &settings->mqtt_server.enabled, FALSE, "Enable MQTT Server", "Enable internal MQTT server", LEVEL_DETAIL)
     OPTION_UNSIGNED("mqtt_server.port", &settings->mqtt_server.port, 8883, 1, 65535, "MQTT Server port", "Port for internal MQTT server", LEVEL_DETAIL)
-    OPTION_STRING("mqtt_server.cert.crt", &settings->mqtt_server.cert_crt, "certs/server/ici.pem", "Server certificate", "Path to server certificate file (PEM format)", LEVEL_DETAIL)
-    OPTION_STRING("mqtt_server.cert.key", &settings->mqtt_server.cert_key, "certs/server/ici.key", "Server key", "Path to server key file (PEM format)", LEVEL_DETAIL)
+    OPTION_STRING("mqtt_server.cert.crt", &settings->mqtt_server.cert_crt, "certs/server_tb2/ici.pem", "Server certificate", "Path to server certificate file (PEM format)", LEVEL_DETAIL)
+    OPTION_STRING("mqtt_server.cert.key", &settings->mqtt_server.cert_key, "certs/server_tb2/ici.key", "Server key", "Path to server key file (PEM format)", LEVEL_DETAIL)
 
     OPTION_TREE_DESC("hass", "Home Assistant", LEVEL_DETAIL)
     OPTION_STRING("hass.name", &settings->hass.name, "teddyCloud - Server", "Home Assistant name", "Home Assistant name", LEVEL_DETAIL)
@@ -1745,16 +1745,39 @@ error_t settings_load_certs_id(uint8_t settingsId)
         return NO_ERROR;
     }
 
-    if (get_settings_id(settingsId)->internal.autogen_certs && settings_try_load_certs_id(settingsId) != NO_ERROR)
+    if (get_settings_id(settingsId)->internal.autogen_certs)
     {
-        TRACE_INFO("********************************************\r\n");
-        TRACE_INFO("   No certificates found. Generating.\r\n");
-        TRACE_INFO("   This will take several minutes...\r\n");
-        TRACE_INFO("********************************************\r\n");
-        cert_generate_default();
-        TRACE_INFO("********************************************\r\n");
-        TRACE_INFO("   FINISHED\r\n");
-        TRACE_INFO("********************************************\r\n");
+        if (settings_try_load_certs_id(settingsId) != NO_ERROR)
+        {
+            TRACE_INFO("********************************************\r\n");
+            TRACE_INFO("   No TB1 certificates found. Generating.\r\n");
+            TRACE_INFO("   This will take several minutes...\r\n");
+            TRACE_INFO("********************************************\r\n");
+            cert_generate_default();
+            TRACE_INFO("********************************************\r\n");
+            TRACE_INFO("   FINISHED TB1 GENERATION\r\n");
+            TRACE_INFO("********************************************\r\n");
+        }
+
+        const char *ca_tb2 = settings_get_string_id("internal.server_tb2.ca", settingsId);
+        const char *key_tb2 = settings_get_string_id("internal.server_tb2.key", settingsId);
+        const char *crt_tb2 = settings_get_string_id("internal.server_tb2.crt", settingsId);
+        const char *pkey_tb2 = settings_get_string_id("internal.server_tb2.key", settingsId);
+
+        if (!ca_tb2 || osStrlen(ca_tb2) == 0 ||
+            !key_tb2 || osStrlen(key_tb2) == 0 ||
+            !crt_tb2 || osStrlen(crt_tb2) == 0 ||
+            !pkey_tb2 || osStrlen(pkey_tb2) == 0)
+        {
+            TRACE_INFO("********************************************\r\n");
+            TRACE_INFO("   No TB2 certificates found. Generating.\r\n");
+            TRACE_INFO("   This will take several minutes...\r\n");
+            TRACE_INFO("********************************************\r\n");
+            cert_generate_default_tb2();
+            TRACE_INFO("********************************************\r\n");
+            TRACE_INFO("   FINISHED TB2 GENERATION\r\n");
+            TRACE_INFO("********************************************\r\n");
+        }
     }
 
     return NO_ERROR;

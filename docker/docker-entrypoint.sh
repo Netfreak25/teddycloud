@@ -5,7 +5,7 @@ set -o pipefail
 set -o nounset
 # set -o xtrace
 
-mkdir -p /teddycloud/certs/server /teddycloud/certs/client
+mkdir -p /teddycloud/certs/server /teddycloud/certs/server_tb2 /teddycloud/certs/client
 cd /teddycloud
 
 # PUID/PGID support: if set and non-zero, drop privileges to that user before

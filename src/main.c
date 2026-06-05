@@ -411,6 +411,10 @@ int_t main(int argc, char *argv[])
     if (options.generate_server_certs)
     {
         int_t error = cert_generate_default();
+        if (error == NO_ERROR)
+        {
+            error = cert_generate_default_tb2();
+        }
         exit_cleanup(error);
     }
 
