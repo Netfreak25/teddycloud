@@ -519,6 +519,37 @@ error_t x509ExportEcPrivateKey(const EcCurveInfo *curveInfo,
    length += n;
    p += n;
 
+   //The parameters field is optional but some parsers require it
+   if(curveInfo->oid != NULL)
+   {
+      //Write the curve OID
+      tag.constructed = FALSE;
+      tag.objClass = ASN1_CLASS_UNIVERSAL;
+      tag.objType = ASN1_TYPE_OBJECT_IDENTIFIER;
+      tag.length = curveInfo->oidSize;
+      tag.value = curveInfo->oid;
+
+      error = asn1WriteTag(&tag, FALSE, p, &n);
+      if(error) return error;
+
+      n = tag.totalLength;
+
+      //Wrap in a context-specific tag [0]
+      tag.constructed = TRUE;
+      tag.objClass = ASN1_CLASS_CONTEXT_SPECIFIC;
+      tag.objType = 0;
+      tag.length = n;
+      tag.value = p;
+
+      error = asn1WriteTag(&tag, FALSE, p, &n);
+      if(error) return error;
+
+      n = tag.totalLength;
+      length += n;
+      p += n;
+   }
+
+
    //The public key is optional
    if(publicKey != NULL)
    {
