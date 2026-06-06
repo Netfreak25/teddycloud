@@ -1813,36 +1813,38 @@ error_t settings_load_certs_id(uint8_t settingsId)
 
 bool test_boxine_ca(uint8_t settingsId)
 {
-    const char *client_ca_crt = settings_get_string_id("internal.client.ca", settingsId);
+    const char *client_ca_crt = get_settings_id(settingsId)->internal.client.ca;
 
     size_t boxine_ca_length = 2008;
     size_t tb2_ca_length = 898;
     size_t ca_length = osStrlen(client_ca_crt);
     if (ca_length > 0)
     {
-        if (ca_length != boxine_ca_length && ca_length != tb2_ca_length)
-        {
-            TRACE_WARNING("Client CA length mismatch %" PRIuSIZE " expected %" PRIuSIZE " (TB1) or %" PRIuSIZE " (TB2)\r\n", ca_length, boxine_ca_length, tb2_ca_length);
-            return false;
-        }
-        else
-        {
-            uint32_t boxGen = settings_get_unsigned_id("toniebox.boxGeneration", settingsId);
-            
-            if (boxGen == 0 || boxGen == 1) { 
-                if (osStrstr(client_ca_crt, "MC0JveGluZSBHbW") == NULL   // Boxine GmbH
-                    || osStrstr(client_ca_crt, "DAlCb3hpbmUgQ") == NULL) // Boxine
-                {
-                    TRACE_WARNING("Client CA does not match Boxine (TB1)\r\n");
-                    return false;
-                }
-            } else if (boxGen == 2) {
-                if (osStrstr(client_ca_crt, "Ewt0b25pZXMgR21iS") == NULL   // tonies GmbH
-                    || osStrstr(client_ca_crt, "QQKEwt0b25pZXMgR") == NULL) // tonies GmbH
-                {
-                    TRACE_WARNING("Client CA does not match Tonies (TB2)\r\n");
-                    return false;
-                }
+        uint32_t boxGen = get_settings_id(settingsId)->toniebox.boxGeneration;
+        
+        if (boxGen == 0 || boxGen == 1) { 
+            if (ca_length != boxine_ca_length)
+            {
+                TRACE_WARNING("Client CA length mismatch %" PRIuSIZE " expected %" PRIuSIZE " (TB1)\r\n", ca_length, boxine_ca_length);
+                return false;
+            }
+            if (osStrstr(client_ca_crt, "MC0JveGluZSBHbW") == NULL   // Boxine GmbH
+                || osStrstr(client_ca_crt, "DAlCb3hpbmUgQ") == NULL) // Boxine
+            {
+                TRACE_WARNING("Client CA does not match Boxine (TB1)\r\n");
+                return false;
+            }
+        } else if (boxGen == 2) {
+            if (ca_length != tb2_ca_length)
+            {
+                TRACE_WARNING("Client CA length mismatch %" PRIuSIZE " expected %" PRIuSIZE " (TB2)\r\n", ca_length, tb2_ca_length);
+                return false;
+            }
+            if (osStrstr(client_ca_crt, "Ewt0b25pZXMgR21iS") == NULL   // tonies GmbH
+                || osStrstr(client_ca_crt, "QQKEwt0b25pZXMgR") == NULL) // tonies GmbH
+            {
+                TRACE_WARNING("Client CA does not match Tonies (TB2)\r\n");
+                return false;
             }
         }
         return true;
