@@ -315,6 +315,7 @@ error_t httpServerRequestCallback(HttpConnection *connection, const char_t *uri,
     {
         char_t *subject = connection->tlsContext->client_cert_subject;
         char_t *issuer = connection->tlsContext->client_cert_issuer;
+        uint32_t boxGen = GENERATION_UNKNOWN;
 
         if (osStrstr(issuer, "Boxine Factory SubCA") != NULL || osStrstr(issuer, "Toniebox SubCA") != NULL
             || osStrstr(issuer, "TeddyCloud") != NULL || osStrstr(subject, "TeddyCloud") != NULL || osStrstr(issuer, "Toniebox Root CA") != NULL)
@@ -429,23 +430,27 @@ error_t httpServerRequestCallback(HttpConnection *connection, const char_t *uri,
                         {
                             // CC3235 User-Agent: TB/%firmware-ts% SP/%sp% HW/%hw%
                             client_ctx->settings->internal.toniebox_firmware.boxIC = BOX_CC3235;
+                            boxGen = GENERATION_TB2;
                         }
                         else
                         {
                             // CC3200 User-Agent: TB/%firmware-ts% SP/%sp% HW/%hw%
                             client_ctx->settings->internal.toniebox_firmware.boxIC = BOX_CC3200;
+                            boxGen = GENERATION_TB1;
                         }
                     }
                     else
                     {
                         // ESP32 User-Agent (old): %box-color% TB/%firmware-ts%
                         client_ctx->settings->internal.toniebox_firmware.boxIC = BOX_ESP32;
+                        boxGen = GENERATION_TB1;
                     }
                 }
                 else if (fwEsp != NULL)
                 {
                     // ESP32 User-Agent: toniebox-esp-eu/v5.226.0
                     client_ctx->settings->internal.toniebox_firmware.boxIC = BOX_ESP32;
+                    boxGen = GENERATION_TB1;
                     if (osStrcmp(firmware_info->uaEsp32Firmware, fwEsp) != 0)
                     {
                         settings_set_string_id("internal.toniebox_firmware.uaEsp32Firmware", fwEsp, client_ctx->settings->internal.overlayNumber);
@@ -455,6 +460,8 @@ error_t httpServerRequestCallback(HttpConnection *connection, const char_t *uri,
                 {
                     // TB2 User-Agent: TB2/1.0.22-92f57d4
                     client_ctx->settings->internal.toniebox_firmware.boxIC = BOX_TB2;
+                    boxGen = GENERATION_TB2;
+
                     // TODO: Parse the fwTb2 version
                 }
                 else
@@ -476,6 +483,12 @@ error_t httpServerRequestCallback(HttpConnection *connection, const char_t *uri,
                 firmware_info->uaVersionFirmware = fwVersionTime;
                 firmware_info->uaVersionServicePack = spVersionTime;
                 firmware_info->uaVersionHardware = hwVersionTime;
+
+                if (client_ctx->settings->toniebox.boxGeneration != boxGen)
+                {
+                    TRACE_INFO("Box generation set %d to %d\r\n", client_ctx->settings->toniebox.boxGeneration, boxGen);
+                    settings_set_unsigned_id("toniebox.boxGeneration", boxGen, client_ctx->settings->internal.overlayNumber);
+                }
             }
         }
     }

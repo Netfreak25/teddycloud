@@ -2,6 +2,8 @@
 #include "debug.h"
 #include "error.h"
 #include "fs_port.h"
+#include "fs_ext.h"
+#include "os_ext.h"
 #include "rsa.h"
 #include "rand.h"
 #include "pem_import.h"
@@ -544,7 +546,7 @@ error_t x509ExportEcPrivateKey(const EcCurveInfo *curveInfo,
    return NO_ERROR;
 }
 
-error_t cert_load_ca_ec(const char *ca_cert_setting, const char *ca_key_setting, X509CertInfo *cert, EcPrivateKey *cert_priv)
+error_t cert_load_ca_ec(const char *ca_cert_setting, const char *ca_key_setting, X509CertInfo *cert, EcPrivateKey *cert_priv, uint8_t **server_ca_der_out)
 {
     const char *server_ca = settings_get_string(ca_cert_setting);
     const char *server_key = settings_get_string(ca_key_setting);
@@ -591,6 +593,11 @@ error_t cert_load_ca_ec(const char *ca_cert_setting, const char *ca_key_setting,
         return ERROR_FAILURE;
     }
 
+    if (server_ca_der_out) {
+        *server_ca_der_out = server_ca_der;
+    } else {
+        osFreeMem(server_ca_der);
+    }
     return NO_ERROR;
 }
 
@@ -614,9 +621,10 @@ error_t cert_generate_signed_ec(
     osMemset(&issuer_priv, 0, sizeof(issuer_priv));
     ecInitPrivateKey(&issuer_priv);
 
+    uint8_t *server_ca_der = NULL;
     if (!self_sign)
     {
-        if (cert_load_ca_ec(ca_cert_setting, ca_key_setting, &issuer_cert, &issuer_priv) != NO_ERROR)
+        if (cert_load_ca_ec(ca_cert_setting, ca_key_setting, &issuer_cert, &issuer_priv, &server_ca_der) != NO_ERROR)
         {
             TRACE_ERROR("cert_load_ca_ec failed\r\n");
             ecFreePrivateKey(&issuer_priv);
@@ -640,7 +648,10 @@ error_t cert_generate_signed_ec(
         ecFreePrivateKey(&cert_privkey);
         ecFreePublicKey(&cert_pubkey);
         ecFreeDomainParameters(&params);
-        if (!self_sign) ecFreePrivateKey(&issuer_priv);
+        if (!self_sign) {
+            ecFreePrivateKey(&issuer_priv);
+            if (server_ca_der) osFreeMem(server_ca_der);
+        }
         return ERROR_FAILURE;
     }
 
@@ -650,7 +661,10 @@ error_t cert_generate_signed_ec(
         ecFreePrivateKey(&cert_privkey);
         ecFreePublicKey(&cert_pubkey);
         ecFreeDomainParameters(&params);
-        if (!self_sign) ecFreePrivateKey(&issuer_priv);
+        if (!self_sign) {
+            ecFreePrivateKey(&issuer_priv);
+            if (server_ca_der) osFreeMem(server_ca_der);
+        }
         return ERROR_FAILURE;
     }
 
@@ -661,7 +675,10 @@ error_t cert_generate_signed_ec(
         ecFreePrivateKey(&cert_privkey);
         ecFreePublicKey(&cert_pubkey);
         ecFreeDomainParameters(&params);
-        if (!self_sign) ecFreePrivateKey(&issuer_priv);
+        if (!self_sign) {
+            ecFreePrivateKey(&issuer_priv);
+            if (server_ca_der) osFreeMem(server_ca_der);
+        }
         return ERROR_FAILURE;
     }
 
@@ -673,7 +690,10 @@ error_t cert_generate_signed_ec(
         ecFreePrivateKey(&cert_privkey);
         ecFreePublicKey(&cert_pubkey);
         ecFreeDomainParameters(&params);
-        if (!self_sign) ecFreePrivateKey(&issuer_priv);
+        if (!self_sign) {
+            ecFreePrivateKey(&issuer_priv);
+            if (server_ca_der) osFreeMem(server_ca_der);
+        }
         return ERROR_FAILURE;
     }
 
@@ -816,14 +836,20 @@ error_t cert_generate_signed_ec(
         ecFreePublicKey(&cert_pubkey);
         ecFreePrivateKey(&cert_privkey);
         ecFreeDomainParameters(&params);
-        if (!self_sign) ecFreePrivateKey(&issuer_priv);
+        if (!self_sign) {
+            ecFreePrivateKey(&issuer_priv);
+            if (server_ca_der) osFreeMem(server_ca_der);
+        }
         return ERROR_FAILURE;
     }
 
     ecFreePublicKey(&cert_pubkey);
     ecFreePrivateKey(&cert_privkey);
     ecFreeDomainParameters(&params);
-    if (!self_sign) ecFreePrivateKey(&issuer_priv);
+    if (!self_sign) {
+        ecFreePrivateKey(&issuer_priv);
+        if (server_ca_der) osFreeMem(server_ca_der);
+    }
 
     /* export certificate to PEM */
     size_t cert_pem_size = 0;
@@ -997,52 +1023,98 @@ error_t cert_generate_default_tb2()
     return settings_try_load_certs_id(0);
 }
 
-error_t cert_generate_mac_tb2(const char *mac, const char *dest)
+error_t cert_generate_mac_tb2(const char *mac, const char *dest, bool add_to_settings)
 {
-    if (!dest || osStrlen(mac) != 12)
+    if (!mac || osStrlen(mac) != 12)
     {
         return ERROR_FAILURE;
     }
 
-    uint8_t serial[7];
-    size_t serial_length = 7;
-    char_t subj[32];
+    char mac_upper[13];
+    osStrncpy(mac_upper, mac, 13);
+    mac_upper[12] = '\0';
+    osStringToUpper(mac_upper);
 
-    serial[0] = 0;
-    hex_string_to_bytes(mac, &serial[1]);
-    cert_truncate_serial(serial, &serial_length);
+    char mac_lower[13];
+    osStrncpy(mac_lower, mac, 13);
+    mac_lower[12] = '\0';
+    osStringToLower(mac_lower);
 
-    osSprintf(subj, "%s", mac);
-
-    char_t *client_file = custom_asprintf("%s/client.pem", dest);
-    char_t *private_file = custom_asprintf("%s/client.key", dest);
-    char_t *client_der_file = custom_asprintf("%s/client.der", dest);
-    char_t *private_der_file = custom_asprintf("%s/private.der", dest);
-
-    if (cert_generate_signed_ec(subj, serial, 7, false, false, client_file, private_file, "internal.server_tb2.ca", "internal.server_tb2.ca_key", NULL, 0) != NO_ERROR)
-    {
-        TRACE_ERROR("cert_generate_signed_ec (PEM) failed for client cert\r\n");
-        osFreeMem(client_file);
-        osFreeMem(private_file);
-        osFreeMem(client_der_file);
-        osFreeMem(private_der_file);
-        return ERROR_FAILURE;
+    char *actual_dest = NULL;
+    if (!dest) {
+        char *certdir = get_settings()->internal.certdirfull;
+        if (!certdir) certdir = "certs/client";
+        actual_dest = custom_asprintf("%s/%s", certdir, mac_lower);
+    } else {
+        actual_dest = custom_asprintf("%s", dest);
     }
 
-    if (cert_generate_signed_ec(subj, serial, 7, false, true, client_der_file, private_der_file, "internal.server_tb2.ca", "internal.server_tb2.ca_key", NULL, 0) != NO_ERROR)
+    char_t *client_der_file = custom_asprintf("%s/client.fake.der", actual_dest);
+    char_t *private_der_file = custom_asprintf("%s/private.fake.der", actual_dest);
+    char_t *ca_der_file = custom_asprintf("%s/ca.fake.der", actual_dest);
+
+    if (fsFileExists(client_der_file) && fsFileExists(private_der_file) && fsFileExists(ca_der_file))
     {
-        TRACE_ERROR("cert_generate_signed_ec (DER) failed for client cert\r\n");
-        osFreeMem(client_file);
-        osFreeMem(private_file);
-        osFreeMem(client_der_file);
-        osFreeMem(private_der_file);
-        return ERROR_FAILURE;
+        TRACE_INFO("Fake TB2 client certificates already exist for MAC %s in %s, skipping generation.\r\n", mac_upper, actual_dest);
+    }
+    else
+    {
+        if (!fsDirExists(actual_dest)) {
+            fsCreateDirEx(actual_dest, true);
+        }
+
+        uint8_t serial[7];
+        size_t serial_length = 7;
+        char_t subj[32];
+
+        serial[0] = 0;
+        hex_string_to_bytes(mac_upper, &serial[1]);
+        cert_truncate_serial(serial, &serial_length);
+
+        osSprintf(subj, "%s", mac_upper);
+
+        if (cert_generate_signed_ec(subj, serial, 7, false, true, client_der_file, private_der_file, "internal.server_tb2.ca", "internal.server_tb2.ca_key", NULL, 0) != NO_ERROR)
+        {
+            TRACE_ERROR("cert_generate_signed_ec (DER) failed for client cert\r\n");
+            osFreeMem(client_der_file);
+            osFreeMem(private_der_file);
+            osFreeMem(ca_der_file);
+            osFreeMem(actual_dest);
+            return ERROR_FAILURE;
+        }
+
+        /* Copy the TB2 ca.der into the dir as ca.fake.der */
+        char *server_ca_der = osAllocMem(256);
+        settings_resolve_dir(&server_ca_der, (char*)settings_get_string("core.server_cert_tb2.file.ca_der"), get_settings()->internal.basedirfull);
+        
+        if (fsCopyFile(server_ca_der, ca_der_file, true) != NO_ERROR) {
+            TRACE_ERROR("Failed to copy TB2 ca.der to %s\r\n", ca_der_file);
+        }
+        osFreeMem(server_ca_der);
+
+        TRACE_INFO("Generated fake TB2 client certificates for MAC %s in %s\r\n", mac_upper, actual_dest);
     }
 
-    osFreeMem(client_file);
-    osFreeMem(private_file);
+    /* Update the overlay for the MAC if appropriate */
+    if (add_to_settings)
+    {
+        settings_t *overlay_settings = get_settings_cn(mac_upper);
+        if (overlay_settings)
+        {
+            uint8_t overlayId = overlay_settings->internal.overlayNumber;
+            settings_set_unsigned_id("toniebox.boxGeneration", 2, overlayId);
+            settings_set_string_id("core.client_cert_fake.file.ca", ca_der_file, overlayId);
+            settings_set_string_id("core.client_cert_fake.file.crt", client_der_file, overlayId);
+            settings_set_string_id("core.client_cert_fake.file.key", private_der_file, overlayId);
+            settings_save();
+            TRACE_INFO("Added configuration overlay for %s\r\n", mac_upper);
+        }
+    }
+
+    osFreeMem(ca_der_file);
     osFreeMem(client_der_file);
     osFreeMem(private_der_file);
+    osFreeMem(actual_dest);
 
     return NO_ERROR;
 }

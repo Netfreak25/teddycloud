@@ -124,6 +124,17 @@ static void option_map_init(uint8_t settingsId)
     OPTION_INTERNAL_STRING("core.client_cert.data.crt", &settings->core.client_cert.data.crt, "", "Client certificate data", LEVEL_EXPERT)
     OPTION_INTERNAL_STRING("core.client_cert.data.key", &settings->core.client_cert.data.key, "", "Client key data", LEVEL_EXPERT)
 
+    /* settings for fake client certs */
+    OPTION_TREE_DESC("core.client_cert_fake", "Fake client certificates", LEVEL_DETAIL)
+    OPTION_TREE_DESC("core.client_cert_fake.file", "Fake File certificates", LEVEL_DETAIL)
+    OPTION_STRING("core.client_cert_fake.file.ca", &settings->core.client_cert_fake.file.ca, "certs/client/ca.fake.der", "Fake Client CA", "Fake Client Certificate Authority", LEVEL_DETAIL)
+    OPTION_STRING("core.client_cert_fake.file.crt", &settings->core.client_cert_fake.file.crt, "certs/client/client.fake.der", "Fake Client certificate", "Fake Client certificate", LEVEL_DETAIL)
+    OPTION_STRING("core.client_cert_fake.file.key", &settings->core.client_cert_fake.file.key, "certs/client/private.fake.der", "Fake Client key", "Fake Client key", LEVEL_DETAIL)
+    OPTION_TREE_DESC("core.client_cert_fake.data", "Raw certificates", LEVEL_SECRET)
+    OPTION_INTERNAL_STRING("core.client_cert_fake.data.ca", &settings->core.client_cert_fake.data.ca, "", "Fake Client Certificate Authority", LEVEL_EXPERT)
+    OPTION_INTERNAL_STRING("core.client_cert_fake.data.crt", &settings->core.client_cert_fake.data.crt, "", "Fake Client certificate data", LEVEL_EXPERT)
+    OPTION_INTERNAL_STRING("core.client_cert_fake.data.key", &settings->core.client_cert_fake.data.key, "", "Fake Client key data", LEVEL_EXPERT)
+
     OPTION_STRING("core.allowOrigin", &settings->core.allowOrigin, "", "CORS Allow-Origin", "Set CORS Access-Control-Allow-Origin header", LEVEL_EXPERT)
     OPTION_BOOL("core.boxCertAuth", &settings->core.boxCertAuth, TRUE, "HTTPS box cert auth", "Client certificates are required for access to the HTTPS API for the boxes", LEVEL_EXPERT)
     OPTION_BOOL("core.allowNewBox", &settings->core.allowNewBox, TRUE, "Allow new boxes", "Allow new boxes to be added, if they try to connect", LEVEL_BASIC)
@@ -289,6 +300,8 @@ static void option_map_init(uint8_t settingsId)
     OPTION_TREE_DESC("toniebox", "Toniebox", LEVEL_BASIC)
     OPTION_BOOL("toniebox.api_access", &settings->toniebox.api_access, TRUE, "API access", "Grant access to the API (default value for new boxes)", LEVEL_EXPERT)
     OPTION_BOOL("toniebox.overrideCloud", &settings->toniebox.overrideCloud, TRUE, "Override cloud settings", "Override tonies cloud settings for the toniebox with those set here", LEVEL_BASIC)
+    OPTION_UNSIGNED("toniebox.boxGeneration", &settings->toniebox.boxGeneration, GENERATION_UNKNOWN, GENERATION_UNKNOWN, GENERATION_TB2, "Box Generation", "Generation of the box (TB1/TB2)", LEVEL_EXPERT)
+    // TB1 specific
     OPTION_UNSIGNED("toniebox.max_vol_spk", &settings->toniebox.max_vol_spk, 3, 0, 3, "Limit speaker volume", "0=25%, 1=50%, 2=75%, 3=100%", LEVEL_BASIC)
     OPTION_UNSIGNED("toniebox.max_vol_hdp", &settings->toniebox.max_vol_hdp, 3, 0, 3, "Limit headphone volume", "0=25%, 1=50%, 2=75%, 3=100%", LEVEL_BASIC)
     OPTION_BOOL("toniebox.slap_enabled", &settings->toniebox.slap_enabled, TRUE, "Slap to skip", "Enable track skip via slapping gesture", LEVEL_BASIC)
@@ -873,9 +886,12 @@ static error_t settings_save_ovl(bool overlay)
                     buffer = custom_asprintf("");
                     break;
                 }
-                if (buffer && osStrlen(buffer) > 0)
+                if (buffer)
                 {
-                    fsWriteFile(file, buffer, osStrlen(buffer));
+                    if (osStrlen(buffer) > 0)
+                    {
+                        fsWriteFile(file, buffer, osStrlen(buffer));
+                    }
                     osFreeMem(buffer);
                 }
                 osFreeMem(overlayPrefix);

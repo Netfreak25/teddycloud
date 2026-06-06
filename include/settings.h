@@ -55,6 +55,12 @@ typedef enum
     BOX_ESP32 = 3,
     BOX_TB2 = 4,
 } settings_box_type;
+typedef enum
+{
+    GENERATION_UNKNOWN = 0,
+    GENERATION_TB1 = 1,
+    GENERATION_TB2 = 2,
+} settings_box_generation;
 
 typedef enum
 {
@@ -151,6 +157,9 @@ typedef struct
 {
     bool api_access;
     bool overrideCloud;
+    settings_box_generation boxGeneration;
+
+    // TB1 specific
     uint32_t max_vol_spk;
     uint32_t max_vol_hdp;
     bool slap_enabled;
@@ -254,6 +263,7 @@ typedef struct
     settings_cert_t server;
     settings_cert_t server_tb2;
     settings_cert_t client;
+    settings_cert_t client_fake;
     bool config_init;
     bool config_used;
     bool config_changed;
@@ -319,6 +329,7 @@ typedef struct
     settings_cert_opt_t server_cert;
     settings_cert_opt_t server_cert_tb2;
     settings_cert_opt_t client_cert;
+    settings_cert_opt_t client_cert_fake;
     char *allowOrigin;
     bool boxCertAuth;
     bool allowNewBox;

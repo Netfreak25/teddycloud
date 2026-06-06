@@ -256,6 +256,8 @@ int_t main(int argc, char *argv[])
         const char *destination;
         int generate_server_certs;
         const char *generate_client_cert;
+        const char *generate_client_cert_tb2;
+        int add_to_settings;
         const char *encode;
         const char *encode_test;
         int skip_seconds;
@@ -285,6 +287,8 @@ int_t main(int argc, char *argv[])
                 {"destination", required_argument, 0, 'd'},
                 {"generate-server-certs", no_argument, 0, 'g'},
                 {"generate-client-cert", required_argument, 0, 'c'},
+                {"generate-client-cert-tb2", required_argument, 0, 0x102},
+                {"add-to-settings", no_argument, 0, 0x103},
                 {"encode", required_argument, 0, 'e'},
                 {"encode_test", required_argument, 0, 'E'},
                 {"skip-seconds", required_argument, 0, 'S'},
@@ -323,6 +327,8 @@ int_t main(int argc, char *argv[])
             OPT_SIMPLE_STR('d', destination);
             OPT_SIMPLE_NON('g', generate_server_certs);
             OPT_SIMPLE_STR('c', generate_client_cert);
+            OPT_SIMPLE_STR(0x102, generate_client_cert_tb2);
+            OPT_SIMPLE_NON(0x103, add_to_settings);
             OPT_SIMPLE_STR('e', encode);
             OPT_SIMPLE_STR('E', encode_test);
             OPT_SIMPLE_INT('S', skip_seconds);
@@ -405,6 +411,18 @@ int_t main(int argc, char *argv[])
         }
 
         int_t error = cert_generate_mac(options.generate_client_cert, options.destination);
+        exit_cleanup(error);
+    }
+
+    if (options.generate_client_cert_tb2)
+    {
+        if (osStrlen(options.generate_client_cert_tb2) != 12)
+        {
+            TRACE_ERROR("MAC address must be in format 001122334455\r\n");
+            exit_cleanup(-1);
+        }
+
+        int_t error = cert_generate_mac_tb2(options.generate_client_cert_tb2, options.destination, options.add_to_settings);
         exit_cleanup(error);
     }
 
@@ -644,6 +662,13 @@ static void print_usage(char *argv[])
         "  --generate-client-cert <MAC>\r\n"
         "    Generate a client certificate. Specify the MAC address in the format '001122334455'.\r\n"
         "    Requires: --destination <DIR> to specify where the encoded file will be saved.\r\n"
+        "\r\n"
+        "  --generate-client-cert-tb2 <MAC>\r\n"
+        "    Generate a fake TB2 client certificate. Specify the MAC address in the format '001122334455'.\r\n"
+        "    Optional: --destination <DIR> to specify where the encoded files will be saved. Default is certs/client/<MAC>\r\n"
+        "\r\n"
+        "  --add-to-settings\r\n"
+        "    If set, generated TB2 certificates will automatically be configured in the config.overlay.ini.\r\n"
         "\r\n"
         "  --generate-server-certs\r\n"
         "    Generate default server certificates.\r\n"
