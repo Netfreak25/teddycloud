@@ -305,7 +305,7 @@ static const char *settings_json = "{\n"
 "  \"bedtime_schedules\": [],\n"
 "  \"alarms\": [],\n"
 "  \"bedtime_lightring_brightness\": 75,\n"
-"  \"age_mode\": \"1+\",\n"
+"  \"age_mode\": \"3+\",\n"
 "  \"skipping_enabled\": true,\n"
 "  \"lightring_brightness\": 100\n"
 "}";
