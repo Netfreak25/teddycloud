@@ -1218,17 +1218,20 @@ static setting_item_t *settings_get_by_name_id(const char *item, uint8_t setting
 
 bool settings_get_bool(const char *item)
 {
-    return settings_get_bool_ovl(item, NULL);
+    return settings_get_bool_id(item, 0);
 }
-
 bool settings_get_bool_ovl(const char *item, const char *overlay_name)
+{
+    return settings_get_bool_id(item, get_overlay_id(overlay_name));
+}
+bool settings_get_bool_id(const char *item, uint8_t settingsId)
 {
     if (!item)
     {
         return false;
     }
 
-    setting_item_t *opt = settings_get_by_name_ovl(item, overlay_name);
+    setting_item_t *opt = settings_get_by_name_id(item, settingsId);
     if (!opt || opt->type != TYPE_BOOL)
     {
         return false;
@@ -1273,17 +1276,20 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
 
 int32_t settings_get_signed(const char *item)
 {
-    return settings_get_signed_ovl(item, NULL);
+    return settings_get_signed_id(item, 0);
 }
-
 int32_t settings_get_signed_ovl(const char *item, const char *overlay_name)
+{
+    return settings_get_signed_id(item, get_overlay_id(overlay_name));
+}
+int32_t settings_get_signed_id(const char *item, uint8_t settingsId)
 {
     if (!item)
     {
         return 0;
     }
 
-    setting_item_t *opt = settings_get_by_name_ovl(item, overlay_name);
+    setting_item_t *opt = settings_get_by_name_id(item, settingsId);
     if (!opt || opt->type != TYPE_SIGNED)
     {
         return 0;
@@ -1334,16 +1340,20 @@ bool settings_set_signed_id(const char *item, int32_t value, uint8_t settingsId)
 
 uint32_t settings_get_unsigned(const char *item)
 {
-    return settings_get_unsigned_ovl(item, NULL);
+    return settings_get_unsigned_id(item, 0);
 }
 uint32_t settings_get_unsigned_ovl(const char *item, const char *overlay_name)
+{
+    return settings_get_unsigned_id(item, get_overlay_id(overlay_name));
+}
+uint32_t settings_get_unsigned_id(const char *item, uint8_t settingsId) 
 {
     if (!item)
     {
         return 0;
     }
 
-    setting_item_t *opt = settings_get_by_name_ovl(item, overlay_name);
+    setting_item_t *opt = settings_get_by_name_id(item, settingsId);
     if (!opt || opt->type != TYPE_UNSIGNED)
     {
         return 0;
@@ -1394,21 +1404,23 @@ bool settings_set_unsigned_id(const char *item, uint32_t value, uint8_t settings
 
 float settings_get_float(const char *item)
 {
-    return settings_get_float_ovl(item, NULL);
+    return settings_get_float_id(item, 0);
 }
 float settings_get_float_ovl(const char *item, const char *overlay_name)
+{
+    return settings_get_float_id(item, get_overlay_id(overlay_name));
+}
+float settings_get_float_id(const char *item, uint8_t settingsId)
 {
     if (!item)
     {
         return 0;
     }
-
-    setting_item_t *opt = settings_get_by_name_ovl(item, overlay_name);
+    setting_item_t *opt = settings_get_by_name_id(item, settingsId);
     if (!opt || opt->type != TYPE_FLOAT)
     {
         return 0;
     }
-
     return *((float *)opt->ptr);
 }
 
@@ -1810,16 +1822,27 @@ bool test_boxine_ca(uint8_t settingsId)
     {
         if (ca_length != boxine_ca_length && ca_length != tb2_ca_length)
         {
-            TRACE_WARNING("Client CA length mismatch %" PRIuSIZE " expected %" PRIuSIZE " or %" PRIuSIZE "\r\n", ca_length, boxine_ca_length, tb2_ca_length);
+            TRACE_WARNING("Client CA length mismatch %" PRIuSIZE " expected %" PRIuSIZE " (TB1) or %" PRIuSIZE " (TB2)\r\n", ca_length, boxine_ca_length, tb2_ca_length);
             return false;
         }
         else
         {
-            if (osStrstr(client_ca_crt, "MC0JveGluZSBHbW") == NULL   // Boxine GmbH
-                || osStrstr(client_ca_crt, "DAlCb3hpbmUgQ") == NULL) // Boxine
-            {
-                TRACE_WARNING("Client CA does not match Boxine\r\n");
-                return false;
+            uint32_t boxGen = settings_get_unsigned_id("toniebox.boxGeneration", settingsId);
+            
+            if (boxGen == 0 || boxGen == 1) { 
+                if (osStrstr(client_ca_crt, "MC0JveGluZSBHbW") == NULL   // Boxine GmbH
+                    || osStrstr(client_ca_crt, "DAlCb3hpbmUgQ") == NULL) // Boxine
+                {
+                    TRACE_WARNING("Client CA does not match Boxine (TB1)\r\n");
+                    return false;
+                }
+            } else if (boxGen == 2) {
+                if (osStrstr(client_ca_crt, "Ewt0b25pZXMgR21iS") == NULL   // tonies GmbH
+                    || osStrstr(client_ca_crt, "QQKEwt0b25pZXMgR") == NULL) // tonies GmbH
+                {
+                    TRACE_WARNING("Client CA does not match Tonies (TB2)\r\n");
+                    return false;
+                }
             }
         }
         return true;

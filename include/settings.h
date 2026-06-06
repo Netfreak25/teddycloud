@@ -624,6 +624,7 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId);
  */
 bool settings_get_bool(const char *item);
 bool settings_get_bool_ovl(const char *item, const char *overlay_name);
+bool settings_get_bool_id(const char *item, uint8_t settingsId);
 
 /**
  * @brief Gets the value of an signed integer setting item.
@@ -633,6 +634,7 @@ bool settings_get_bool_ovl(const char *item, const char *overlay_name);
  */
 int32_t settings_get_signed(const char *item);
 int32_t settings_get_signed_ovl(const char *item, const char *overlay_name);
+int32_t settings_get_signed_id(const char *item, uint8_t settingsId);
 
 /**
  * @brief Sets the value of an integer setting item.
@@ -652,6 +654,7 @@ bool settings_set_signed_id(const char *item, int32_t value, uint8_t settingsId)
  */
 uint32_t settings_get_unsigned(const char *item);
 uint32_t settings_get_unsigned_ovl(const char *item, const char *overlay_name);
+uint32_t settings_get_unsigned_id(const char *item, uint8_t settingsId);
 
 /**
  * @brief Sets the value of an unsigned integer setting item.
@@ -671,6 +674,7 @@ bool settings_set_unsigned_id(const char *item, uint32_t value, uint8_t settings
  */
 float settings_get_float(const char *item);
 float settings_get_float_ovl(const char *item, const char *overlay_name);
+float settings_get_float_id(const char *item, uint8_t settingsId);
 
 /**
  * @brief Sets the value of a floating point setting item.
