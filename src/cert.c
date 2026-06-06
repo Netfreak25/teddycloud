@@ -780,7 +780,7 @@ error_t cert_generate_signed_ec(
         cert_req.attributes.extensionReq.basicConstraints.cA = false;
         cert_req.attributes.extensionReq.basicConstraints.pathLenConstraint = -1;
 
-        if (ca_cert_setting == NULL)
+        if (dns_names_count == 0)
         {
             cert_req.attributes.extensionReq.keyUsage.critical = false;
             cert_req.attributes.extensionReq.keyUsage.bitmap = X509_KEY_USAGE_DIGITAL_SIGNATURE | X509_KEY_USAGE_KEY_AGREEMENT;
