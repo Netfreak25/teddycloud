@@ -627,7 +627,16 @@ TAF_ENCODER_CFLAGS = \
 
 wasm:
 	$(QUIET)$(ECHO) '[ ${GREEN}WASM${NC} ] Building WebAssembly TAF encoder'
-	mkdir -p $(WEB_SRC_DIR)/public/wasm/; \
+	mkdir -p $(WEB_SRC_DIR)/public/wasm/
+	@if [ ! -f emsdk/emsdk_env.sh ]; then \
+		echo '[ ${RED}ERR${NC}  ] emsdk not found in emsdk/. Did you run git submodule update --init?'; \
+		exit 1; \
+	fi; \
+	if [ ! -d emsdk/upstream/emscripten ]; then \
+		echo '[ ${GREEN}WASM${NC} ] Installing emsdk latest...'; \
+		cd emsdk && ./emsdk install latest && ./emsdk activate latest && cd ..; \
+	fi; \
+	cd emsdk && . ./emsdk_env.sh >/dev/null 2>&1 && cd ..; \
 	echo '[ ${GREEN}WASM${NC} ] Compiling minimal TAF encoder...'; \
 	emcc \
 		$(TAF_ENCODER_SOURCES) \
