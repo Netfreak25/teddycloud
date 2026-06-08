@@ -29,7 +29,7 @@ jobs:
       uses: andstor/file-existence-action@v3
       with:
         files: "bin/teddycloud.exe"  
-        allow_failure: true 
+        fail: false 
     - name: File exist
       if: steps.check_files.outputs.files_exists == 'true'
       run: echo windows release zip exists!
@@ -85,7 +85,7 @@ jobs:
       uses: andstor/file-existence-action@v3
       with:
         files: "./install/zip/release.zip"  
-        allow_failure: true 
+        fail: false 
     - name: File exist
       if: steps.check_files.outputs.files_exists == 'true'
       run: echo amd64 release zip exists!
