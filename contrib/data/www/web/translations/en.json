@@ -333,6 +333,13 @@
             "parentPath": "Parent directory:",
             "placeholder": "Enter the folder name"
         },
+        "customJsonSnippetModal": {
+            "allFiles": "Showing snippet for all TAF files with valid header data.",
+            "noValidHeaders": "No valid TAF headers found.",
+            "ok": "OK",
+            "selectedFiles": "Showing snippet for selected TAF files only.",
+            "title": "tonies.custom.json snippet"
+        },
         "date": "Date",
         "delete": "Delete",
         "deleteMultiple": "Delete {{selectedRowCount}} selected rows",
@@ -2274,19 +2281,19 @@
             "bulkAdd": {
                 "button": "Bulk add tonies",
                 "modal": {
+                    "clearSelection": "Clear all",
                     "confirm": "Add {{count}} to sheet",
                     "itemsUnit": "tonies",
                     "itemUnit": "tonie",
                     "leftTitle": "tonies.json",
                     "notFound": "No matching tonies",
+                    "resultsTruncated": "Showing first {{shown}} of {{total}} — keep typing to narrow",
                     "rightTitle": "Queued to add",
                     "searchHint": "Type at least 2 characters to search tonies.json.",
                     "searchPlaceholder": "Search",
                     "searchPrompt": "Search tonies.json…",
-                    "selectedCount": "{{count}} queued to add",
                     "selectAll": "Select all",
-                    "clearSelection": "Clear all",
-                    "resultsTruncated": "Showing first {{shown}} of {{total}} — keep typing to narrow",
+                    "selectedCount": "{{count}} queued to add",
                     "title": "Bulk add tonies to print sheet"
                 }
             },

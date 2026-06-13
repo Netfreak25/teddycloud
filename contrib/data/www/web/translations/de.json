@@ -333,6 +333,13 @@
             "parentPath": "übergeordnete(r) Ordner:",
             "placeholder": "Gib den Ordnernamen an"
         },
+        "customJsonSnippetModal": {
+            "allFiles": "Zeigt das Snippet für alle TAF-Dateien mit gültigen Header-Daten.",
+            "noValidHeaders": "Keine gültigen TAF-Header gefunden.",
+            "ok": "OK",
+            "selectedFiles": "Zeigt das Snippet nur für die ausgewählten TAF-Dateien.",
+            "title": "Snippet für tonies.custom.json"
+        },
         "date": "Datum",
         "delete": "Löschen",
         "deleteMultiple": "{{selectedRowCount}} markierte Zeilen löschen",
@@ -2274,19 +2281,19 @@
             "bulkAdd": {
                 "button": "Mehrere Tonies hinzufügen",
                 "modal": {
+                    "clearSelection": "Alle entfernen",
                     "confirm": "{{count}} hinzufügen",
                     "itemsUnit": "Tonies",
                     "itemUnit": "Tonie",
                     "leftTitle": "tonies.json",
                     "notFound": "Keine passenden Tonies",
+                    "resultsTruncated": "Erste {{shown}} von {{total}} werden angezeigt — weiter tippen zum Eingrenzen",
                     "rightTitle": "Zum Hinzufügen vorgemerkt",
                     "searchHint": "Bitte mindestens 2 Zeichen eingeben, um tonies.json zu durchsuchen.",
                     "searchPlaceholder": "Suchen",
                     "searchPrompt": "tonies.json durchsuchen…",
-                    "selectedCount": "{{count}} zum Hinzufügen vorgemerkt",
                     "selectAll": "Alle auswählen",
-                    "clearSelection": "Alle entfernen",
-                    "resultsTruncated": "Erste {{shown}} von {{total}} werden angezeigt — weiter tippen zum Eingrenzen",
+                    "selectedCount": "{{count}} zum Hinzufügen vorgemerkt",
                     "title": "Mehrere Tonies zum Druckbogen hinzufügen"
                 }
             },
