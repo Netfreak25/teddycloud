@@ -1290,7 +1290,14 @@ static error_t tap_generate_taf(tonie_audio_playlist_t *tap, size_t *runtime_ind
             }
             if (error == NO_ERROR)
             {
-                error = ffmpeg_stream(source, runtime_files_count, current_source, tmp_taf, 0, generator_active, &sweep, false, preserve_on_client_disconnect);
+                if (tap->audio_id != 0)
+                {
+                    error = ffmpeg_stream_with_audio_id(source, runtime_files_count, current_source, tmp_taf, 0, generator_active, &sweep, false, preserve_on_client_disconnect, (uint32_t)tap->audio_id);
+                }
+                else
+                {
+                    error = ffmpeg_stream(source, runtime_files_count, current_source, tmp_taf, 0, generator_active, &sweep, false, preserve_on_client_disconnect);
+                }
             }
         }
         if (error == NO_ERROR)

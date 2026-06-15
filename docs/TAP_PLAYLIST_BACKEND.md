@@ -10,7 +10,7 @@ The main backend change is the TAF-only remux path. It avoids PCM decoding and O
 
 The HTTP/cloud handling was changed so live TAP generation streams from `.taf.tmp`, keeps that temporary file alive until the response and generator are done, publishes the final file only after successful generation, and treats the TAP `audio_id` as the playlist version source.
 
-The fallback path remains deliberately conservative. MP3 and non-TAF entries still use FFmpeg generation because their final SHA1, Ogg state and track pages are not known before encoding completes.
+The fallback path remains deliberately conservative. MP3 and non-TAF entries still use FFmpeg generation because their final SHA1, Ogg state and track pages are not known before encoding completes. For stable TAP playlists, the FFmpeg-generated final `.taf` still uses the TAP `audio_id` so the regenerated file can become current after the planned redownload.
 
 ## Code changes by file
 
@@ -70,15 +70,15 @@ The fallback path remains deliberately conservative. MP3 and non-TAF entries sti
 
 ### `src/tonie_audio_playlist.c`
 
-- What changed: implements TAP load validation, shuffle/runtime indices, TAF-only remux, live-header prediction, replace-safe publish and generator task lifecycle. Normal and shuffle-all playlists are limited by the runtime TAF source/chapter limit; shuffle-one playlists may load a larger candidate catalog because only one entry is selected for generation.
+- What changed: implements TAP load validation, shuffle/runtime indices, TAF-only remux, live-header prediction, replace-safe publish and generator task lifecycle. Normal and shuffle-all playlists are limited by the runtime TAF source/chapter limit; shuffle-one playlists may load a larger candidate catalog because only one entry is selected for generation. The FFmpeg fallback passes the TAP `audio_id` into generated finals when the playlist has a stable non-zero version.
 - Why: TAF-only playlists need a fast path that can generate cache-safe bytes and metadata without FFmpeg re-encoding.
-- Why not another solution: raw payload concatenation does not produce a valid final stream; FFmpeg re-encoding is slower and cannot know exact first-download header values before encoding completes. Increasing the runtime source limit would exceed the current TAF chapter/source constraints, while keeping the loader limit at the runtime limit would unnecessarily block large shuffle-one catalogs.
+- Why not another solution: raw payload concatenation does not produce a valid final stream; FFmpeg re-encoding is slower and cannot know exact first-download header values before encoding completes. Letting FFmpeg own the final `audio_id` is correct for generic conversion, but not for TAP because the `.tap` file defines the content version. Increasing the runtime source limit would exceed the current TAF chapter/source constraints, while keeping the loader limit at the runtime limit would unnecessarily block large shuffle-one catalogs.
 
 ### `src/toniefile.c`
 
-- What changed: supports writing complete TAF headers directly, centralizes source limits, preserves close errors and keeps active-state handling consistent.
+- What changed: supports writing complete TAF headers directly, centralizes source limits, preserves close errors, keeps active-state handling consistent and adds an FFmpeg stream entry point with an explicit `audio_id`.
 - Why: remux needs to write a final-equivalent header at stream start, while FFmpeg fallback still relies on normal `toniefile_close()` finalization.
-- Why not another solution: duplicating protobuf header writing in playlist code would split TAF format ownership; ignoring close errors can publish invalid output as successful generation.
+- Why not another solution: duplicating protobuf header writing in playlist code would split TAF format ownership; ignoring close errors can publish invalid output as successful generation. Changing the existing `ffmpeg_stream()` semantics would alter non-TAP behavior, so the explicit-Audio-ID path is added alongside the existing time-based wrapper.
 
 ## Stable cache requirements
 
@@ -119,6 +119,10 @@ MP3 and non-TAF playlist entries intentionally fall back to FFmpeg generation. T
 - exact final track pages are not known before encoding completes,
 - the first download requires a later freshness/redownload cycle,
 - the box can play its OHOH box error sound because the first live stream is not fully cache-safe.
+
+For stable TAP playlists with `audio_id != 0`, this fallback writes the TAP `audio_id` into the final FFmpeg-generated `.taf`. This keeps the final file aligned with the playlist version after the first generation/redownload cycle and prevents an endless re-encode/freshness loop.
+
+For TAP playlists with `audio_id == 0`, and for generic non-TAP FFmpeg streaming/conversion, the existing time-based FFmpeg `audio_id` behavior is preserved.
 
 This is a deliberate fallback until a reliable prediction or pre-generation strategy exists for non-TAF sources.
 

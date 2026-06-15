@@ -760,6 +760,12 @@ error_t ffmpeg_convert(char source[TONIEFILE_MAX_SOURCES][PATH_LEN], size_t sour
 
 error_t ffmpeg_stream(char source[TONIEFILE_MAX_SOURCES][PATH_LEN], size_t source_len, size_t *current_source, const char *target_taf, size_t skip_seconds, bool_t *active, bool_t *sweep, bool_t append, bool_t isStream)
 {
+    uint32_t audio_id = (uint32_t)(time(NULL) - TEDDY_BENCH_AUDIO_ID_DEDUCT);
+    return ffmpeg_stream_with_audio_id(source, source_len, current_source, target_taf, skip_seconds, active, sweep, append, isStream, audio_id);
+}
+
+error_t ffmpeg_stream_with_audio_id(char source[TONIEFILE_MAX_SOURCES][PATH_LEN], size_t source_len, size_t *current_source, const char *target_taf, size_t skip_seconds, bool_t *active, bool_t *sweep, bool_t append, bool_t isStream, uint32_t audio_id)
+{
     TRACE_INFO("Encode %" PRIuSIZE " sources: \r\n", source_len);
     for (size_t i = 0; i < source_len; i++)
     {
@@ -798,7 +804,7 @@ error_t ffmpeg_stream(char source[TONIEFILE_MAX_SOURCES][PATH_LEN], size_t sourc
     {
         size = get_settings()->encode.stream_max_size - TONIE_HEADER_LENGTH;
     }
-    toniefile_t *taf = toniefile_create(target_taf, time(NULL) - TEDDY_BENCH_AUDIO_ID_DEDUCT, append, size);
+    toniefile_t *taf = toniefile_create(target_taf, audio_id, append, size);
     if (!taf)
     {
         TRACE_ERROR("toniefile_create() failed, aborting\r\n");
