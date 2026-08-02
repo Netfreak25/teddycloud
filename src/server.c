@@ -34,6 +34,8 @@
 #include "stdbool.h"              // for true, bool, false
 #include "tls.h"                  // for _TlsContext, tlsLoadCertificate
 #include "tls_adapter.h"          // for tls_context_key_log_init, tlsCache
+#include "tb2_https_passthrough.h"
+#include "tb2_mqtt_passthrough.h"
 #include "toniebox_state.h"       // for get_toniebox_state, get_toniebox_s...
 #include "toniebox_state_type.h"  // for toniebox_state_box_t, toniebox_sta...
 #include "toniesJson.h"           // for tonieboxes_update, tonies_deinit
@@ -99,6 +101,23 @@ typedef struct
 } request_type_t;
 
 error_t handleCacheDownload(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
+error_t handleApiTb2HttpsUpstreamStatus(HttpConnection *connection, const char_t *uri,
+                                        const char_t *queryString, client_ctx_t *client_ctx)
+{
+    (void)uri;
+    (void)queryString;
+    (void)client_ctx;
+    return tb2_https_passthrough_write_status(connection);
+}
+
+error_t handleApiMqttClientUpstreamStatus(HttpConnection *connection, const char_t *uri,
+                                          const char_t *queryString, client_ctx_t *client_ctx)
+{
+    (void)uri;
+    (void)queryString;
+    (void)client_ctx;
+    return tb2_mqtt_passthrough_write_status(connection);
+}
 
 /* const for now. later maybe dynamic? */
 request_type_t request_paths[] = {
@@ -139,6 +158,8 @@ request_type_t request_paths[] = {
     {REQ_GET, "/api/fileIndexV2", SERTY_WEB, &handleApiFileIndexV2},
     {REQ_GET, "/api/fileIndex", SERTY_WEB, &handleApiFileIndex},
     {REQ_GET, "/api/stats", SERTY_WEB, &handleApiStats},
+    {REQ_GET, "/api/tb2-https-upstream/status", SERTY_WEB, &handleApiTb2HttpsUpstreamStatus},
+    {REQ_GET, "/api/mqtt-client-upstream/status", SERTY_WEB, &handleApiMqttClientUpstreamStatus},
     {REQ_GET, "/api/toniesJsonSearch", SERTY_WEB, &handleApiToniesJsonSearch},
     {REQ_GET, "/api/toniesJsonUpdate", SERTY_WEB, &handleApiToniesJsonUpdate},
     {REQ_GET, "/api/toniesJsonReload", SERTY_WEB, &handleApiToniesJsonReload},
@@ -153,6 +174,10 @@ request_type_t request_paths[] = {
     {REQ_GET, "/api/getTagIndex", SERTY_WEB, &handleApiTagIndex},
     {REQ_GET, "/api/getTagInfo", SERTY_WEB, &handleApiTagInfo},
     {REQ_GET, "/api/getBoxes", SERTY_WEB, &handleApiGetBoxes},
+    {REQ_POST, "/api/box/playback", SERTY_WEB, &handleApiBoxPlayback},
+    {REQ_POST, "/api/box/volume", SERTY_WEB, &handleApiBoxVolume},
+    {REQ_POST, "/api/box/ping", SERTY_WEB, &handleApiBoxPing},
+    {REQ_POST, "/api/box/bedtime", SERTY_WEB, &handleApiBoxBedtime},
     {REQ_POST, "/api/assignUnknown", SERTY_WEB, &handleApiAssignUnknown},
     {REQ_GET, "/api/settings/getIndex", SERTY_WEB, &handleApiGetIndex},
     {REQ_GET, "/api/settings/get/", SERTY_WEB, &handleApiSettingsGet},
@@ -283,6 +308,8 @@ error_t httpServerRequestCallback(HttpConnection *connection, const char_t *uri,
 {
     size_t openRequests = ++openRequestsLast;
     error_t error = NO_ERROR;
+    const bool quiet_status_request = !osStrcmp(uri, "/api/tb2-https-upstream/status") ||
+                                      !osStrcmp(uri, "/api/mqtt-client-upstream/status");
     connection->private.api_access_only = is_api_only;
 
     stats_update("connections", 1);
@@ -290,20 +317,28 @@ error_t httpServerRequestCallback(HttpConnection *connection, const char_t *uri,
     char *request_source;
     if (connection->tlsContext != NULL && osStrlen(connection->tlsContext->client_cert_issuer))
     {
-        TRACE_DEBUG("Certificate authentication:\r\n");
-        TRACE_DEBUG("  Issuer:     '%s'\r\n", connection->tlsContext->client_cert_issuer);
-        TRACE_DEBUG("  Subject:    '%s'\r\n", connection->tlsContext->client_cert_subject);
-        TRACE_DEBUG("  Serial:     '%s'\r\n", connection->tlsContext->client_cert_serial);
+        if (!quiet_status_request)
+        {
+            TRACE_DEBUG("Certificate authentication:\r\n");
+            TRACE_DEBUG("  Issuer:     '%s'\r\n", connection->tlsContext->client_cert_issuer);
+            TRACE_DEBUG("  Subject:    '%s'\r\n", connection->tlsContext->client_cert_subject);
+            TRACE_DEBUG("  Serial:     '%s'\r\n", connection->tlsContext->client_cert_serial);
+        }
         request_source = connection->tlsContext->client_cert_subject;
     }
     else
     {
-        TRACE_DEBUG("No certificate authentication\r\n");
+        if (!quiet_status_request)
+        {
+            TRACE_DEBUG("No certificate authentication\r\n");
+        }
         request_source = "unknown/web";
     }
-    TRACE_DEBUG("Started server request to %s, request %" PRIuSIZE ", by %s\r\n", uri, openRequests, request_source);
-
-    TRACE_DEBUG(" >> client requested '%s' via %s \n", uri, connection->request.method);
+    if (!quiet_status_request)
+    {
+        TRACE_DEBUG("Started server request to %s, request %" PRIuSIZE ", by %s\r\n", uri, openRequests, request_source);
+        TRACE_DEBUG(" >> client requested '%s' via %s \n", uri, connection->request.method);
+    }
 
     mutex_lock(MUTEX_CLIENT_CTX);
     client_ctx_t *client_ctx = &connection->private.client_ctx;
@@ -488,6 +523,7 @@ error_t httpServerRequestCallback(HttpConnection *connection, const char_t *uri,
                 {
                     TRACE_INFO("Box generation set %d to %d\r\n", client_ctx->settings->toniebox.boxGeneration, boxGen);
                     settings_set_unsigned_id("toniebox.boxGeneration", boxGen, client_ctx->settings->internal.overlayNumber);
+                    settings_try_load_certs_id(client_ctx->settings->internal.overlayNumber);
                 }
             }
         }
@@ -579,7 +615,10 @@ error_t httpServerRequestCallback(HttpConnection *connection, const char_t *uri,
         }
     } while (0);
 
-    TRACE_DEBUG("Stopped server request to %s, request %" PRIuSIZE "\r\n", uri, openRequests);
+    if (!quiet_status_request)
+    {
+        TRACE_DEBUG("Stopped server request to %s, request %" PRIuSIZE "\r\n", uri, openRequests);
+    }
     openRequestsLast--;
     return error;
 }
@@ -775,7 +814,16 @@ error_t httpServerBoxTlsInitCallback(HttpConnection *connection, TlsContext *tls
         uint32_t trustedCaListLen = 0;
         for (uint8_t settingsId = 1; settingsId < MAX_OVERLAYS; settingsId++)
         {
-            const char *cert = get_settings_id(settingsId)->internal.client.crt;
+            settings_t *overlaySettings = get_settings_id(settingsId);
+            const char *cert = NULL;
+            if (overlaySettings->toniebox.boxGeneration == GENERATION_TB1)
+            {
+                cert = overlaySettings->internal.client_tb1.crt;
+            }
+            else if (overlaySettings->toniebox.boxGeneration == GENERATION_TB2)
+            {
+                cert = overlaySettings->internal.client_tb2.crt;
+            }
             if (cert != NULL)
             {
                 trustedCaListLen += osStrlen(cert);
@@ -788,7 +836,16 @@ error_t httpServerBoxTlsInitCallback(HttpConnection *connection, TlsContext *tls
             trustedCaList[0] = '\0';
             for (uint8_t settingsId = 1; settingsId < MAX_OVERLAYS; settingsId++)
             {
-                const char *cert = get_settings_id(settingsId)->internal.client.crt;
+                settings_t *overlaySettings = get_settings_id(settingsId);
+                const char *cert = NULL;
+                if (overlaySettings->toniebox.boxGeneration == GENERATION_TB1)
+                {
+                    cert = overlaySettings->internal.client_tb1.crt;
+                }
+                else if (overlaySettings->toniebox.boxGeneration == GENERATION_TB2)
+                {
+                    cert = overlaySettings->internal.client_tb2.crt;
+                }
                 if (cert != NULL)
                 {
                     osStrcat(trustedCaList, cert);
@@ -855,6 +912,17 @@ void server_init(bool test)
     }
     settings_set_bool("internal.exit", FALSE);
     sse_init();
+    if (tb2_https_passthrough_init() != NO_ERROR)
+    {
+        TRACE_ERROR("Failed to initialize TB2 HTTPS passthrough\r\n");
+        return;
+    }
+    if (tb2_mqtt_passthrough_init() != NO_ERROR)
+    {
+        TRACE_ERROR("Failed to initialize TB2 MQTT passthrough\r\n");
+        tb2_https_passthrough_deinit();
+        return;
+    }
 
     HttpServerSettings http_settings;
     HttpServerSettings https_web_settings;
@@ -902,6 +970,7 @@ void server_init(bool test)
     https_api_settings.connections = httpsApiConnections;
     https_api_settings.port = settings_get_unsigned("core.server.https_api_port");
     https_api_settings.tlsInitCallback = httpServerBoxTlsInitCallback;
+    https_api_settings.postTlsCallback = tb2_https_passthrough_post_tls;
     https_api_settings.requestCallback = httpServerAPIRequestCallback;
 
     error_t err = httpServerInit(&http_context, &http_settings);
@@ -1035,7 +1104,12 @@ void server_init(bool test)
             if (internal->config_init)
             {
                 time_t curr_time = time(NULL);
-                if (curr_time > internal->last_connection + 1)
+                if (mqtt_server_has_active_box_connection((uint8_t)i))
+                {
+                    internal->online = true;
+                    internal->last_connection = curr_time;
+                }
+                else if (curr_time > internal->last_connection + 1)
                 {
                     internal->online = false;
                 }
@@ -1047,6 +1121,8 @@ void server_init(bool test)
         }
     }
     mqtt_server_deinit();
+    tb2_mqtt_passthrough_deinit();
+    tb2_https_passthrough_deinit();
     tonies_deinit();
     cache_deinit();
     mutex_manager_deinit();

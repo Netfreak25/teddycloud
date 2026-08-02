@@ -26,6 +26,7 @@ static error_t settings_save_ovl(bool overlay);
 static error_t settings_load_ovl(bool overlay);
 static setting_item_t *settings_get_by_name_id(const char *item, uint8_t settingsId);
 static char *settings_sanitize_box_id(const char *input_id);
+static bool settings_migrate_id(uint8_t settingsId);
 
 /* macros */
 #define ERR_RETURN(command)    \
@@ -40,11 +41,14 @@ static char *settings_sanitize_box_id(const char *input_id);
 
 #define SETTINGS_LOAD_BUFFER_LEN 256
 #define OVERLAY_CONFIG_PREFIX "overlay."
+#define TB1_CLIENT_CA_PEM_LENGTH 2008
+#define TB2_CLIENT_CA_PEM_LENGTH 898
 static settings_t Settings_Overlay[MAX_OVERLAYS];
 static setting_item_t *Option_Map_Overlay[MAX_OVERLAYS];
 static uint16_t settings_size = 0;
 static char *config_file_path = NULL;
 static char *config_overlay_file_path = NULL;
+static uint32_t settings_source_config_version = CONFIG_VERSION;
 DateTime settings_last_load;
 DateTime settings_last_load_ovl;
 
@@ -73,7 +77,8 @@ static void option_map_init(uint8_t settingsId)
 
     OPTION_TREE_DESC("core", "HTTP server", LEVEL_BASIC)
     OPTION_STRING("core.host_url", &settings->core.host_url, "http://localhost", "Host URL", "URL to teddyCloud server", LEVEL_BASIC)
-    OPTION_STRING("core.certdir", &settings->core.certdir, "certs/client", "Cert dir", "Directory to upload genuine client certificates", LEVEL_EXPERT)
+    OPTION_STRING("core.certdir", &settings->core.certdir, "certs/client", "Cert dir", "Directory to upload global TB1 or box-specific client certificates", LEVEL_EXPERT)
+    OPTION_STRING("core.certdir_tb2", &settings->core.certdir_tb2, "certs/client_tb2", "Cert dir (TB2)", "Directory to upload genuine TB2 client certificates", LEVEL_EXPERT)
     OPTION_INTERNAL_STRING("core.configdir", &settings->core.configdir, CONFIG_BASE_PATH, "Configuration dir", LEVEL_EXPERT)
     OPTION_STRING("core.contentdir", &settings->core.contentdir, "default", "Content dir", "Directory for placing cloud content", LEVEL_DETAIL)
     OPTION_STRING("core.librarydir", &settings->core.librarydir, "library", "Library dir", "Directory of the audio library", LEVEL_DETAIL)
@@ -88,7 +93,7 @@ static void option_map_init(uint8_t settingsId)
     OPTION_BOOL("core.new_webgui_as_default", &settings->core.new_webgui_as_default, TRUE, "New WebGUI", "Use new WebGUI as default", LEVEL_EXPERT)
 
     OPTION_TREE_DESC("core.server_cert", "HTTPS server certificates", LEVEL_EXPERT)
-    OPTION_TREE_DESC("core.client_cert.file", "File certificates", LEVEL_EXPERT)
+    OPTION_TREE_DESC("core.server_cert.file", "File certificates", LEVEL_EXPERT)
     OPTION_STRING("core.server_cert.file.ca", &settings->core.server_cert.file.ca, "certs/server/ca-root.pem", "CA certificate", "CA certificate", LEVEL_EXPERT)
     OPTION_STRING("core.server_cert.file.ca_der", &settings->core.server_cert.file.ca_der, "certs/server/ca.der", "CA certificate as DER", "CA certificate as DER", LEVEL_EXPERT)
     OPTION_STRING("core.server_cert.file.ca_key", &settings->core.server_cert.file.ca_key, "certs/server/ca-key.pem", "CA key", "CA key", LEVEL_EXPERT)
@@ -114,15 +119,36 @@ static void option_map_init(uint8_t settingsId)
     OPTION_INTERNAL_STRING("core.server_cert_tb2.data.key", &settings->core.server_cert_tb2.data.key, "", "Server key data (TB2)", LEVEL_EXPERT)
 
     /* settings for HTTPS/cloud client */
-    OPTION_TREE_DESC("core.client_cert", "Cloud client certificates", LEVEL_DETAIL)
-    OPTION_TREE_DESC("core.client_cert.file", "File certificates", LEVEL_DETAIL)
-    OPTION_STRING("core.client_cert.file.ca", &settings->core.client_cert.file.ca, "certs/client/ca.der", "Client CA", "Client Certificate Authority", LEVEL_DETAIL)
-    OPTION_STRING("core.client_cert.file.crt", &settings->core.client_cert.file.crt, "certs/client/client.der", "Client certificate", "Client certificate", LEVEL_DETAIL)
-    OPTION_STRING("core.client_cert.file.key", &settings->core.client_cert.file.key, "certs/client/private.der", "Client key", "Client key", LEVEL_DETAIL)
-    OPTION_TREE_DESC("core.client_cert.data", "Raw certificates", LEVEL_SECRET)
-    OPTION_INTERNAL_STRING("core.client_cert.data.ca", &settings->core.client_cert.data.ca, "", "Client Certificate Authority", LEVEL_EXPERT)
-    OPTION_INTERNAL_STRING("core.client_cert.data.crt", &settings->core.client_cert.data.crt, "", "Client certificate data", LEVEL_EXPERT)
-    OPTION_INTERNAL_STRING("core.client_cert.data.key", &settings->core.client_cert.data.key, "", "Client key data", LEVEL_EXPERT)
+    /* Legacy TB1 IDs are read only as a v18 -> v19 migration source. */
+    OPTION_ADV_TREE_DESC("core.client_cert", NULL, NULL, "Legacy TB1 client certificates", true, false, LEVEL_NONE)
+    OPTION_ADV_TREE_DESC("core.client_cert.file", NULL, NULL, "Legacy TB1 certificate files", true, false, LEVEL_NONE)
+    OPTION_INTERNAL_STRING("core.client_cert.file.ca", &settings->core.client_cert_legacy.file.ca, "certs/client/ca.der", "Legacy client CA (TB1)", LEVEL_NONE)
+    OPTION_INTERNAL_STRING("core.client_cert.file.crt", &settings->core.client_cert_legacy.file.crt, "certs/client/client.der", "Legacy client certificate (TB1)", LEVEL_NONE)
+    OPTION_INTERNAL_STRING("core.client_cert.file.key", &settings->core.client_cert_legacy.file.key, "certs/client/private.der", "Legacy client key (TB1)", LEVEL_NONE)
+    OPTION_ADV_TREE_DESC("core.client_cert.data", NULL, NULL, "Legacy raw TB1 certificates", true, false, LEVEL_NONE)
+    OPTION_INTERNAL_STRING("core.client_cert.data.ca", &settings->core.client_cert_legacy.data.ca, "", "Legacy client certificate authority (TB1)", LEVEL_NONE)
+    OPTION_INTERNAL_STRING("core.client_cert.data.crt", &settings->core.client_cert_legacy.data.crt, "", "Legacy client certificate data (TB1)", LEVEL_NONE)
+    OPTION_INTERNAL_STRING("core.client_cert.data.key", &settings->core.client_cert_legacy.data.key, "", "Legacy client key data (TB1)", LEVEL_NONE)
+
+    OPTION_TREE_DESC("core.client_cert_tb1", "Cloud client certificates (TB1)", LEVEL_DETAIL)
+    OPTION_TREE_DESC("core.client_cert_tb1.file", "Per-box certificate files (TB1)", LEVEL_DETAIL)
+    OPTION_STRING("core.client_cert_tb1.file.ca", &settings->core.client_cert_tb1.file.ca, "certs/client/ca.der", "Client CA (TB1)", "Original TB1 upstream trust CA", LEVEL_DETAIL)
+    OPTION_STRING("core.client_cert_tb1.file.crt", &settings->core.client_cert_tb1.file.crt, "certs/client/client.der", "Client certificate (TB1)", "Original TB1 upstream client certificate", LEVEL_DETAIL)
+    OPTION_STRING("core.client_cert_tb1.file.key", &settings->core.client_cert_tb1.file.key, "certs/client/private.der", "Client key (TB1)", "Original TB1 upstream private key", LEVEL_DETAIL)
+    OPTION_TREE_DESC("core.client_cert_tb1.data", "Raw certificates (TB1)", LEVEL_SECRET)
+    OPTION_INTERNAL_STRING("core.client_cert_tb1.data.ca", &settings->core.client_cert_tb1.data.ca, "", "Client Certificate Authority (TB1)", LEVEL_EXPERT)
+    OPTION_INTERNAL_STRING("core.client_cert_tb1.data.crt", &settings->core.client_cert_tb1.data.crt, "", "Client certificate data (TB1)", LEVEL_EXPERT)
+    OPTION_INTERNAL_STRING("core.client_cert_tb1.data.key", &settings->core.client_cert_tb1.data.key, "", "Client key data (TB1)", LEVEL_EXPERT)
+
+    OPTION_TREE_DESC("core.client_cert_tb2", "Cloud client certificates (TB2)", LEVEL_DETAIL)
+    OPTION_TREE_DESC("core.client_cert_tb2.file", "Per-box certificate files (TB2)", LEVEL_DETAIL)
+    OPTION_STRING("core.client_cert_tb2.file.ca", &settings->core.client_cert_tb2.file.ca, "certs/client_tb2/ca.der", "Client CA (TB2)", "Original TB2 upstream trust CA", LEVEL_DETAIL)
+    OPTION_STRING("core.client_cert_tb2.file.crt", &settings->core.client_cert_tb2.file.crt, "certs/client_tb2/client.der", "Client certificate (TB2)", "Original TB2 upstream client certificate", LEVEL_DETAIL)
+    OPTION_STRING("core.client_cert_tb2.file.key", &settings->core.client_cert_tb2.file.key, "certs/client_tb2/private.der", "Client key (TB2)", "Original TB2 upstream private key", LEVEL_DETAIL)
+    OPTION_TREE_DESC("core.client_cert_tb2.data", "Raw certificates (TB2)", LEVEL_SECRET)
+    OPTION_INTERNAL_STRING("core.client_cert_tb2.data.ca", &settings->core.client_cert_tb2.data.ca, "", "Client Certificate Authority (TB2)", LEVEL_EXPERT)
+    OPTION_INTERNAL_STRING("core.client_cert_tb2.data.crt", &settings->core.client_cert_tb2.data.crt, "", "Client certificate data (TB2)", LEVEL_EXPERT)
+    OPTION_INTERNAL_STRING("core.client_cert_tb2.data.key", &settings->core.client_cert_tb2.data.key, "", "Client key data (TB2)", LEVEL_EXPERT)
 
     /* settings for fake client certs */
     OPTION_TREE_DESC("core.client_cert_fake", "Fake client certificates", LEVEL_DETAIL)
@@ -168,9 +194,13 @@ static void option_map_init(uint8_t settingsId)
     OPTION_INTERNAL_STRING("internal.server_tb2.crt", &settings->internal.server_tb2.crt, "", "Server certificate data (TB2)", LEVEL_SECRET)
     OPTION_INTERNAL_STRING("internal.server_tb2.key", &settings->internal.server_tb2.key, "", "Server key data (TB2)", LEVEL_SECRET)
     OPTION_INTERNAL_STRING("internal.server_tb2.cert_chain", &settings->internal.server_tb2.cert_chain, "", "TLS certificate chain (TB2)", LEVEL_SECRET)
-    OPTION_INTERNAL_STRING("internal.client.ca", &settings->internal.client.ca, "", "Client CA", LEVEL_SECRET)
-    OPTION_INTERNAL_STRING("internal.client.crt", &settings->internal.client.crt, "", "Client certificate data", LEVEL_SECRET)
-    OPTION_INTERNAL_STRING("internal.client.key", &settings->internal.client.key, "", "Client key data", LEVEL_SECRET)
+    OPTION_INTERNAL_STRING("internal.certdirfull_tb2", &settings->internal.certdirfull_tb2, "", "Absolute client certificate directory (TB2)", LEVEL_SECRET)
+    OPTION_INTERNAL_STRING("internal.client_tb1.ca", &settings->internal.client_tb1.ca, "", "Client CA (TB1)", LEVEL_SECRET)
+    OPTION_INTERNAL_STRING("internal.client_tb1.crt", &settings->internal.client_tb1.crt, "", "Client certificate data (TB1)", LEVEL_SECRET)
+    OPTION_INTERNAL_STRING("internal.client_tb1.key", &settings->internal.client_tb1.key, "", "Client key data (TB1)", LEVEL_SECRET)
+    OPTION_INTERNAL_STRING("internal.client_tb2.ca", &settings->internal.client_tb2.ca, "", "Client CA (TB2)", LEVEL_SECRET)
+    OPTION_INTERNAL_STRING("internal.client_tb2.crt", &settings->internal.client_tb2.crt, "", "Client certificate data (TB2)", LEVEL_SECRET)
+    OPTION_INTERNAL_STRING("internal.client_tb2.key", &settings->internal.client_tb2.key, "", "Client key data (TB2)", LEVEL_SECRET)
     OPTION_INTERNAL_BOOL("internal.autogen_certs", &settings->internal.autogen_certs, TRUE, "Generate certificates if missing", LEVEL_NONE)
 
     OPTION_INTERNAL_BOOL("internal.exit", &settings->internal.exit, FALSE, "Exit the server", LEVEL_NONE)
@@ -206,6 +236,9 @@ static void option_map_init(uint8_t settingsId)
     OPTION_INTERNAL_STRING("internal.version.id", &settings->internal.version.id, "", "Version id", LEVEL_NONE)
     OPTION_INTERNAL_STRING("internal.version.git_sha_short", &settings->internal.version.git_sha_short, "", "Short Git SHA-1 hash of the build version", LEVEL_NONE)
     OPTION_INTERNAL_STRING("internal.version.git_sha", &settings->internal.version.git_sha, "", "Full Git SHA-1 hash of the build version", LEVEL_NONE)
+    OPTION_INTERNAL_STRING("internal.version.package_git_sha_short", &settings->internal.version.package_git_sha_short, "", "Short Git SHA-1 hash of the installed patch package", LEVEL_NONE)
+    OPTION_INTERNAL_STRING("internal.version.package_git_sha", &settings->internal.version.package_git_sha, "", "Full Git SHA-1 hash of the installed patch package", LEVEL_NONE)
+    OPTION_INTERNAL_BOOL("internal.version.package_git_sha_set", &settings->internal.version.package_git_sha_set, FALSE, "Indicates if the installed patch hash was explicitly provided by the build pipeline", LEVEL_NONE)
     OPTION_INTERNAL_BOOL("internal.version.dirty", &settings->internal.version.dirty, FALSE, "Indicates if the build was made from a modified (dirty) git tree", LEVEL_NONE)
     OPTION_INTERNAL_STRING("internal.version.datetime", &settings->internal.version.datetime, "", "Datetime of the build or git commit", LEVEL_NONE)
     OPTION_INTERNAL_STRING("internal.version.platform", &settings->internal.version.platform, "", "Platform on which the software was built", LEVEL_NONE)
@@ -240,7 +273,19 @@ static void option_map_init(uint8_t settingsId)
     OPTION_INTERNAL_UNSIGNED("internal.toniebox_firmware.otaVersionPd", &settings->internal.toniebox_firmware.otaVersionPd, 0, 0, UINT64_MAX, "Firmware PD ota version", LEVEL_NONE)
 
     OPTION_INTERNAL_U64_ARRAY("internal.freshnessCache", &settings->internal.freshnessCache, 0, "Cache for freshnessCheck", LEVEL_NONE)
+    OPTION_INTERNAL_U64_ARRAY("internal.freshnessCacheSourceChangedUids", &settings->internal.freshnessCacheSourceChangedUids, 0, "Source-change forced freshness cache UIDs", LEVEL_NONE)
     OPTION_INTERNAL_BOOL("internal.freshnessCacheChanged", &settings->internal.freshnessCacheChanged, FALSE, "Freshness cache changed flag", LEVEL_NONE)
+    OPTION_INTERNAL_U64_ARRAY("internal.v3FreshnessInventoryUids", &settings->internal.v3FreshnessInventoryUids, 0, "V3 freshness inventory UIDs", LEVEL_NONE)
+    OPTION_INTERNAL_U64_ARRAY("internal.v3FreshnessInventoryAudioIds", &settings->internal.v3FreshnessInventoryAudioIds, 0, "V3 freshness inventory audio IDs", LEVEL_NONE)
+    OPTION_INTERNAL_U64_ARRAY("internal.v3ForcedVersionUids", &settings->internal.v3ForcedVersionUids, 0, "V3 forced version UIDs", LEVEL_NONE)
+    OPTION_INTERNAL_U64_ARRAY("internal.v3ForcedVersions", &settings->internal.v3ForcedVersions, 0, "V3 forced versions", LEVEL_NONE)
+    OPTION_INTERNAL_U64_ARRAY("internal.v3ForcedVersionBaseAudioIds", &settings->internal.v3ForcedVersionBaseAudioIds, 0, "V3 forced version base audio IDs", LEVEL_NONE)
+    OPTION_INTERNAL_U64_ARRAY("internal.toniebox2SettingsDesiredRevisions", &settings->internal.toniebox2SettingsDesiredRevisions, 0, "Toniebox 2 settings desired revisions", LEVEL_NONE)
+    OPTION_INTERNAL_U64_ARRAY("internal.toniebox2SettingsDesiredPendingFields", &settings->internal.toniebox2SettingsDesiredPendingFields, 0, "Toniebox 2 settings desired pending fields", LEVEL_NONE)
+    OPTION_INTERNAL_U64_ARRAY("internal.toniebox2SettingsDesiredValues", &settings->internal.toniebox2SettingsDesiredValues, 0, "Toniebox 2 settings desired values", LEVEL_NONE)
+    OPTION_INTERNAL_BOOL("internal.toniebox2SettingsDesiredPending", &settings->internal.toniebox2SettingsDesiredPending, FALSE, "Toniebox 2 settings desired pending", LEVEL_NONE)
+    OPTION_INTERNAL_UNSIGNED("internal.toniebox2SettingsDesiredAttempts", &settings->internal.toniebox2SettingsDesiredAttempts, 0, 0, UINT32_MAX, "Toniebox 2 settings desired attempts", LEVEL_NONE)
+    OPTION_INTERNAL_UNSIGNED("internal.toniebox2SettingsDesiredLastAttempt", &settings->internal.toniebox2SettingsDesiredLastAttempt, 0, 0, UINT32_MAX, "Toniebox 2 settings desired last attempt", LEVEL_NONE)
 
     OPTION_INTERNAL_UNSIGNED("internal.last_connection", &settings->internal.last_connection, 0, 0, UINT64_MAX, "Last connection timestamp", LEVEL_NONE)
     OPTION_INTERNAL_STRING("internal.last_ruid", &settings->internal.last_ruid, "ffffffffffffffff", "Last rUID", LEVEL_NONE)
@@ -255,11 +300,14 @@ static void option_map_init(uint8_t settingsId)
     OPTION_INTERNAL_UNSIGNED("internal.security_mit.robots_txt_access", &settings->internal.security_mit.robots_txt_access, 0, 0, UINT64_MAX, "Last access onto the robots.txt", LEVEL_NONE)
 
     OPTION_TREE_DESC("cloud", "Cloud", LEVEL_BASIC)
-    OPTION_BOOL("cloud.enabled", &settings->cloud.enabled, FALSE, "Cloud enabled", "Generally enable cloud operation", LEVEL_BASIC)
+    OPTION_BOOL("cloud.enabled", &settings->cloud.enabled, FALSE, "Enable TB1 HTTPS Upstream", "Enable HTTPS forwarding to Boxine/Toniecloud for TB1", LEVEL_BASIC)
+    OPTION_BOOL("cloud.tb2_enabled", &settings->cloud.tb2_enabled, FALSE, "Enable TB2 HTTPS Upstream", "Enable transparent TB2 HTTPS forwarding and capture", LEVEL_BASIC)
     OPTION_STRING("cloud.remote_hostname", &settings->cloud.remote_hostname, "prod.de.tbs.toys", "Cloud hostname", "Hostname of remote cloud server", LEVEL_EXPERT)
-    OPTION_STRING("cloud.remote_hostname_tb2", &settings->cloud.remote_hostname_tb2, "tbs2.tonie.cloud", "Cloud hostname TB2", "Hostname of remote cloud server of the TB2", LEVEL_EXPERT)
+    OPTION_STRING("cloud.remote_hostname_tb2", &settings->cloud.remote_hostname_tb2, "tbs2.tonie.cloud", "TB2 HTTPS server hostname", "Hostname of the TB2 HTTPS upstream server", LEVEL_EXPERT)
     OPTION_UNSIGNED("cloud.remote_port", &settings->cloud.remote_port, 443, 1, 65535, "Cloud port", "Port of remote cloud server", LEVEL_EXPERT)
-    OPTION_UNSIGNED("cloud.remote_port_tb2", &settings->cloud.remote_port_tb2, 443, 1, 65535, "Cloud port TB2", "Port of remote cloud server of the TB2", LEVEL_EXPERT)
+    OPTION_UNSIGNED("cloud.remote_port_tb2", &settings->cloud.remote_port_tb2, 443, 1, 65535, "TB2 HTTPS server port", "Port of the TB2 HTTPS upstream server", LEVEL_EXPERT)
+    OPTION_STRING("cloud.tb2_capture_dir", &settings->cloud.tb2_capture_dir, "data/diagnostics/tb2-https-passthrough", "TB2 HTTPS capture directory", "Local directory for sensitive unredacted passthrough captures", LEVEL_EXPERT)
+    OPTION_UNSIGNED("cloud.tb2_capture_max_mib", &settings->cloud.tb2_capture_max_mib, 4096, 1, 65536, "TB2 HTTPS capture limit", "Maximum completed capture storage in MiB", LEVEL_EXPERT)
     OPTION_BOOL("cloud.enableV1Claim", &settings->cloud.enableV1Claim, TRUE, "Forward 'claim'", "Forward 'claim' queries to claim tonies in the household in the tonies cloud", LEVEL_BASIC)
     OPTION_BOOL("cloud.enableV1CloudReset", &settings->cloud.enableV1CloudReset, FALSE, "Forward 'cloudReset'", "Forward 'cloudReset' queries to tonies cloud", LEVEL_DETAIL)
     OPTION_BOOL("cloud.enableV1FreshnessCheck", &settings->cloud.enableV1FreshnessCheck, TRUE, "Forward 'freshnessCheck'", "Forward 'freshnessCheck' queries to mark new content as updated to tonies cloud", LEVEL_DETAIL)
@@ -313,7 +361,15 @@ static void option_map_init(uint8_t settingsId)
 
     OPTION_TREE_DESC("toniebox2", "Toniebox 2", LEVEL_BASIC)
     OPTION_BOOL("toniebox2.baby_mode", &settings->toniebox2.baby_mode, FALSE, "Baby mode", "Enable baby mode (1 year).", LEVEL_BASIC)
+    OPTION_UNSIGNED("toniebox2.max_volume", &settings->toniebox2.max_volume, 100, 0, 100, "Max speaker volume", "Maximum speaker volume in percent.", LEVEL_BASIC)
+    OPTION_UNSIGNED("toniebox2.bedtime_max_volume", &settings->toniebox2.bedtime_max_volume, 75, 0, 100, "Bedtime speaker volume", "Maximum bedtime speaker volume in percent.", LEVEL_BASIC)
+    OPTION_UNSIGNED("toniebox2.max_headphone_volume", &settings->toniebox2.max_headphone_volume, 100, 0, 100, "Max headphone volume", "Maximum headphone volume in percent.", LEVEL_BASIC)
+    OPTION_UNSIGNED("toniebox2.bedtime_max_headphone_volume", &settings->toniebox2.bedtime_max_headphone_volume, 75, 0, 100, "Bedtime headphone volume", "Maximum bedtime headphone volume in percent.", LEVEL_BASIC)
     OPTION_UNSIGNED("toniebox2.lightring_brightness", &settings->toniebox2.lightring_brightness, 100, 0, 100, "LED brightness", "Lightring brightness", LEVEL_BASIC)
+    OPTION_UNSIGNED("toniebox2.bedtime_lightring_brightness", &settings->toniebox2.bedtime_lightring_brightness, 75, 0, 100, "Bedtime LED brightness", "Bedtime lightring brightness in percent.", LEVEL_BASIC)
+    OPTION_BOOL("toniebox2.scrubbing_enabled", &settings->toniebox2.scrubbing_enabled, FALSE, "Scrubbing", "Enable scrubbing.", LEVEL_BASIC)
+    OPTION_BOOL("toniebox2.slap_enabled", &settings->toniebox2.slap_enabled, TRUE, "Slap to skip", "Enable track skip via slapping gesture.", LEVEL_BASIC)
+    OPTION_BOOL("toniebox2.slap_back_left", &settings->toniebox2.slap_back_left, FALSE, "Slap direction", "Use the left slap direction for skipping.", LEVEL_BASIC)
 
     OPTION_TREE_DESC("rtnl", "RTNL log", LEVEL_EXPERT)
     OPTION_BOOL("rtnl.logRaw", &settings->rtnl.logRaw, FALSE, "Log RTNL (bin)", "Enable logging for raw RTNL data", LEVEL_EXPERT)
@@ -339,12 +395,21 @@ static void option_map_init(uint8_t settingsId)
     OPTION_BOOL("mqtt.tls_enabled", &settings->mqtt.tls_enabled, FALSE, "Enable TLS", "Enable TLS/SSL encryption for MQTT connection", LEVEL_DETAIL)
     OPTION_STRING("mqtt.tls_ca_file", &settings->mqtt.tls_ca_file, "", "CA certificate", "Path to CA certificate file (PEM format)", LEVEL_DETAIL)
     OPTION_BOOL("mqtt.tls_insecure", &settings->mqtt.tls_insecure, FALSE, "Skip verification", "Skip TLS certificate verification (insecure!)", LEVEL_DETAIL)
+
+    OPTION_TREE_DESC("mqtt_client_upstream", "MQTT upstream client", LEVEL_DETAIL)
+    OPTION_BOOL("mqtt_client_upstream.enabled", &settings->mqtt_client_upstream.enabled, FALSE, "Enable MQTT Client", "Enable the Tonies ICI upstream MQTT cloud path", LEVEL_DETAIL)
+    OPTION_BOOL("mqtt_client_upstream.passthrough_enabled", &settings->mqtt_client_upstream.passthrough_enabled, FALSE, "Enable transparent capture forwarder", "Forward MQTT traffic unchanged while recording a full local capture", LEVEL_DETAIL)
+    OPTION_UNSIGNED("mqtt_client_upstream.port", &settings->mqtt_client_upstream.port, 8883, 1, 65535, "MQTT Server port", "Port of the Tonies ICI upstream MQTT server", LEVEL_DETAIL)
+    OPTION_STRING("mqtt_client_upstream.hostname", &settings->mqtt_client_upstream.hostname, "ici.tonie.cloud", "MQTT Server hostname", "Hostname of the Tonies ICI upstream MQTT server", LEVEL_DETAIL)
+    OPTION_STRING("mqtt_client_upstream.capture_dir", &settings->mqtt_client_upstream.capture_dir, "data/diagnostics/tb2-mqtt-passthrough", "Capture directory", "Directory for full MQTT passthrough captures", LEVEL_EXPERT)
+    OPTION_UNSIGNED("mqtt_client_upstream.capture_max_mib", &settings->mqtt_client_upstream.capture_max_mib, 4096, 1, 65536, "Maximum capture size", "Maximum total size of completed MQTT passthrough captures in MiB", LEVEL_EXPERT)
     
     OPTION_TREE_DESC("mqtt_server", "MQTT Server", LEVEL_DETAIL)
     OPTION_BOOL("mqtt_server.enabled", &settings->mqtt_server.enabled, FALSE, "Enable MQTT Server", "Enable internal MQTT server", LEVEL_DETAIL)
     OPTION_UNSIGNED("mqtt_server.port", &settings->mqtt_server.port, 8883, 1, 65535, "MQTT Server port", "Port for internal MQTT server", LEVEL_DETAIL)
     OPTION_STRING("mqtt_server.cert.crt", &settings->mqtt_server.cert_crt, "certs/server_tb2/ici.pem", "Server certificate", "Path to server certificate file (PEM format)", LEVEL_DETAIL)
     OPTION_STRING("mqtt_server.cert.key", &settings->mqtt_server.cert_key, "certs/server_tb2/ici.key", "Server key", "Path to server key file (PEM format)", LEVEL_DETAIL)
+    OPTION_BOOL("mqtt_server.log_full_payloads", &settings->mqtt_server.log_full_payloads, FALSE, "Log full MQTT payloads", "Log large MQTT server payloads as base64 for reverse-engineering exports.", LEVEL_EXPERT)
 
     OPTION_TREE_DESC("hass", "Home Assistant", LEVEL_DETAIL)
     OPTION_STRING("hass.name", &settings->hass.name, "teddyCloud - Server", "Home Assistant name", "Home Assistant name", LEVEL_DETAIL)
@@ -436,6 +501,8 @@ static void overlay_settings_init()
             field++;
         }
         Settings_Overlay[i].internal.overlayNumber = i;
+        /* Overlay files do not necessarily persist their own configVersion. */
+        Settings_Overlay[i].configVersion = settings_source_config_version;
         Settings_Overlay[i].internal.config_init = true;
         Settings_Overlay[i].internal.config_used = false;
     }
@@ -454,6 +521,110 @@ settings_t *get_settings_ovl(const char *overlay_unique_id)
 settings_t *get_settings_id(uint8_t settingsId)
 {
     return &Settings_Overlay[settingsId];
+}
+
+/**
+ * Point both generation-specific option groups at the physical certificate
+ * files of one box. Runtime selection still exposes and loads only the group
+ * matching toniebox.boxGeneration.
+ */
+static void settings_set_overlay_client_cert_paths(uint8_t settingsId, const char *certDir)
+{
+    char *ca = custom_asprintf("%s%c%s", certDir, PATH_SEPARATOR, "ca.der");
+    char *crt = custom_asprintf("%s%c%s", certDir, PATH_SEPARATOR, "client.der");
+    char *key = custom_asprintf("%s%c%s", certDir, PATH_SEPARATOR, "private.der");
+
+    settings_set_string_id("core.client_cert_tb1.file.ca", ca, settingsId);
+    settings_set_string_id("core.client_cert_tb1.file.crt", crt, settingsId);
+    settings_set_string_id("core.client_cert_tb1.file.key", key, settingsId);
+    settings_set_string_id("core.client_cert_tb2.file.ca", ca, settingsId);
+    settings_set_string_id("core.client_cert_tb2.file.crt", crt, settingsId);
+    settings_set_string_id("core.client_cert_tb2.file.key", key, settingsId);
+
+    osFreeMem(ca);
+    osFreeMem(crt);
+    osFreeMem(key);
+}
+
+static bool settings_migrate_legacy_tb1_option(uint8_t settingsId, const char *legacyName, const char *tb1Name)
+{
+    setting_item_t *legacyOption = settings_get_by_name_id(legacyName, settingsId);
+    if (legacyOption == NULL || legacyOption->type != TYPE_STRING)
+    {
+        return false;
+    }
+    if (settingsId > 0 && !legacyOption->overlayed)
+    {
+        return false;
+    }
+
+    const char *legacyValue = *((char **)legacyOption->ptr);
+    return legacyValue != NULL && settings_set_string_id(tb1Name, legacyValue, settingsId);
+}
+
+static void settings_migrate_legacy_tb1_client_cert(uint8_t settingsId)
+{
+    static const char *const legacyNames[] = {
+        "core.client_cert.file.ca",
+        "core.client_cert.file.crt",
+        "core.client_cert.file.key",
+        "core.client_cert.data.ca",
+        "core.client_cert.data.crt",
+        "core.client_cert.data.key",
+    };
+    static const char *const tb1Names[] = {
+        "core.client_cert_tb1.file.ca",
+        "core.client_cert_tb1.file.crt",
+        "core.client_cert_tb1.file.key",
+        "core.client_cert_tb1.data.ca",
+        "core.client_cert_tb1.data.crt",
+        "core.client_cert_tb1.data.key",
+    };
+
+    for (size_t i = 0; i < sizeof(legacyNames) / sizeof(legacyNames[0]); i++)
+    {
+        settings_migrate_legacy_tb1_option(settingsId, legacyNames[i], tb1Names[i]);
+    }
+}
+
+static bool settings_migrate_id(uint8_t settingsId)
+{
+    settings_t *settings = &Settings_Overlay[settingsId];
+    if (!settings->internal.config_used || settings->configVersion >= CONFIG_VERSION)
+    {
+        return false;
+    }
+
+    if (settings->configVersion < 12)
+    {
+        settings->toniebox.api_access = true;
+        if (settingsId > 0)
+        {
+            settings_get_by_name_id("toniebox.api_access", settingsId)->overlayed = true;
+        }
+    }
+    if (settings->configVersion < 14 && settings->core.http_client_timeout < 2000)
+    {
+        settings->core.http_client_timeout = 2000;
+    }
+    if (settings->configVersion < 15)
+    {
+        settings->encode.use_frontend = true;
+    }
+    if (settings->configVersion < 16)
+    {
+        settings->security_mit.httpsOnly = false;
+    }
+    if (settings->configVersion < 18 && settingsId > 0)
+    {
+        settings_set_overlay_client_cert_paths(settingsId, settings->core.certdir);
+    }
+    if (settings->configVersion < 19)
+    {
+        settings_migrate_legacy_tb1_client_cert(settingsId);
+    }
+
+    return true;
 }
 
 settings_t *get_settings_cn(const char *commonName)
@@ -484,24 +655,13 @@ settings_t *get_settings_cn(const char *commonName)
                 settings_set_string_id("boxModel", "", i);
                 settings_get_by_name_id("toniebox.api_access", i)->overlayed = true;
                 settings_get_by_name_id("core.certdir", i)->overlayed = true;
-                settings_get_by_name_id("core.client_cert.file.ca", i)->overlayed = true;
-                settings_get_by_name_id("core.client_cert.file.crt", i)->overlayed = true;
-                settings_get_by_name_id("core.client_cert.file.key", i)->overlayed = true;
 
                 const char *certDir = settings_get_string_id("core.certdir", i);
                 osStringToLower(boxId);
                 char *customCertDir = custom_asprintf("%s%c%s", certDir, PATH_SEPARATOR, boxId);
-                char *ca = custom_asprintf("%s%c%s", customCertDir, PATH_SEPARATOR, "ca.der");
-                char *crt = custom_asprintf("%s%c%s", customCertDir, PATH_SEPARATOR, "client.der");
-                char *key = custom_asprintf("%s%c%s", customCertDir, PATH_SEPARATOR, "private.der");
                 settings_set_string_id("core.certdir", customCertDir, i);
-                settings_set_string_id("core.client_cert.file.ca", ca, i);
-                settings_set_string_id("core.client_cert.file.crt", crt, i);
-                settings_set_string_id("core.client_cert.file.key", key, i);
+                settings_set_overlay_client_cert_paths(i, customCertDir);
                 osFreeMem(customCertDir);
-                osFreeMem(ca);
-                osFreeMem(crt);
-                osFreeMem(key);
 
                 Settings_Overlay[i].internal.config_used = true;
                 settings_save_ovl(true);
@@ -569,6 +729,7 @@ static void settings_generate_internal_dirs(settings_t *settings)
 {
     osFreeMem(settings->internal.basedirfull);
     osFreeMem(settings->internal.certdirfull);
+    osFreeMem(settings->internal.certdirfull_tb2);
     osFreeMem(settings->internal.configdirfull);
     osFreeMem(settings->internal.contentdirrel);
     osFreeMem(settings->internal.contentdirfull);
@@ -581,6 +742,7 @@ static void settings_generate_internal_dirs(settings_t *settings)
 
     settings->internal.basedirfull = osAllocMem(256);
     settings->internal.certdirfull = osAllocMem(256);
+    settings->internal.certdirfull_tb2 = osAllocMem(256);
     settings->internal.configdirfull = osAllocMem(256);
     settings->internal.contentdirrel = osAllocMem(256);
     settings->internal.contentdirfull = osAllocMem(256);
@@ -595,6 +757,7 @@ static void settings_generate_internal_dirs(settings_t *settings)
     settings_resolve_dir(&settings->internal.basedirfull, settings->internal.basedir, settings->internal.cwd);
 
     settings_resolve_dir(&settings->internal.certdirfull, settings->core.certdir, settings->internal.basedirfull);
+    settings_resolve_dir(&settings->internal.certdirfull_tb2, settings->core.certdir_tb2, settings->internal.basedirfull);
     settings_resolve_dir(&settings->internal.datadirfull, settings->core.datadir, settings->internal.basedirfull);
     settings_resolve_dir(&settings->internal.configdirfull, settings->core.configdir, settings->internal.basedirfull);
 
@@ -768,7 +931,10 @@ error_t settings_init(const char *cwd, const char *base_dir)
     settings_set_string("internal.version.id", BUILD_VERSION);
     settings_set_string("internal.version.git_sha_short", BUILD_GIT_SHORT_SHA);
     settings_set_string("internal.version.git_sha", BUILD_GIT_SHA);
-    settings_set_bool("internal.version.id", BUILD_GIT_IS_DIRTY);
+    settings_set_string("internal.version.package_git_sha_short", BUILD_PACKAGE_GIT_SHORT_SHA);
+    settings_set_string("internal.version.package_git_sha", BUILD_PACKAGE_GIT_SHA);
+    settings_set_bool("internal.version.package_git_sha_set", BUILD_PACKAGE_GIT_SHA_SET ? TRUE : FALSE);
+    settings_set_bool("internal.version.dirty", BUILD_GIT_IS_DIRTY);
     settings_set_string("internal.version.datetime", BUILD_DATETIME);
     settings_set_string("internal.version.platform", BUILD_PLATFORM);
     settings_set_string("internal.version.os", BUILD_OS);
@@ -780,7 +946,7 @@ error_t settings_init(const char *cwd, const char *base_dir)
     settings_set_string("internal.version_web.id", WEB_VERSION);
     settings_set_string("internal.version_web.git_sha_short", WEB_GIT_SHORT_SHA);
     settings_set_string("internal.version_web.git_sha", WEB_GIT_SHA);
-    settings_set_bool("internal.version_web.id", WEB_GIT_IS_DIRTY);
+    settings_set_bool("internal.version_web.dirty", WEB_GIT_IS_DIRTY);
     settings_set_string("internal.version_web.datetime", WEB_DATETIME);
     settings_set_string("internal.version_web.v_short", WEB_FULL_NAME_SHORT);
     settings_set_string("internal.version_web.v_long", WEB_FULL_NAME_LONG);
@@ -1135,49 +1301,28 @@ static error_t settings_load_ovl(bool overlay)
     fsCloseFile(file);
     if (overlay)
     {
+        bool migrated = false;
         for (uint8_t i = 1; i < MAX_OVERLAYS; i++)
         {
+            migrated = settings_migrate_id(i) || migrated;
             settings_generate_internal_dirs(&Settings_Overlay[i]);
             settings_load_certs_id(i);
             Settings_Overlay[i].internal.config_changed = false;
         }
+        if (migrated)
+        {
+            settings_save_ovl(true);
+        }
     }
     else
     {
+        settings_source_config_version = Settings_Overlay[0].configVersion;
+        bool migrated = settings_migrate_id(0);
         settings_generate_internal_dirs(get_settings());
         settings_load_certs_id(0);
-
-        if (Settings_Overlay[0].configVersion < CONFIG_VERSION)
+        if (migrated)
         {
-            for (size_t i = 0; i < MAX_OVERLAYS; i++)
-            {
-                if (!Settings_Overlay[i].internal.config_used)
-                    continue;
-                if (Settings_Overlay[i].configVersion < 12)
-                {
-                    Settings_Overlay[i].toniebox.api_access = true;
-                    settings_get_by_name_id("toniebox.api_access", i)->overlayed = true;
-                }
-                if (Settings_Overlay[i].configVersion < 14)
-                {
-                    if (Settings_Overlay[i].core.http_client_timeout < 2000)
-                    {
-                        Settings_Overlay[i].core.http_client_timeout = 2000;
-                    }
-                }
-                if (Settings_Overlay[i].configVersion < 15)
-                {
-                    // Settings_Overlay[i].frontend.use_revvox_flasher = true; //Removed from Settings
-                    Settings_Overlay[i].encode.use_frontend = true;
-                }
-                if (Settings_Overlay[i].configVersion < 16)
-                {
-                    Settings_Overlay[i].security_mit.httpsOnly = false;
-                }
-            }
-            mutex_unlock(MUTEX_SETTINGS);
-            settings_save();
-            mutex_lock(MUTEX_SETTINGS);
+            settings_save_ovl(false);
         }
         Settings_Overlay[0].internal.config_changed = false;
     }
@@ -1292,7 +1437,29 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
         return false;
     }
 
+    if (opt->read_only)
+    {
+        if (value != opt->init.bool_value)
+        {
+            TRACE_WARNING("Setting '%s' is read-only and remains %s\r\n", item, opt->init.bool_value ? "true" : "false");
+            return false;
+        }
+        return true;
+    }
+
+    if (settingsId == 0 && !osStrcmp(item, "mqtt_client_upstream.passthrough_enabled") &&
+        value && !Settings_Overlay[0].mqtt_client_upstream.enabled)
+    {
+        TRACE_WARNING("MQTT upstream passthrough requires mqtt_client_upstream.enabled\r\n");
+        return false;
+    }
+
     *((bool *)opt->ptr) = value;
+
+    if (settingsId == 0 && !osStrcmp(item, "mqtt_client_upstream.enabled") && !value)
+    {
+        Settings_Overlay[0].mqtt_client_upstream.passthrough_enabled = false;
+    }
 
     if (settingsId > 0)
     {
@@ -1597,7 +1764,7 @@ bool settings_set_u64_array_ovl(const char *item, const uint64_t *value, size_t 
 }
 bool settings_set_u64_array_id(const char *item, const uint64_t *value, size_t len, uint8_t settingsId)
 {
-    if (!item || !value)
+    if (!item || (len > 0 && value == NULL))
     {
         return false;
     }
@@ -1611,16 +1778,18 @@ bool settings_set_u64_array_id(const char *item, const uint64_t *value, size_t l
     uint64_t **ptr = (uint64_t **)opt->ptr;
     if (*ptr)
     {
-        if (opt->size > 0)
-        {
-            opt->size = 0;
-            osFreeMem(*ptr);
-        }
+        opt->size = 0;
+        osFreeMem(*ptr);
+        *ptr = NULL;
     }
 
-    *ptr = osAllocMem(sizeof(uint64_t) * len);
-    if (*ptr)
+    if (len > 0)
     {
+        *ptr = osAllocMem(sizeof(uint64_t) * len);
+        if (*ptr == NULL)
+        {
+            return false;
+        }
         osMemcpy(*ptr, value, sizeof(uint64_t) * len);
     }
     opt->size = len;
@@ -1773,10 +1942,29 @@ error_t settings_try_load_certs_id(uint8_t settingsId)
     load_cert("internal.server_tb2.crt", "core.server_cert_tb2.file.crt", "core.server_cert_tb2.data.crt", settingsId);
     load_cert("internal.server_tb2.key", "core.server_cert_tb2.file.key", "core.server_cert_tb2.data.key", settingsId);
 
-    /* do not fail when client-role certs are missing */
-    load_cert("internal.client.ca", "core.client_cert.file.ca", "core.client_cert.data.ca", settingsId);
-    load_cert("internal.client.crt", "core.client_cert.file.crt", "core.client_cert.data.crt", settingsId);
-    load_cert("internal.client.key", "core.client_cert.file.key", "core.client_cert.data.key", settingsId);
+    /* Never inherit a loaded client identity from another overlay/generation. */
+    settings_set_string_id("internal.client_tb1.ca", "", settingsId);
+    settings_set_string_id("internal.client_tb1.crt", "", settingsId);
+    settings_set_string_id("internal.client_tb1.key", "", settingsId);
+    settings_set_string_id("internal.client_tb2.ca", "", settingsId);
+    settings_set_string_id("internal.client_tb2.crt", "", settingsId);
+    settings_set_string_id("internal.client_tb2.key", "", settingsId);
+
+    settings_box_generation boxGeneration = get_settings_id(settingsId)->toniebox.boxGeneration;
+    if (settingsId == 0 || boxGeneration == GENERATION_TB1)
+    {
+        /* do not fail when TB1 client-role certs are missing */
+        load_cert("internal.client_tb1.ca", "core.client_cert_tb1.file.ca", "core.client_cert_tb1.data.ca", settingsId);
+        load_cert("internal.client_tb1.crt", "core.client_cert_tb1.file.crt", "core.client_cert_tb1.data.crt", settingsId);
+        load_cert("internal.client_tb1.key", "core.client_cert_tb1.file.key", "core.client_cert_tb1.data.key", settingsId);
+    }
+    if (settingsId == 0 || boxGeneration == GENERATION_TB2)
+    {
+        /* do not fail when TB2 client-role certs are missing */
+        load_cert("internal.client_tb2.ca", "core.client_cert_tb2.file.ca", "core.client_cert_tb2.data.ca", settingsId);
+        load_cert("internal.client_tb2.crt", "core.client_cert_tb2.file.crt", "core.client_cert_tb2.data.crt", settingsId);
+        load_cert("internal.client_tb2.key", "core.client_cert_tb2.file.key", "core.client_cert_tb2.data.key", settingsId);
+    }
 
     test_boxine_ca(settingsId);
 
@@ -1841,43 +2029,68 @@ error_t settings_load_certs_id(uint8_t settingsId)
     return NO_ERROR;
 }
 
-bool test_boxine_ca(uint8_t settingsId)
+static bool test_client_ca(const char *clientCa, settings_box_generation boxGeneration)
 {
-    const char *client_ca_crt = get_settings_id(settingsId)->internal.client.ca;
-
-    size_t boxine_ca_length = 2008;
-    size_t tb2_ca_length = 898;
-    size_t ca_length = osStrlen(client_ca_crt);
-    if (ca_length > 0)
+    if (clientCa == NULL || osStrlen(clientCa) == 0)
     {
-        uint32_t boxGen = get_settings_id(settingsId)->toniebox.boxGeneration;
-        
-        if (boxGen == 0 || boxGen == 1) { 
-            if (ca_length != boxine_ca_length)
-            {
-                TRACE_WARNING("Client CA length mismatch %" PRIuSIZE " expected %" PRIuSIZE " (TB1)\r\n", ca_length, boxine_ca_length);
-                return false;
-            }
-            if (osStrstr(client_ca_crt, "MC0JveGluZSBHbW") == NULL   // Boxine GmbH
-                || osStrstr(client_ca_crt, "DAlCb3hpbmUgQ") == NULL) // Boxine
-            {
-                TRACE_WARNING("Client CA does not match Boxine (TB1)\r\n");
-                return false;
-            }
-        } else if (boxGen == 2) {
-            if (ca_length != tb2_ca_length)
-            {
-                TRACE_WARNING("Client CA length mismatch %" PRIuSIZE " expected %" PRIuSIZE " (TB2)\r\n", ca_length, tb2_ca_length);
-                return false;
-            }
-            if (osStrstr(client_ca_crt, "Ewt0b25pZXMgR21iS") == NULL   // tonies GmbH
-                || osStrstr(client_ca_crt, "QQKEwt0b25pZXMgR") == NULL) // tonies GmbH
-            {
-                TRACE_WARNING("Client CA does not match Tonies (TB2)\r\n");
-                return false;
-            }
+        return false;
+    }
+
+    size_t caLength = osStrlen(clientCa);
+    if (boxGeneration == GENERATION_TB1)
+    {
+        if (caLength != TB1_CLIENT_CA_PEM_LENGTH)
+        {
+            TRACE_WARNING("Client CA length mismatch %" PRIuSIZE " expected %d (TB1)\r\n", caLength, TB1_CLIENT_CA_PEM_LENGTH);
+            return false;
+        }
+        if (osStrstr(clientCa, "MC0JveGluZSBHbW") == NULL   // Boxine GmbH
+            || osStrstr(clientCa, "DAlCb3hpbmUgQ") == NULL) // Boxine
+        {
+            TRACE_WARNING("Client CA does not match Boxine (TB1)\r\n");
+            return false;
         }
         return true;
     }
+
+    if (boxGeneration == GENERATION_TB2)
+    {
+        if (caLength != TB2_CLIENT_CA_PEM_LENGTH)
+        {
+            TRACE_WARNING("Client CA length mismatch %" PRIuSIZE " expected %d (TB2)\r\n", caLength, TB2_CLIENT_CA_PEM_LENGTH);
+            return false;
+        }
+        if (osStrstr(clientCa, "Ewt0b25pZXMgR21iS") == NULL   // tonies GmbH
+            || osStrstr(clientCa, "QQKEwt0b25pZXMgR") == NULL) // tonies GmbH
+        {
+            TRACE_WARNING("Client CA does not match Tonies (TB2)\r\n");
+            return false;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+bool test_boxine_ca(uint8_t settingsId)
+{
+    settings_t *settings = get_settings_id(settingsId);
+
+    if (settingsId == 0)
+    {
+        bool tb1Valid = test_client_ca(settings->internal.client_tb1.ca, GENERATION_TB1);
+        bool tb2Valid = test_client_ca(settings->internal.client_tb2.ca, GENERATION_TB2);
+        return tb1Valid || tb2Valid;
+    }
+    if (settings->toniebox.boxGeneration == GENERATION_TB1)
+    {
+        return test_client_ca(settings->internal.client_tb1.ca, GENERATION_TB1);
+    }
+    if (settings->toniebox.boxGeneration == GENERATION_TB2)
+    {
+        return test_client_ca(settings->internal.client_tb2.ca, GENERATION_TB2);
+    }
+
+    TRACE_WARNING("Cannot validate client CA for overlay %u: box generation is unknown\r\n", (unsigned int)settings->internal.overlayNumber);
     return false;
 }

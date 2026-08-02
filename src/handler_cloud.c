@@ -1,6 +1,8 @@
 #include <time.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "settings.h"
 #include "fs_ext.h"
@@ -13,13 +15,153 @@
 #include "mqtt.h"
 #include "mqtt_server.h"
 #include "server_helpers.h"
+#include "mutex_manager.h"
 
 #include "toniefile.h"
 #include "toniesJson.h"
-#include "tonie_audio_playlist.h"
+#include "tonie_audio_playlist_internal.h"
 #include "cJSON.h"
 
 #include <byteswap.h>
+
+#define TAP_LIVE_READY_BYTES (2U * TONIEFILE_FRAME_SIZE)
+#define TAP_LIVE_READY_WAIT_MS 3000U
+#define TAP_LIVE_READY_POLL_MS 100U
+#define TAP_TARGET_LOCK_COUNT 8U
+#define TAP_TARGET_LOCK_WAIT_MS 30000U
+#define TAP_TARGET_LOCK_POLL_MS 100U
+#define TAP_GENERATOR_START_WAIT_MS 10000U
+#define TAP_GENERATOR_START_POLL_MS 100U
+
+typedef struct
+{
+    bool_t locked;
+    char *target_path;
+} tap_target_lock_t;
+
+static tap_target_lock_t tap_target_locks[TAP_TARGET_LOCK_COUNT];
+
+static bool_t tap_is_stable_cached_playlist(tonie_info_t *tonieInfo);
+static void freshness_clear_cache_after_content_request(client_ctx_t *client_ctx, cloudapi_t api, const char *ruid);
+static bool_t freshness_source_changed_contains_ruid(settings_t *settings, const char *ruid);
+
+/*
+ * Cyclone reads stream_max_size from the connection client context. Keep the
+ * TAP live-size override local to this request without changing vendored code.
+ */
+static error_t tap_send_response_stream_with_size(HttpConnection *connection, const char_t *uri, uint32_t stream_max_size)
+{
+    client_ctx_t saved_client_ctx = connection->private.client_ctx;
+    client_ctx_t local_client_ctx = saved_client_ctx;
+    settings_t local_settings = *local_client_ctx.settings;
+
+    local_settings.encode.stream_max_size = stream_max_size;
+    local_client_ctx.settings = &local_settings;
+    connection->private.client_ctx = local_client_ctx;
+
+    error_t error = httpSendResponseStream(connection, uri, true);
+
+    connection->private.client_ctx = saved_client_ctx;
+    return error;
+}
+
+static uint32_t stream_ctx_next_generation(stream_ctx_t *stream_ctx)
+{
+    stream_ctx->generation++;
+    if (stream_ctx->generation == 0)
+    {
+        stream_ctx->generation++;
+    }
+
+    return stream_ctx->generation;
+}
+
+/*
+ * Serialize live generation per final TAP target. Different TAP targets can
+ * still run in parallel, but two boxes cannot write/read the same .taf.tmp.
+ */
+static error_t tap_target_lock(const char *target_path)
+{
+    if (target_path == NULL)
+    {
+        return ERROR_FAILURE;
+    }
+
+    uint32_t waited_ms = 0;
+    while (waited_ms < TAP_TARGET_LOCK_WAIT_MS)
+    {
+        tap_target_lock_t *free_lock = NULL;
+        bool_t target_locked = FALSE;
+
+        mutex_lock(MUTEX_TAP_TARGETS);
+        for (size_t i = 0; i < TAP_TARGET_LOCK_COUNT; i++)
+        {
+            tap_target_lock_t *lock = &tap_target_locks[i];
+
+            if (lock->locked && lock->target_path != NULL && osStrcmp(lock->target_path, target_path) == 0)
+            {
+                target_locked = TRUE;
+                break;
+            }
+
+            if (!lock->locked && free_lock == NULL)
+            {
+                free_lock = lock;
+            }
+        }
+
+        if (!target_locked && free_lock != NULL)
+        {
+            size_t target_path_len = osStrlen(target_path) + 1;
+            char *target_path_copy = osAllocMem(target_path_len);
+            if (target_path_copy == NULL)
+            {
+                mutex_unlock(MUTEX_TAP_TARGETS);
+                return ERROR_OUT_OF_MEMORY;
+            }
+
+            osMemcpy(target_path_copy, target_path, target_path_len);
+            free_lock->locked = TRUE;
+            free_lock->target_path = target_path_copy;
+            mutex_unlock(MUTEX_TAP_TARGETS);
+            return NO_ERROR;
+        }
+
+        mutex_unlock(MUTEX_TAP_TARGETS);
+        if (waited_ms == 0 || (waited_ms % 5000U) == 0)
+        {
+            TRACE_VERBOSE("Waiting for TAP target lock %s, waited=%" PRIu32 "ms\r\n", target_path, waited_ms);
+        }
+        osDelayTask(TAP_TARGET_LOCK_POLL_MS);
+        waited_ms += TAP_TARGET_LOCK_POLL_MS;
+    }
+
+    TRACE_WARNING("Timeout while waiting for TAP target lock %s after %" PRIu32 "ms\r\n", target_path, waited_ms);
+    return ERROR_TIMEOUT;
+}
+
+static void tap_target_unlock(const char *target_path)
+{
+    if (target_path == NULL)
+    {
+        return;
+    }
+
+    mutex_lock(MUTEX_TAP_TARGETS);
+    for (size_t i = 0; i < TAP_TARGET_LOCK_COUNT; i++)
+    {
+        tap_target_lock_t *lock = &tap_target_locks[i];
+
+        if (lock->locked && lock->target_path != NULL && osStrcmp(lock->target_path, target_path) == 0)
+        {
+            lock->locked = FALSE;
+            osFreeMem(lock->target_path);
+            lock->target_path = NULL;
+            break;
+        }
+    }
+    mutex_unlock(MUTEX_TAP_TARGETS);
+}
 
 void convertTokenBytesToString(uint8_t *token, char *msg, bool_t logFullAuth)
 {
@@ -500,8 +642,15 @@ tonie_info_t *getTonieInfoForRequest(HttpConnection *connection, const char_t *u
             TRACE_DEBUG(" >> freshnessCache[%" PRIuSIZE "] = %s =? %s\r\n", i, cruid, ruid);
             if (freshnessCache[i] == uid)
             {
-                *tonie_marked = true;
-                TRACE_INFO(" >> rUID %s found in freshnessCache, refresh content\r\n", ruid);
+                if (tap_is_stable_cached_playlist(tonieInfo))
+                {
+                    TRACE_VERBOSE(" >> rUID %s found in freshnessCache but ignored for stable cached TAP\r\n", ruid);
+                }
+                else
+                {
+                    *tonie_marked = true;
+                    TRACE_INFO(" >> rUID %s found in freshnessCache, refresh content\r\n", ruid);
+                }
                 break;
             }
         }
@@ -649,9 +798,11 @@ error_t handleCloudContentExt(HttpConnection *connection, const char_t *uri, con
         ffmpeg_ctx.targetFile = tonieInfo->json._streamFile;
 
         stream_ctx_t *stream_ctx = &client_ctx->state->box.stream_ctx;
+        stream_ctx_next_generation(stream_ctx);
         stream_ctx->active = false;
         stream_ctx->quit = false;
         stream_ctx->error = NO_ERROR;
+        stream_ctx->current_source = 0;
         stream_ctx->stop_on_playback_stop = true;
         stream_ctx->ctx = &ffmpeg_ctx;
         stream_ctx->taskParams.priority = 0;
@@ -688,51 +839,232 @@ error_t handleCloudContentExt(HttpConnection *connection, const char_t *uri, con
     }
     else if (tonieInfo->json._source_type == CT_SOURCE_TAP_STREAM)
     {
-        // TODO: Add MUTEX on tonieInfo->json._tap._filepath_resolved
-
         TRACE_INFO("Serve streaming TAP %s from %s\r\n", tonieInfo->contentPath, tonieInfo->json._source_resolved);
         char *streamFileRel = &tonieInfo->contentPath[osStrlen(client_ctx->settings->internal.datadirfull)];
         connection->response.keepAlive = true;
 
         tap_generate_param_t tap_param;
         tap_param.tap = &tonieInfo->json._tap;
-        tap_param.tap->audio_id = time(NULL) - TEDDY_BENCH_AUDIO_ID_DEDUCT;
-        tap_param.force = false;
+        bool_t dynamic_tap_playlist = tap_param.tap->shuffle != TAP_SHUFFLE_NONE;
+        bool_t force_tap_regeneration = tap_param.tap->audio_id == 0 || dynamic_tap_playlist;
+        tap_param.force = force_tap_regeneration;
+        tap_param.preserve_on_client_disconnect = true;
+        tap_param.current_source = 0;
+        tap_param.error = NO_ERROR;
+        tap_param.generator_active = false;
+        tap_param.generator_done = false;
+        tap_param.runtime_indices = NULL;
+        tap_param.runtime_files_count = 0;
+        osMemset(&tap_param.live_header, 0, sizeof(tap_param.live_header));
+
+        error_t tap_lock_error = tap_target_lock(tap_param.tap->_filepath_resolved);
+        bool_t tap_target_locked = (tap_lock_error == NO_ERROR);
+        if (tap_lock_error != NO_ERROR)
+        {
+            if (!force_tap_regeneration && tap_final_cache_is_current(tap_param.tap))
+            {
+                TRACE_INFO("Serve finalized TAP TAF directly from %s after TAP lock timeout\r\n", tap_param.tap->_filepath_resolved);
+                char *finalFileRel = &tap_param.tap->_filepath_resolved[osStrlen(client_ctx->settings->internal.datadirfull)];
+                error_t response_error = httpSendResponseStream(connection, finalFileRel, false);
+                if (response_error == NO_ERROR)
+                {
+                    freshness_clear_cache_after_content_request(client_ctx, api, ruid);
+                }
+                freeTonieInfo(tonieInfo);
+                return response_error;
+            }
+
+            TRACE_ERROR(" >> TAP target lock unavailable for %s, error=%s\r\n", tap_param.tap->_filepath_resolved, error2text(tap_lock_error));
+            freeTonieInfo(tonieInfo);
+            return tap_lock_error;
+        }
+
+        if (!force_tap_regeneration && tap_final_cache_is_current(tap_param.tap))
+        {
+            TRACE_INFO("Serve finalized TAP TAF directly from %s\r\n", tap_param.tap->_filepath_resolved);
+            char *finalFileRel = &tap_param.tap->_filepath_resolved[osStrlen(client_ctx->settings->internal.datadirfull)];
+            tap_target_unlock(tap_param.tap->_filepath_resolved);
+            tap_target_locked = FALSE;
+            error_t response_error = httpSendResponseStream(connection, finalFileRel, false);
+            if (response_error)
+            {
+                if (response_error == ERROR_WRITE_FAILED)
+                {
+                    TRACE_WARNING(" >> client disconnected while sending finalized TAP file %s, error=%s\r\n", tap_param.tap->_filepath_resolved, error2text(response_error));
+                }
+                else
+                {
+                    TRACE_ERROR(" >> finalized TAP file %s not available or not sent, error=%s...\r\n", tap_param.tap->_filepath_resolved, error2text(response_error));
+                }
+            }
+            freeTonieInfo(tonieInfo);
+            if (response_error == NO_ERROR)
+            {
+                freshness_clear_cache_after_content_request(client_ctx, api, ruid);
+            }
+            return response_error;
+        }
+
+        error_t runtime_error = tap_prepare_runtime_indices(tap_param.tap, &tap_param.runtime_indices, &tap_param.runtime_files_count);
+        if (runtime_error != NO_ERROR)
+        {
+            tap_target_unlock(tap_param.tap->_filepath_resolved);
+            freeTonieInfo(tonieInfo);
+            return runtime_error;
+        }
+
+        uint32_t predicted_taf_size = 0;
+        if (tap_predict_taf_live_header(tap_param.tap, tap_param.runtime_indices, tap_param.runtime_files_count, &tap_param.live_header, &predicted_taf_size) != NO_ERROR)
+        {
+            predicted_taf_size = 0;
+            osMemset(&tap_param.live_header, 0, sizeof(tap_param.live_header));
+        }
+
+        bool_t tap_live_prediction_valid = predicted_taf_size > TONIEFILE_FRAME_SIZE &&
+                                           tap_param.live_header.payload_size > 0 &&
+                                           tap_param.live_header.has_sha1_hash &&
+                                           tap_param.live_header.has_ogg_state;
+        TRACE_VERBOSE("TAP live prediction: valid=%u predicted_taf_size=%" PRIu32 " payload_size=%" PRIu32 " track_pages=%" PRIuSIZE "\r\n",
+                      tap_live_prediction_valid, predicted_taf_size, tap_param.live_header.payload_size, tap_param.live_header.track_page_nums_count);
 
         stream_ctx_t *stream_ctx = &client_ctx->state->box.stream_ctx;
+        uint32_t stream_generation = stream_ctx_next_generation(stream_ctx);
+        tap_param.generation = stream_generation;
+        tap_param.generator_started = false;
         stream_ctx->active = false;
         stream_ctx->quit = false;
         stream_ctx->error = NO_ERROR;
-        stream_ctx->stop_on_playback_stop = true;
+        stream_ctx->current_source = 0;
+        stream_ctx->stop_on_playback_stop = false;
         stream_ctx->ctx = &tap_param;
+        tap_param.stream_ctx = stream_ctx;
         stream_ctx->taskParams.stackSize = 10 * 1024;
         stream_ctx->taskParams.priority = 0;
-        stream_ctx->taskId = osCreateTask(streamFileRel, &tap_generate_task, stream_ctx, &stream_ctx->taskParams);
-
-        while (!stream_ctx->active && stream_ctx->error == NO_ERROR)
+        stream_ctx->taskId = osCreateTask(streamFileRel, &tap_generate_task, &tap_param, &stream_ctx->taskParams);
+        if (stream_ctx->taskId == (OsTaskId)OS_INVALID_TASK_ID)
         {
-            osDelayTask(100);
+            TRACE_ERROR("Could not start TAP generator task for %s\r\n", tonieInfo->contentPath);
+            tap_param.error = ERROR_FAILURE;
+            tap_param.generator_done = true;
         }
 
-        if (stream_ctx->error == NO_ERROR)
+        uint32_t tap_generator_start_waited_ms = 0;
+        while (!tap_param.generator_started && !tap_param.generator_done && tap_param.error == NO_ERROR && tap_generator_start_waited_ms < TAP_GENERATOR_START_WAIT_MS)
         {
-            error_t response_error = httpSendResponseStream(connection, streamFileRel, true);
+            osDelayTask(TAP_GENERATOR_START_POLL_MS);
+            tap_generator_start_waited_ms += TAP_GENERATOR_START_POLL_MS;
+        }
+        if (!tap_param.generator_started && !tap_param.generator_done && tap_param.error == NO_ERROR)
+        {
+            TRACE_WARNING("TAP generator task has not entered for %s after %" PRIu32 "ms; keeping handler context until task completion\r\n", tonieInfo->contentPath, tap_generator_start_waited_ms);
+        }
+
+        bool_t client_disconnected = false;
+        if (tap_param.error == NO_ERROR)
+        {
+            uint32_t tap_live_waited_ms = 0;
+            uint32_t tap_live_tmp_size = 0;
+
+            while (tap_live_waited_ms < TAP_LIVE_READY_WAIT_MS)
+            {
+                error_t size_error = fsGetFileSize(tonieInfo->contentPath, &tap_live_tmp_size);
+
+                if (size_error == NO_ERROR && tap_live_tmp_size >= TAP_LIVE_READY_BYTES)
+                {
+                    break;
+                }
+
+                if (tap_param.error != NO_ERROR || tap_param.generator_done)
+                {
+                    break;
+                }
+
+                osDelayTask(TAP_LIVE_READY_POLL_MS);
+                tap_live_waited_ms += TAP_LIVE_READY_POLL_MS;
+            }
+
+            if (stream_ctx->generation == stream_generation)
+            {
+                stream_ctx->active = tap_param.generator_active;
+                stream_ctx->error = tap_param.error;
+                stream_ctx->quit = tap_param.generator_done;
+            }
+
+            error_t response_error;
+            if (tap_live_prediction_valid)
+            {
+                response_error = tap_send_response_stream_with_size(connection, streamFileRel, predicted_taf_size);
+            }
+            else
+            {
+                response_error = httpSendResponseStream(connection, streamFileRel, true);
+            }
+            TRACE_VERBOSE("TAP live response finished: error=%s predicted_taf_size=%" PRIu32 " active=%u quit=%u current=%u\r\n",
+                          error2text(response_error), predicted_taf_size, tap_param.generator_active, tap_param.generator_done, stream_ctx->generation == stream_generation);
+
             if (response_error)
             {
-                TRACE_ERROR(" >> file %s not available or not send, error=%s...\r\n", tonieInfo->contentPath, error2text(response_error));
+                if (tap_param.error == NO_ERROR && !tap_param.generator_done)
+                {
+                    client_disconnected = true;
+                    TRACE_WARNING(" >> TAP stream client disconnected while sending %s, generation still active; preserving background generation, error=%s\r\n", tonieInfo->contentPath, error2text(response_error));
+                }
+                else if (response_error == ERROR_WRITE_FAILED)
+                {
+                    TRACE_WARNING(" >> TAP stream client disconnected while sending %s, generation already finished, error=%s\r\n", tonieInfo->contentPath, error2text(response_error));
+                }
+                else
+                {
+                    TRACE_ERROR(" >> file %s not available or not sent, error=%s...\r\n", tonieInfo->contentPath, error2text(response_error));
+                }
             }
         }
         else
         {
-            TRACE_ERROR(" >> TAP stream not available, error=%s...\r\n", error2text(stream_ctx->error));
+            TRACE_ERROR(" >> TAP stream not available, error=%s...\r\n", error2text(tap_param.error));
         }
 
-        stream_ctx->active = false;
+        if (!client_disconnected)
+        {
+            tap_param.generator_active = false;
+        }
 
-        while (!stream_ctx->quit)
+        while (!tap_param.generator_done)
         {
             osDelayTask(100);
         }
+
+        if (tap_param.error == NO_ERROR)
+        {
+            error_t publish_error = tap_publish_taf_replace_safe(tonieInfo->contentPath, tap_param.tap->_filepath_resolved);
+            if (publish_error != NO_ERROR)
+            {
+                TRACE_ERROR("Could not publish generated TAP %s from %s, error=%s\r\n", tap_param.tap->_filepath_resolved, tonieInfo->contentPath, error2text(publish_error));
+                tap_param.error = publish_error;
+            }
+        }
+        if (fsFileExists(tonieInfo->contentPath))
+        {
+            error_t delete_error = fsDeleteFile(tonieInfo->contentPath);
+            if (delete_error != NO_ERROR && delete_error != ERROR_FILE_NOT_FOUND)
+            {
+                TRACE_WARNING("Could not delete temporary TAP file %s, error=%s\r\n", tonieInfo->contentPath, error2text(delete_error));
+            }
+        }
+
+        if (stream_ctx->generation == stream_generation)
+        {
+            stream_ctx->current_source = tap_param.current_source;
+            stream_ctx->error = tap_param.error;
+            stream_ctx->active = tap_param.generator_active;
+            stream_ctx->quit = tap_param.generator_done;
+        }
+
+        if (tap_target_locked)
+        {
+            tap_target_unlock(tap_param.tap->_filepath_resolved);
+        }
+        tap_free_runtime_indices(tap_param.runtime_indices);
     }
     else if (tonieInfo->exists && tonieInfo->valid && (!tonie_marked || !can_use_cloud))
     {
@@ -803,10 +1135,17 @@ error_t handleCloudContentExt(HttpConnection *connection, const char_t *uri, con
         size_t dataPathLen = osStrlen(client_ctx->settings->internal.datadirfull);
         if (osStrncmp(tonieInfo->contentPath, client_ctx->settings->internal.datadirfull, dataPathLen) == 0)
         {
-            error_t error = httpSendResponseStream(connection, &tonieInfo->contentPath[dataPathLen], (tonieInfo->json._source_type == CT_SOURCE_TAF_INCOMPLETE));
+            error = httpSendResponseStream(connection, &tonieInfo->contentPath[dataPathLen], (tonieInfo->json._source_type == CT_SOURCE_TAF_INCOMPLETE));
             if (error)
             {
-                TRACE_ERROR(" >> file %s not available or not send, error=%s...\r\n", tonieInfo->contentPath, error2text(error));
+                if (error == ERROR_WRITE_FAILED)
+                {
+                    TRACE_WARNING(" >> client disconnected while sending file %s, error=%s\r\n", tonieInfo->contentPath, error2text(error));
+                }
+                else
+                {
+                    TRACE_ERROR(" >> file %s not available or not sent, error=%s...\r\n", tonieInfo->contentPath, error2text(error));
+                }
             }
         }
         else
@@ -858,6 +1197,10 @@ error_t handleCloudContentExt(HttpConnection *connection, const char_t *uri, con
             cloud_request_get(NULL, 0, uri, queryString, token, &cbr);
             error = NO_ERROR;
         }
+    }
+    if (error == NO_ERROR && connection->response.statusCode != 404)
+    {
+        freshness_clear_cache_after_content_request(client_ctx, api, ruid);
     }
     freeTonieInfo(tonieInfo);
     return error;
@@ -917,6 +1260,951 @@ void checkAudioIdForCustom(bool_t *isCustom, char date_buffer[32], time_t audioI
     }
 }
 
+static bool_t tap_should_force_dynamic_freshness(tonie_info_t *tonieInfo)
+{
+    if (tonieInfo == NULL || tonieInfo->json._source_type != CT_SOURCE_TAP_STREAM)
+    {
+        return false;
+    }
+
+    tonie_audio_playlist_t *tap = &tonieInfo->json._tap;
+    if (!tap->_valid)
+    {
+        return false;
+    }
+
+    return tap->audio_id == 0 || tap->shuffle != TAP_SHUFFLE_NONE;
+}
+
+static bool_t tap_is_stable_cached_playlist(tonie_info_t *tonieInfo)
+{
+    if (tonieInfo == NULL || tonieInfo->json._source_type != CT_SOURCE_TAP_CACHED)
+    {
+        return false;
+    }
+
+    tonie_audio_playlist_t *tap = &tonieInfo->json._tap;
+    if (!tap->_valid || tap->audio_id == 0 || tap->shuffle != TAP_SHUFFLE_NONE || tap->_filepath_resolved == NULL)
+    {
+        return false;
+    }
+
+    if (tonieInfo->tafHeader == NULL || tonieInfo->tafHeader->audio_id != tap->audio_id)
+    {
+        return false;
+    }
+
+    return fsFileExists(tap->_filepath_resolved) && toniefile_is_valid(tap->_filepath_resolved);
+}
+
+#if (TRACE_LEVEL >= TRACE_LEVEL_VERBOSE)
+static const char *content_source_type_name(ct_source_t source_type)
+{
+    switch (source_type)
+    {
+        case CT_SOURCE_NONE: return "none";
+        case CT_SOURCE_TAF: return "taf";
+        case CT_SOURCE_TAF_INCOMPLETE: return "taf_incomplete";
+        case CT_SOURCE_TAP_STREAM: return "tap_stream";
+        case CT_SOURCE_TAP_CACHED: return "tap_cached";
+        case CT_SOURCE_STREAM: return "stream";
+        default: return "unknown";
+    }
+}
+#endif
+
+typedef struct
+{
+    uint32_t boxAudioId;
+    uint32_t serverAudioId;
+    uint32_t effectiveServerAudioIdRaw;
+    uint32_t naturalServerAudioIdRaw;
+    bool_t custom_box;
+    bool_t custom_server;
+    bool_t serverAudioIdAvailable;
+    bool_t forced_server_audio_id;
+    bool_t stable_cached_tap;
+    bool_t tap_dynamic_freshness;
+    bool_t tap_final_needs_rebuild;
+    bool_t updated_freshness;
+    bool_t stream_freshness;
+    bool_t isFlex;
+    bool_t should_mark_freshness;
+    char date_buffer_box[32];
+    char date_buffer_server[32];
+} freshness_decision_t;
+
+static bool_t freshness_is_hex_string(const char *value, size_t len)
+{
+    if (value == NULL || osStrlen(value) != len)
+    {
+        return FALSE;
+    }
+
+    for (size_t i = 0; i < len; i++)
+    {
+        char c = value[i];
+        if (!((c >= '0' && c <= '9') ||
+              (c >= 'a' && c <= 'f') ||
+              (c >= 'A' && c <= 'F')))
+        {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static bool_t freshness_ruid_to_uid(const char *ruid, uint64_t *uid)
+{
+    if (!freshness_is_hex_string(ruid, 16) || uid == NULL)
+    {
+        return FALSE;
+    }
+
+    *uid = bswap_64(strtoull(ruid, NULL, 16));
+    return TRUE;
+}
+
+static void freshness_uid_to_ruid(uint64_t uid, char ruid[17])
+{
+    osSnprintf(ruid, 17, "%016" PRIX64, bswap_64(uid));
+}
+
+static bool_t freshness_uid_array_contains(const uint64_t *items, size_t len, uint64_t uid)
+{
+    if (items == NULL)
+    {
+        return FALSE;
+    }
+
+    for (size_t i = 0; i < len; i++)
+    {
+        if (items[i] == uid)
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static bool_t freshness_settings_array_contains(settings_t *settings, const char *key, uint64_t uid)
+{
+    if (settings == NULL || key == NULL)
+    {
+        return FALSE;
+    }
+
+    size_t len = 0;
+    uint64_t *items = settings_get_u64_array_id(key, settings->internal.overlayNumber, &len);
+    return freshness_uid_array_contains(items, len, uid);
+}
+
+static bool_t freshness_settings_array_add_uid(settings_t *settings, const char *key, uint64_t uid, bool_t *added)
+{
+    if (added != NULL)
+    {
+        *added = FALSE;
+    }
+    if (settings == NULL || key == NULL)
+    {
+        return FALSE;
+    }
+
+    size_t len = 0;
+    uint64_t *items = settings_get_u64_array_id(key, settings->internal.overlayNumber, &len);
+    if (freshness_uid_array_contains(items, len, uid))
+    {
+        return TRUE;
+    }
+
+    uint64_t *updated = osAllocMem(sizeof(uint64_t) * (len + 1));
+    if (updated == NULL)
+    {
+        TRACE_ERROR("Could not allocate V3 freshness cache update\r\n");
+        return FALSE;
+    }
+
+    if (len > 0 && items != NULL)
+    {
+        osMemcpy(updated, items, sizeof(uint64_t) * len);
+    }
+    updated[len] = uid;
+
+    bool_t ok = settings_set_u64_array_id(key, updated, len + 1, settings->internal.overlayNumber);
+    osFreeMem(updated);
+    if (!ok)
+    {
+        return FALSE;
+    }
+
+    if (added != NULL)
+    {
+        *added = TRUE;
+    }
+    return TRUE;
+}
+
+static bool_t freshness_settings_array_remove_uid(settings_t *settings, const char *key, uint64_t uid)
+{
+    if (settings == NULL || key == NULL)
+    {
+        return FALSE;
+    }
+
+    size_t len = 0;
+    uint64_t *items = settings_get_u64_array_id(key, settings->internal.overlayNumber, &len);
+    if (!freshness_uid_array_contains(items, len, uid))
+    {
+        return FALSE;
+    }
+
+    if (len <= 1)
+    {
+        return settings_set_u64_array_id(key, NULL, 0, settings->internal.overlayNumber);
+    }
+
+    uint64_t *updated = osAllocMem(sizeof(uint64_t) * (len - 1));
+    if (updated == NULL)
+    {
+        TRACE_ERROR("Could not allocate V3 freshness cache removal\r\n");
+        return FALSE;
+    }
+
+    size_t target = 0;
+    for (size_t i = 0; i < len; i++)
+    {
+        if (items[i] != uid)
+        {
+            updated[target++] = items[i];
+        }
+    }
+
+    bool_t ok = settings_set_u64_array_id(key, updated, target, settings->internal.overlayNumber);
+    osFreeMem(updated);
+    return ok;
+}
+
+static bool_t freshness_response_add_uid(TonieFreshnessCheckResponse *freshResp, size_t capacity, uint64_t uid)
+{
+    if (freshResp == NULL)
+    {
+        return FALSE;
+    }
+
+    for (size_t i = 0; i < freshResp->n_tonie_marked; i++)
+    {
+        if (freshResp->tonie_marked[i] == uid)
+        {
+            return TRUE;
+        }
+    }
+
+    if (freshResp->n_tonie_marked >= capacity)
+    {
+        TRACE_WARNING("Could not add UID %016" PRIX64 " to freshnessCheck response, no free slot\r\n", uid);
+        return FALSE;
+    }
+
+    freshResp->tonie_marked[freshResp->n_tonie_marked++] = uid;
+    return TRUE;
+}
+
+static bool_t freshness_cache_add_uid(settings_t *settings, uint64_t uid, bool_t *added)
+{
+    bool_t ok = freshness_settings_array_add_uid(settings, "internal.freshnessCache", uid, added);
+    if (ok)
+    {
+        settings_set_bool_id("internal.freshnessCacheChanged", true, settings->internal.overlayNumber);
+    }
+    return ok;
+}
+
+static bool_t freshness_cache_source_changed_contains(settings_t *settings, uint64_t uid)
+{
+    return freshness_settings_array_contains(settings, "internal.freshnessCacheSourceChangedUids", uid);
+}
+
+static bool_t freshness_cache_add_source_changed_uid(settings_t *settings, uint64_t uid)
+{
+    return freshness_settings_array_add_uid(settings, "internal.freshnessCacheSourceChangedUids", uid, NULL);
+}
+
+static bool_t freshness_cache_remove_source_changed_uid(settings_t *settings, uint64_t uid)
+{
+    return freshness_settings_array_remove_uid(settings, "internal.freshnessCacheSourceChangedUids", uid);
+}
+
+void freshness_cache_sync_source_changed_uids(settings_t *settings)
+{
+    if (settings == NULL)
+    {
+        return;
+    }
+
+    size_t freshnessCacheLen = 0;
+    size_t sourceChangedLen = 0;
+    uint64_t *freshnessCache = settings_get_u64_array_id("internal.freshnessCache", settings->internal.overlayNumber, &freshnessCacheLen);
+    uint64_t *sourceChanged = settings_get_u64_array_id("internal.freshnessCacheSourceChangedUids", settings->internal.overlayNumber, &sourceChangedLen);
+    if (sourceChangedLen == 0)
+    {
+        return;
+    }
+
+    if (freshnessCacheLen == 0 || freshnessCache == NULL)
+    {
+        settings_set_u64_array_id("internal.freshnessCacheSourceChangedUids", NULL, 0, settings->internal.overlayNumber);
+        return;
+    }
+
+    uint64_t *updated = osAllocMem(sizeof(uint64_t) * sourceChangedLen);
+    if (updated == NULL)
+    {
+        TRACE_ERROR("Could not allocate V3 freshness source-change cache sync\r\n");
+        return;
+    }
+
+    size_t target = 0;
+    for (size_t i = 0; i < sourceChangedLen; i++)
+    {
+        if (freshness_uid_array_contains(freshnessCache, freshnessCacheLen, sourceChanged[i]))
+        {
+            updated[target++] = sourceChanged[i];
+        }
+    }
+
+    settings_set_u64_array_id("internal.freshnessCacheSourceChangedUids",
+                              target > 0 ? updated : NULL,
+                              target,
+                              settings->internal.overlayNumber);
+    osFreeMem(updated);
+}
+
+static bool_t freshness_cache_remove_uid(settings_t *settings, uint64_t uid)
+{
+    if (settings == NULL)
+    {
+        return FALSE;
+    }
+
+    if (!freshness_settings_array_remove_uid(settings, "internal.freshnessCache", uid))
+    {
+        return FALSE;
+    }
+    freshness_cache_remove_source_changed_uid(settings, uid);
+
+    size_t freshnessCacheLen = 0;
+    settings_get_u64_array_id("internal.freshnessCache", settings->internal.overlayNumber, &freshnessCacheLen);
+    if (freshnessCacheLen == 0)
+    {
+        settings_set_bool_id("internal.freshnessCacheChanged", false, settings->internal.overlayNumber);
+    }
+    return TRUE;
+}
+
+static void freshness_clear_cache_after_v3_request(settings_t *settings, const char *ruid)
+{
+    uint64_t uid = 0;
+    if (settings == NULL || !freshness_ruid_to_uid(ruid, &uid))
+    {
+        return;
+    }
+
+    if (freshness_cache_remove_uid(settings, uid))
+    {
+        TRACE_INFO("Cleared V3 freshness cache entry for rUID %s\r\n", ruid);
+    }
+}
+
+static void freshness_clear_cache_after_content_request(client_ctx_t *client_ctx, cloudapi_t api, const char *ruid)
+{
+    if (client_ctx == NULL || client_ctx->settings == NULL)
+    {
+        return;
+    }
+    if (api != V3_CONTENT_META && api != V3_CHAPTER)
+    {
+        return;
+    }
+    if (api == V3_CONTENT_META && freshness_source_changed_contains_ruid(client_ctx->settings, ruid))
+    {
+        TRACE_INFO("Keeping V3 freshness source-change entry for rUID %s until chapter request\r\n", ruid);
+        return;
+    }
+
+    freshness_clear_cache_after_v3_request(client_ctx->settings, ruid);
+}
+
+static void freshness_store_v3_inventory(settings_t *settings, TonieFreshnessCheckRequest *freshReq)
+{
+    if (settings == NULL || freshReq == NULL || freshReq->n_tonie_infos == 0)
+    {
+        if (settings != NULL)
+        {
+            settings_set_u64_array_id("internal.v3FreshnessInventoryUids", NULL, 0, settings->internal.overlayNumber);
+            settings_set_u64_array_id("internal.v3FreshnessInventoryAudioIds", NULL, 0, settings->internal.overlayNumber);
+            TRACE_INFO("Stored V3 freshness inventory with 0 entries\r\n");
+        }
+        return;
+    }
+
+    uint64_t *uids = osAllocMem(sizeof(uint64_t) * freshReq->n_tonie_infos);
+    uint64_t *audioIds = osAllocMem(sizeof(uint64_t) * freshReq->n_tonie_infos);
+    if (uids == NULL || audioIds == NULL)
+    {
+        osFreeMem(uids);
+        osFreeMem(audioIds);
+        settings_set_u64_array_id("internal.v3FreshnessInventoryUids", NULL, 0, settings->internal.overlayNumber);
+        settings_set_u64_array_id("internal.v3FreshnessInventoryAudioIds", NULL, 0, settings->internal.overlayNumber);
+        TRACE_ERROR("Could not store V3 freshness inventory\r\n");
+        return;
+    }
+
+    for (size_t i = 0; i < freshReq->n_tonie_infos; i++)
+    {
+        uids[i] = freshReq->tonie_infos[i]->uid;
+        audioIds[i] = freshReq->tonie_infos[i]->audio_id;
+    }
+
+    bool_t storedUids = settings_set_u64_array_id("internal.v3FreshnessInventoryUids", uids, freshReq->n_tonie_infos, settings->internal.overlayNumber);
+    bool_t storedAudioIds = settings_set_u64_array_id("internal.v3FreshnessInventoryAudioIds", audioIds, freshReq->n_tonie_infos, settings->internal.overlayNumber);
+    osFreeMem(uids);
+    osFreeMem(audioIds);
+
+    if (!storedUids || !storedAudioIds)
+    {
+        settings_set_u64_array_id("internal.v3FreshnessInventoryUids", NULL, 0, settings->internal.overlayNumber);
+        settings_set_u64_array_id("internal.v3FreshnessInventoryAudioIds", NULL, 0, settings->internal.overlayNumber);
+        TRACE_ERROR("Could not store V3 freshness inventory\r\n");
+        return;
+    }
+
+    TRACE_INFO("Stored V3 freshness inventory with %" PRIuSIZE " entries\r\n", freshReq->n_tonie_infos);
+}
+
+static bool_t freshness_inventory_find_uid(settings_t *settings, uint64_t uid, uint32_t *audio_id)
+{
+    if (settings == NULL || audio_id == NULL)
+    {
+        return FALSE;
+    }
+
+    size_t uidLen = 0;
+    size_t audioIdLen = 0;
+    uint64_t *uids = settings_get_u64_array_id("internal.v3FreshnessInventoryUids", settings->internal.overlayNumber, &uidLen);
+    uint64_t *audioIds = settings_get_u64_array_id("internal.v3FreshnessInventoryAudioIds", settings->internal.overlayNumber, &audioIdLen);
+    if (uids == NULL || audioIds == NULL || uidLen == 0 || uidLen != audioIdLen)
+    {
+        return FALSE;
+    }
+
+    for (size_t i = 0; i < uidLen; i++)
+    {
+        if (uids[i] == uid)
+        {
+            *audio_id = (uint32_t)audioIds[i];
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static uint32_t freshness_audio_id_compare_value(uint32_t audio_id, bool_t *isCustom, char date_buffer[32])
+{
+    bool_t localCustom = FALSE;
+    char localDateBuffer[32];
+    char *targetDateBuffer = date_buffer != NULL ? date_buffer : localDateBuffer;
+
+    checkAudioIdForCustom(&localCustom, targetDateBuffer, audio_id);
+    if (isCustom != NULL)
+    {
+        *isCustom = localCustom;
+    }
+    if (localCustom)
+    {
+        return audio_id + TEDDY_BENCH_AUDIO_ID_DEDUCT;
+    }
+    return audio_id;
+}
+
+static bool_t freshness_get_natural_server_audio_id(tonie_info_t *tonieInfo, uint32_t *audio_id, bool_t *tap_has_audio_id)
+{
+    if (tap_has_audio_id != NULL)
+    {
+        *tap_has_audio_id = FALSE;
+    }
+    if (audio_id == NULL || tonieInfo == NULL)
+    {
+        return FALSE;
+    }
+
+    bool_t tap_freshness = (tonieInfo->json._source_type == CT_SOURCE_TAP_STREAM || tonieInfo->json._source_type == CT_SOURCE_TAP_CACHED) &&
+                           tonieInfo->json._tap._valid;
+    tonie_audio_playlist_t *tap = tap_freshness ? &tonieInfo->json._tap : NULL;
+    if (tap_freshness && tap->audio_id != 0)
+    {
+        *audio_id = (uint32_t)tap->audio_id;
+        if (tap_has_audio_id != NULL)
+        {
+            *tap_has_audio_id = TRUE;
+        }
+        return TRUE;
+    }
+
+    if (tonieInfo->valid && tonieInfo->tafHeader != NULL)
+    {
+        *audio_id = tonieInfo->tafHeader->audio_id;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static void freshness_forced_version_clear(settings_t *settings)
+{
+    if (settings == NULL)
+    {
+        return;
+    }
+    settings_set_u64_array_id("internal.v3ForcedVersionUids", NULL, 0, settings->internal.overlayNumber);
+    settings_set_u64_array_id("internal.v3ForcedVersions", NULL, 0, settings->internal.overlayNumber);
+    settings_set_u64_array_id("internal.v3ForcedVersionBaseAudioIds", NULL, 0, settings->internal.overlayNumber);
+}
+
+static bool_t freshness_forced_version_remove(settings_t *settings, uint64_t uid)
+{
+    if (settings == NULL)
+    {
+        return FALSE;
+    }
+
+    size_t uidLen = 0;
+    size_t versionLen = 0;
+    size_t baseLen = 0;
+    uint64_t *uids = settings_get_u64_array_id("internal.v3ForcedVersionUids", settings->internal.overlayNumber, &uidLen);
+    uint64_t *versions = settings_get_u64_array_id("internal.v3ForcedVersions", settings->internal.overlayNumber, &versionLen);
+    uint64_t *baseAudioIds = settings_get_u64_array_id("internal.v3ForcedVersionBaseAudioIds", settings->internal.overlayNumber, &baseLen);
+    if (uidLen == 0)
+    {
+        return FALSE;
+    }
+    if (uids == NULL || versions == NULL || baseAudioIds == NULL || uidLen != versionLen || uidLen != baseLen)
+    {
+        freshness_forced_version_clear(settings);
+        return FALSE;
+    }
+
+    size_t removeIndex = uidLen;
+    for (size_t i = 0; i < uidLen; i++)
+    {
+        if (uids[i] == uid)
+        {
+            removeIndex = i;
+            break;
+        }
+    }
+    if (removeIndex == uidLen)
+    {
+        return FALSE;
+    }
+
+    if (uidLen <= 1)
+    {
+        freshness_forced_version_clear(settings);
+        return TRUE;
+    }
+
+    uint64_t *updatedUids = osAllocMem(sizeof(uint64_t) * (uidLen - 1));
+    uint64_t *updatedVersions = osAllocMem(sizeof(uint64_t) * (uidLen - 1));
+    uint64_t *updatedBases = osAllocMem(sizeof(uint64_t) * (uidLen - 1));
+    if (updatedUids == NULL || updatedVersions == NULL || updatedBases == NULL)
+    {
+        osFreeMem(updatedUids);
+        osFreeMem(updatedVersions);
+        osFreeMem(updatedBases);
+        TRACE_ERROR("Could not allocate V3 forced-version removal\r\n");
+        return FALSE;
+    }
+
+    size_t target = 0;
+    for (size_t i = 0; i < uidLen; i++)
+    {
+        if (i == removeIndex)
+        {
+            continue;
+        }
+        updatedUids[target] = uids[i];
+        updatedVersions[target] = versions[i];
+        updatedBases[target] = baseAudioIds[i];
+        target++;
+    }
+
+    bool_t ok = settings_set_u64_array_id("internal.v3ForcedVersionUids", updatedUids, target, settings->internal.overlayNumber) &&
+                settings_set_u64_array_id("internal.v3ForcedVersions", updatedVersions, target, settings->internal.overlayNumber) &&
+                settings_set_u64_array_id("internal.v3ForcedVersionBaseAudioIds", updatedBases, target, settings->internal.overlayNumber);
+    osFreeMem(updatedUids);
+    osFreeMem(updatedVersions);
+    osFreeMem(updatedBases);
+    if (!ok)
+    {
+        freshness_forced_version_clear(settings);
+    }
+    return ok;
+}
+
+static bool_t freshness_forced_version_find(settings_t *settings, uint64_t uid, uint32_t naturalServerAudioId, uint32_t *forcedAudioId)
+{
+    if (settings == NULL || forcedAudioId == NULL)
+    {
+        return FALSE;
+    }
+
+    size_t uidLen = 0;
+    size_t versionLen = 0;
+    size_t baseLen = 0;
+    uint64_t *uids = settings_get_u64_array_id("internal.v3ForcedVersionUids", settings->internal.overlayNumber, &uidLen);
+    uint64_t *versions = settings_get_u64_array_id("internal.v3ForcedVersions", settings->internal.overlayNumber, &versionLen);
+    uint64_t *baseAudioIds = settings_get_u64_array_id("internal.v3ForcedVersionBaseAudioIds", settings->internal.overlayNumber, &baseLen);
+    if (uidLen == 0)
+    {
+        return FALSE;
+    }
+    if (uids == NULL || versions == NULL || baseAudioIds == NULL || uidLen != versionLen || uidLen != baseLen)
+    {
+        freshness_forced_version_clear(settings);
+        return FALSE;
+    }
+
+    for (size_t i = 0; i < uidLen; i++)
+    {
+        if (uids[i] != uid)
+        {
+            continue;
+        }
+
+        uint32_t baseAudioId = (uint32_t)baseAudioIds[i];
+        if (freshness_audio_id_compare_value(baseAudioId, NULL, NULL) != freshness_audio_id_compare_value(naturalServerAudioId, NULL, NULL))
+        {
+            freshness_forced_version_remove(settings, uid);
+            return FALSE;
+        }
+
+        *forcedAudioId = (uint32_t)versions[i];
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static bool_t freshness_forced_version_set(settings_t *settings, uint64_t uid, uint32_t forcedAudioId, uint32_t baseAudioId)
+{
+    if (settings == NULL)
+    {
+        return FALSE;
+    }
+
+    size_t uidLen = 0;
+    size_t versionLen = 0;
+    size_t baseLen = 0;
+    uint64_t *uids = settings_get_u64_array_id("internal.v3ForcedVersionUids", settings->internal.overlayNumber, &uidLen);
+    uint64_t *versions = settings_get_u64_array_id("internal.v3ForcedVersions", settings->internal.overlayNumber, &versionLen);
+    uint64_t *baseAudioIds = settings_get_u64_array_id("internal.v3ForcedVersionBaseAudioIds", settings->internal.overlayNumber, &baseLen);
+    if (uidLen != versionLen || uidLen != baseLen ||
+        (uidLen > 0 && (uids == NULL || versions == NULL || baseAudioIds == NULL)))
+    {
+        freshness_forced_version_clear(settings);
+        uidLen = 0;
+        uids = NULL;
+        versions = NULL;
+        baseAudioIds = NULL;
+    }
+
+    size_t targetLen = uidLen;
+    size_t updateIndex = uidLen;
+    for (size_t i = 0; i < uidLen; i++)
+    {
+        if (uids[i] == uid)
+        {
+            updateIndex = i;
+            break;
+        }
+    }
+    if (updateIndex == uidLen)
+    {
+        targetLen++;
+    }
+
+    uint64_t *updatedUids = osAllocMem(sizeof(uint64_t) * targetLen);
+    uint64_t *updatedVersions = osAllocMem(sizeof(uint64_t) * targetLen);
+    uint64_t *updatedBases = osAllocMem(sizeof(uint64_t) * targetLen);
+    if (updatedUids == NULL || updatedVersions == NULL || updatedBases == NULL)
+    {
+        osFreeMem(updatedUids);
+        osFreeMem(updatedVersions);
+        osFreeMem(updatedBases);
+        TRACE_ERROR("Could not allocate V3 forced-version update\r\n");
+        return FALSE;
+    }
+
+    for (size_t i = 0; i < uidLen; i++)
+    {
+        updatedUids[i] = uids[i];
+        updatedVersions[i] = versions[i];
+        updatedBases[i] = baseAudioIds[i];
+    }
+    updatedUids[updateIndex] = uid;
+    updatedVersions[updateIndex] = forcedAudioId;
+    updatedBases[updateIndex] = baseAudioId;
+
+    bool_t ok = settings_set_u64_array_id("internal.v3ForcedVersionUids", updatedUids, targetLen, settings->internal.overlayNumber) &&
+                settings_set_u64_array_id("internal.v3ForcedVersions", updatedVersions, targetLen, settings->internal.overlayNumber) &&
+                settings_set_u64_array_id("internal.v3ForcedVersionBaseAudioIds", updatedBases, targetLen, settings->internal.overlayNumber);
+    osFreeMem(updatedUids);
+    osFreeMem(updatedVersions);
+    osFreeMem(updatedBases);
+    if (!ok)
+    {
+        freshness_forced_version_clear(settings);
+    }
+    return ok;
+}
+
+static uint32_t freshness_new_forced_version(uint32_t naturalServerAudioId, uint32_t boxAudioId)
+{
+    uint32_t forcedAudioId = (uint32_t)time(NULL);
+    uint32_t naturalCompare = freshness_audio_id_compare_value(naturalServerAudioId, NULL, NULL);
+    uint32_t boxCompare = freshness_audio_id_compare_value(boxAudioId, NULL, NULL);
+    uint32_t minimum = naturalCompare > boxCompare ? naturalCompare : boxCompare;
+    if (forcedAudioId <= minimum && minimum < UINT32_MAX)
+    {
+        forcedAudioId = minimum + 1;
+    }
+    return forcedAudioId;
+}
+
+static bool_t freshness_get_effective_server_audio_id(settings_t *settings, tonie_info_t *tonieInfo, uint64_t uid, uint32_t *audio_id, bool_t *tap_has_audio_id, bool_t *forced)
+{
+    uint32_t naturalAudioId = 0;
+    if (forced != NULL)
+    {
+        *forced = FALSE;
+    }
+    if (!freshness_get_natural_server_audio_id(tonieInfo, &naturalAudioId, tap_has_audio_id))
+    {
+        return FALSE;
+    }
+
+    uint32_t forcedAudioId = 0;
+    if (freshness_forced_version_find(settings, uid, naturalAudioId, &forcedAudioId))
+    {
+        *audio_id = forcedAudioId;
+        if (forced != NULL)
+        {
+            *forced = TRUE;
+        }
+        return TRUE;
+    }
+
+    *audio_id = naturalAudioId;
+    return TRUE;
+}
+
+static bool_t freshness_maybe_set_forced_version(settings_t *settings, tonie_info_t *tonieInfo, uint64_t uid, uint32_t boxAudioId)
+{
+    uint32_t naturalAudioId = 0;
+    if (!freshness_get_natural_server_audio_id(tonieInfo, &naturalAudioId, NULL))
+    {
+        freshness_forced_version_remove(settings, uid);
+        return FALSE;
+    }
+
+    uint32_t activeAudioId = naturalAudioId;
+    uint32_t forcedAudioId = 0;
+    if (freshness_forced_version_find(settings, uid, naturalAudioId, &forcedAudioId))
+    {
+        activeAudioId = forcedAudioId;
+    }
+
+    if (freshness_audio_id_compare_value(naturalAudioId, NULL, NULL) != freshness_audio_id_compare_value(boxAudioId, NULL, NULL) &&
+        freshness_audio_id_compare_value(activeAudioId, NULL, NULL) != freshness_audio_id_compare_value(boxAudioId, NULL, NULL))
+    {
+        freshness_forced_version_remove(settings, uid);
+        return FALSE;
+    }
+
+    uint32_t newForcedAudioId = freshness_new_forced_version(naturalAudioId, boxAudioId);
+    return freshness_forced_version_set(settings, uid, newForcedAudioId, naturalAudioId);
+}
+
+static bool_t freshness_source_changed_contains_ruid(settings_t *settings, const char *ruid)
+{
+    uint64_t uid = 0;
+    return freshness_ruid_to_uid(ruid, &uid) && freshness_cache_source_changed_contains(settings, uid);
+}
+
+static const char *freshness_v3_resume_behavior(settings_t *settings, contentJson_t *content_json, const char *ruid)
+{
+    if ((content_json != NULL && content_json->live) || freshness_source_changed_contains_ruid(settings, ruid))
+    {
+        return "alwaysReset";
+    }
+    return "resume";
+}
+
+static uint32_t freshness_v3_content_meta_version(settings_t *settings, tonie_info_t *tonieInfo, const char *ruid, uint32_t fallbackAudioId)
+{
+    uint64_t uid = 0;
+    uint32_t effectiveAudioId = fallbackAudioId;
+    if (freshness_ruid_to_uid(ruid, &uid) &&
+        freshness_get_effective_server_audio_id(settings, tonieInfo, uid, &effectiveAudioId, NULL, NULL))
+    {
+        return effectiveAudioId;
+    }
+    return fallbackAudioId;
+}
+
+static void freshness_evaluate_tonie(settings_t *settings, tonie_info_t *tonieInfo, uint64_t uid, uint32_t boxAudioIdRaw, bool_t force_stale, bool_t log_details, freshness_decision_t *decision)
+{
+    osMemset(decision, 0, sizeof(*decision));
+    decision->boxAudioId = freshness_audio_id_compare_value(boxAudioIdRaw, &decision->custom_box, decision->date_buffer_box);
+
+    if (tonieInfo == NULL || settings == NULL)
+    {
+        decision->should_mark_freshness = force_stale;
+        return;
+    }
+
+    bool_t tap_freshness = (tonieInfo->json._source_type == CT_SOURCE_TAP_STREAM || tonieInfo->json._source_type == CT_SOURCE_TAP_CACHED) &&
+                           tonieInfo->json._tap._valid;
+    tonie_audio_playlist_t *tap = tap_freshness ? &tonieInfo->json._tap : NULL;
+    bool_t tap_has_audio_id = FALSE;
+    uint32_t naturalServerAudioId = 0;
+
+    if (freshness_get_natural_server_audio_id(tonieInfo, &naturalServerAudioId, &tap_has_audio_id))
+    {
+        uint32_t effectiveServerAudioId = naturalServerAudioId;
+        uint32_t forcedServerAudioId = 0;
+        decision->naturalServerAudioIdRaw = naturalServerAudioId;
+        if (freshness_forced_version_find(settings, uid, naturalServerAudioId, &forcedServerAudioId))
+        {
+            effectiveServerAudioId = forcedServerAudioId;
+            decision->forced_server_audio_id = TRUE;
+        }
+
+        decision->effectiveServerAudioIdRaw = effectiveServerAudioId;
+        decision->serverAudioId = freshness_audio_id_compare_value(effectiveServerAudioId, &decision->custom_server, decision->date_buffer_server);
+        decision->serverAudioIdAvailable = TRUE;
+
+        if (tap_has_audio_id)
+        {
+            tonieInfo->updated = decision->boxAudioId != decision->serverAudioId;
+        }
+        else
+        {
+            tonieInfo->updated = decision->boxAudioId < decision->serverAudioId;
+            tonieInfo->updated = tonieInfo->updated || (settings->cloud.updateOnLowerAudioId && (decision->boxAudioId > decision->serverAudioId));
+        }
+        if (settings->cloud.prioCustomContent && !settings->cloud.updateOnLowerAudioId)
+        {
+            if (decision->custom_box && !decision->custom_server)
+            {
+                tonieInfo->updated = false;
+            }
+            if (!decision->custom_box && decision->custom_server)
+            {
+                tonieInfo->updated = true;
+            }
+        }
+    }
+
+    if (!tonieInfo->valid)
+    {
+        content_json_update_model(&tonieInfo->json, boxAudioIdRaw, NULL);
+    }
+
+    char uidText[17];
+    osSprintf(uidText, "%016" PRIX64, uid);
+    if (settings->core.flex_enabled && !osStrcasecmp(settings->core.flex_uid, uidText))
+    {
+        decision->isFlex = TRUE;
+    }
+
+    decision->stable_cached_tap = tap_is_stable_cached_playlist(tonieInfo);
+    decision->tap_dynamic_freshness = tap_should_force_dynamic_freshness(tonieInfo);
+    decision->tap_final_needs_rebuild = tap_has_audio_id &&
+                                        tap->shuffle == TAP_SHUFFLE_NONE &&
+                                        (!tonieInfo->valid ||
+                                         tonieInfo->tafHeader == NULL ||
+                                         tonieInfo->tafHeader->audio_id != tap->audio_id);
+    decision->updated_freshness = tap_freshness ?
+                                  (tonieInfo->updated || decision->tap_final_needs_rebuild) :
+                                  (tonieInfo->updated && !decision->stable_cached_tap);
+    decision->stream_freshness = tonieInfo->json._source_type == CT_SOURCE_STREAM;
+    decision->should_mark_freshness = force_stale ||
+                                      tonieInfo->json.live ||
+                                      decision->updated_freshness ||
+                                      decision->stream_freshness ||
+                                      decision->tap_dynamic_freshness ||
+                                      decision->isFlex;
+
+    if (!log_details)
+    {
+        return;
+    }
+
+    (void)decision->custom_box;
+    (void)decision->custom_server;
+    TRACE_INFO("  uid: %016" PRIX64 ", nocloud: %d, live: %d, updated: %d, audioid: %08X (%s%s)",
+               uid,
+               tonieInfo->json.nocloud,
+               tonieInfo->json.live || decision->isFlex || decision->stream_freshness,
+               tonieInfo->updated,
+               decision->boxAudioId,
+               decision->date_buffer_box,
+               decision->custom_box ? ", custom" : "");
+
+    if (decision->serverAudioIdAvailable)
+    {
+        TRACE_INFO_RESUME(", audioid-tc: %08X (%s%s)",
+                          decision->serverAudioId,
+                          decision->date_buffer_server,
+                          decision->forced_server_audio_id ? ", forced" : (decision->custom_server ? ", custom" : ""));
+    }
+    TRACE_INFO_RESUME("\r\n");
+
+#if (TRACE_LEVEL >= TRACE_LEVEL_VERBOSE)
+    if ((tonieInfo->json._source_type == CT_SOURCE_TAP_STREAM) || (tonieInfo->json._source_type == CT_SOURCE_TAP_CACHED))
+    {
+        tonie_audio_playlist_t *tapInfo = &tonieInfo->json._tap;
+        bool_t final_exists = tapInfo->_filepath_resolved != NULL && fsFileExists(tapInfo->_filepath_resolved);
+        bool_t final_valid = final_exists && toniefile_is_valid(tapInfo->_filepath_resolved);
+        TRACE_VERBOSE("  tap freshness: source=%s tap_audioid=%08X shuffle=%u tap_cached=%u final_exists=%u final_valid=%u stable_cached=%u boxAudioId=%08X serverAudioId=%08X\r\n",
+                      content_source_type_name(tonieInfo->json._source_type),
+                      (uint32_t)tapInfo->audio_id,
+                      (unsigned int)tapInfo->shuffle,
+                      tapInfo->_cached,
+                      final_exists,
+                      final_valid,
+                      decision->stable_cached_tap,
+                      decision->boxAudioId,
+                      decision->serverAudioId);
+    }
+#endif
+    if (decision->stable_cached_tap && tonieInfo->updated && !decision->updated_freshness)
+    {
+        TRACE_VERBOSE("  stable cached TAP freshness protected: updated=%u ignored\r\n", tonieInfo->updated);
+    }
+    if (decision->should_mark_freshness)
+    {
+        TRACE_VERBOSE("  freshness mark reason: live=%u updated=%u stream=%u dynamic_tap=%u flex=%u cache=%u stable_cached_tap=%u\r\n",
+                      tonieInfo->json.live,
+                      decision->updated_freshness,
+                      decision->stream_freshness,
+                      decision->tap_dynamic_freshness,
+                      decision->isFlex,
+                      force_stale,
+                      decision->stable_cached_tap);
+    }
+}
+
 void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckRequest *freshReq, TonieFreshnessCheckResponse *freshResp, TonieFreshnessCheckRequest *freshReqCloud, size_t *freshnessCacheLenOut)
 {
     settings_t *settings = client_ctx->settings;
@@ -926,113 +2214,162 @@ void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckReques
     size_t freshnessCacheLen = 0;
     uint64_t *freshnessCache = settings_get_u64_array_id("internal.freshnessCache", settings->internal.overlayNumber, &freshnessCacheLen);
     if (freshnessCacheLenOut) *freshnessCacheLenOut = freshnessCacheLen;
-    
-    freshResp->tonie_marked = malloc(sizeof(uint64_t) * (freshReq->n_tonie_infos + freshnessCacheLen));
+
+    size_t freshRespCapacity = freshReq->n_tonie_infos + freshnessCacheLen;
+    freshResp->tonie_marked = malloc(sizeof(uint64_t) * freshRespCapacity);
+    if (freshRespCapacity > 0 && freshResp->tonie_marked == NULL)
+    {
+        TRACE_ERROR("Could not allocate freshnessCheck response\r\n");
+        freshReqCloud->n_tonie_infos = 0;
+        freshReqCloud->tonie_infos = NULL;
+        return;
+    }
+
+    uint64_t *boxCorrectedUids = NULL;
+    size_t boxCorrectedLen = 0;
+    if (freshReq->n_tonie_infos > 0)
+    {
+        boxCorrectedUids = malloc(sizeof(uint64_t) * freshReq->n_tonie_infos);
+        if (boxCorrectedUids == NULL)
+        {
+            TRACE_ERROR("Could not allocate V3 freshness inventory correction list\r\n");
+        }
+    }
 
     for (size_t i = 0; i < freshnessCacheLen; i++)
     {
-        bool requested = false;
+        bool_t requested = FALSE;
         for (size_t j = 0; j < freshReq->n_tonie_infos; j++)
         {
             if (freshReq->tonie_infos[j]->uid == freshnessCache[i])
             {
-                requested = true;
+                requested = TRUE;
                 break;
             }
         }
         if (!requested)
         {
-            freshResp->tonie_marked[freshResp->n_tonie_marked++] = freshnessCache[i];
+            freshness_response_add_uid(freshResp, freshRespCapacity, freshnessCache[i]);
         }
     }
 
     freshReqCloud->n_tonie_infos = 0;
     freshReqCloud->tonie_infos = malloc(sizeof(TonieFCInfo *) * freshReq->n_tonie_infos);
-
-    for (uint16_t i = 0; i < freshReq->n_tonie_infos; i++)
+    if (freshReq->n_tonie_infos > 0 && freshReqCloud->tonie_infos == NULL)
     {
-        uint32_t boxAudioId = freshReq->tonie_infos[i]->audio_id;
-        tonie_info_t *tonieInfo;
-        tonieInfo = getTonieInfoFromUid(freshReq->tonie_infos[i]->uid, false, settings);
+        TRACE_ERROR("Could not allocate freshnessCheck cloud request\r\n");
+        return;
+    }
 
-        char date_buffer_box[32];
-        bool_t custom_box;
-        char date_buffer_server[32];
-        bool_t custom_server = FALSE;
+    for (size_t i = 0; i < freshReq->n_tonie_infos; i++)
+    {
+        uint64_t uid = freshReq->tonie_infos[i]->uid;
+        bool_t cache_stale = freshness_uid_array_contains(freshnessCache, freshnessCacheLen, uid);
+        bool_t source_changed_stale = cache_stale && freshness_cache_source_changed_contains(settings, uid);
+        tonie_info_t *tonieInfo = getTonieInfoFromUid(uid, false, settings);
+        freshness_decision_t decision;
 
-        checkAudioIdForCustom(&custom_box, date_buffer_box, boxAudioId);
+        freshness_evaluate_tonie(settings, tonieInfo, uid, freshReq->tonie_infos[i]->audio_id, FALSE, TRUE, &decision);
 
-        if (custom_box)
-            boxAudioId += TEDDY_BENCH_AUDIO_ID_DEDUCT;
-
-        uint32_t serverAudioId = 0;
-        if (tonieInfo->valid)
+        if (cache_stale && !source_changed_stale && !decision.should_mark_freshness)
         {
-            serverAudioId = tonieInfo->tafHeader->audio_id;
-            checkAudioIdForCustom(&custom_server, date_buffer_server, serverAudioId);
-
-            if (custom_server)
-                serverAudioId += TEDDY_BENCH_AUDIO_ID_DEDUCT;
-
-            tonieInfo->updated = boxAudioId < serverAudioId;
-            tonieInfo->updated = tonieInfo->updated || (settings->cloud.updateOnLowerAudioId && (boxAudioId > serverAudioId));
-            if (settings->cloud.prioCustomContent && !settings->cloud.updateOnLowerAudioId)
+            char cruid[17];
+            freshness_uid_to_ruid(uid, cruid);
+            TRACE_INFO("Accepted V3 freshness inventory for rUID %s, clearing pending freshness update\r\n", cruid);
+            if (boxCorrectedUids != NULL)
             {
-                if (custom_box && !custom_server)
-                    tonieInfo->updated = false;
-                if (!custom_box && custom_server)
-                    tonieInfo->updated = true;
+                boxCorrectedUids[boxCorrectedLen++] = uid;
             }
+            cache_stale = FALSE;
+        }
+        else if (source_changed_stale)
+        {
+            decision.should_mark_freshness = TRUE;
         }
 
         if (!tonieInfo->json.nocloud)
         {
             freshReqCloud->tonie_infos[freshReqCloud->n_tonie_infos] = freshReq->tonie_infos[i];
-            if (tonieInfo->valid)
+            if (decision.serverAudioIdAvailable)
             {
-                freshReqCloud->tonie_infos[freshReqCloud->n_tonie_infos]->audio_id = serverAudioId;
+                freshReqCloud->tonie_infos[freshReqCloud->n_tonie_infos]->audio_id = decision.serverAudioId;
             }
             freshReqCloud->n_tonie_infos++;
         }
 
-        bool isFlex = false;
-
-        char uid[17];
-        osSprintf(uid, "%016" PRIX64, freshReq->tonie_infos[i]->uid);
-
-        if (settings->core.flex_enabled && !osStrcasecmp(settings->core.flex_uid, uid))
+        if (decision.should_mark_freshness)
         {
-            isFlex = true;
-        }
-        (void)custom_box;
-        (void)custom_server;
-        TRACE_INFO("  uid: %016" PRIX64 ", nocloud: %d, live: %d, updated: %d, audioid: %08X (%s%s)",
-                   freshReq->tonie_infos[i]->uid,
-                   tonieInfo->json.nocloud,
-                   tonieInfo->json.live || isFlex || (tonieInfo->json._source_type == CT_SOURCE_STREAM),
-                   tonieInfo->updated,
-                   boxAudioId,
-                   date_buffer_box,
-                   custom_box ? ", custom" : "");
-
-        if (tonieInfo->valid)
-        {
-            TRACE_INFO_RESUME(", audioid-tc: %08X (%s%s)",
-                              serverAudioId,
-                              date_buffer_server,
-                              custom_server ? ", custom" : "");
-        }
-        TRACE_INFO_RESUME("\r\n");
-        if (!tonieInfo->valid)
-        {
-            content_json_update_model(&tonieInfo->json, boxAudioId, NULL);
-        }
-
-        if (tonieInfo->json.live || tonieInfo->updated || (tonieInfo->json._source_type == CT_SOURCE_STREAM) || (tonieInfo->json._source_type == CT_SOURCE_TAP_STREAM) || isFlex)
-        {
-            freshResp->tonie_marked[freshResp->n_tonie_marked++] = freshReq->tonie_infos[i]->uid;
+            freshness_response_add_uid(freshResp, freshRespCapacity, uid);
         }
         freeTonieInfo(tonieInfo);
+    }
+
+    for (size_t i = 0; i < boxCorrectedLen; i++)
+    {
+        freshness_cache_remove_uid(settings, boxCorrectedUids[i]);
+    }
+    free(boxCorrectedUids);
+}
+
+void freshness_mark_content_mapping_changed(const char *ruid, bool_t source_changed)
+{
+    uint64_t uid = 0;
+    if (!freshness_ruid_to_uid(ruid, &uid))
+    {
+        TRACE_WARNING("Could not process V3 freshness update for invalid rUID %s\r\n", ruid ? ruid : "(null)");
+        return;
+    }
+
+    for (uint8_t overlay_id = 1; overlay_id < MAX_OVERLAYS; overlay_id++)
+    {
+        settings_t *settings = get_settings_id(overlay_id);
+        if (settings == NULL || !settings->internal.config_used)
+        {
+            continue;
+        }
+
+        uint32_t boxAudioId = 0;
+        if (!freshness_inventory_find_uid(settings, uid, &boxAudioId))
+        {
+            continue;
+        }
+
+        tonie_info_t *tonieInfo = getTonieInfoFromUid(uid, false, settings);
+        bool_t forced_version_set = FALSE;
+        if (source_changed)
+        {
+            forced_version_set = freshness_maybe_set_forced_version(settings, tonieInfo, uid, boxAudioId);
+        }
+        freshness_decision_t decision;
+        freshness_evaluate_tonie(settings, tonieInfo, uid, boxAudioId, FALSE, FALSE, &decision);
+
+        if (source_changed || decision.should_mark_freshness)
+        {
+            if (freshness_cache_add_uid(settings, uid, NULL))
+            {
+                if (source_changed)
+                {
+                    freshness_cache_add_source_changed_uid(settings, uid);
+                }
+                else
+                {
+                    freshness_cache_remove_source_changed_uid(settings, uid);
+                }
+
+                char cruid[17];
+                freshness_uid_to_ruid(uid, cruid);
+                TRACE_INFO("Marked rUID %s for V3 freshness update on overlay %s (%s)\r\n",
+                           cruid,
+                           settings->commonName,
+                           forced_version_set ? "source changed, forced version" : (source_changed ? "source changed" : "freshness comparison"));
+                mqtt_server_publish_fresh_tonies_for_overlay(overlay_id);
+            }
+        }
+
+        if (tonieInfo != NULL)
+        {
+            freeTonieInfo(tonieInfo);
+        }
     }
 }
 
@@ -1093,8 +2430,9 @@ error_t handleCloudFreshnessCheck(HttpConnection *connection, const char_t *uri,
 
             TRACE_INFO("Setting freshnessCache with %" PRIuSIZE " entries\r\n", freshResp.n_tonie_marked);
             settings_set_u64_array_id("internal.freshnessCache", freshResp.tonie_marked, freshResp.n_tonie_marked, client_ctx->settings->internal.overlayNumber);
-            settings_set_bool_id("internal.freshnessCacheChanged", true, client_ctx->settings->internal.overlayNumber);
-            mqtt_server_publish_fresh_tonies(client_ctx);
+            freshness_cache_sync_source_changed_uids(client_ctx->settings);
+            settings_set_bool_id("internal.freshnessCacheChanged", freshResp.n_tonie_marked > 0, client_ctx->settings->internal.overlayNumber);
+            mqtt_server_publish_fresh_tonies_for_overlay(client_ctx->settings->internal.overlayNumber);
 
             tonie_freshness_check_request__free_unpacked(freshReq, NULL);
             setTonieboxSettings(&freshResp, client_ctx->settings);
@@ -1153,7 +2491,8 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
     cJSON *contentObj = cJSON_GetObjectItem(inputJson, "content");
     int count = 0;
     cJSON *item = NULL;
-    if (!contentObj) {
+    bool_t validContent = cJSON_IsObject(contentObj);
+    if (!validContent) {
         TRACE_WARNING("V3 Freshness JSON missing 'content' object\n");
     } else {
         count = cJSON_GetArraySize(contentObj);
@@ -1164,6 +2503,13 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
     freshReq.n_tonie_infos = count;
     TonieFCInfo *fcInfos = malloc(sizeof(TonieFCInfo) * count);
     freshReq.tonie_infos = malloc(sizeof(TonieFCInfo *) * count);
+    if (count > 0 && (fcInfos == NULL || freshReq.tonie_infos == NULL))
+    {
+        free(fcInfos);
+        free(freshReq.tonie_infos);
+        cJSON_Delete(inputJson);
+        return ERROR_OUT_OF_MEMORY;
+    }
     
     int i = 0;
     while (item && i < count) {
@@ -1189,6 +2535,8 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
         item = item->next;
         i++;
     }
+    freshReq.n_tonie_infos = i;
+    freshness_store_v3_inventory(client_ctx->settings, validContent ? &freshReq : NULL);
     
     TonieFreshnessCheckResponse freshResp = TONIE_FRESHNESS_CHECK_RESPONSE__INIT;
     TonieFreshnessCheckRequest freshReqCloud = TONIE_FRESHNESS_CHECK_REQUEST__INIT;
@@ -1247,8 +2595,9 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
 
     TRACE_INFO("Setting freshnessCache with %" PRIuSIZE " entries\r\n", freshResp.n_tonie_marked);
     settings_set_u64_array_id("internal.freshnessCache", freshResp.tonie_marked, freshResp.n_tonie_marked, client_ctx->settings->internal.overlayNumber);
-    settings_set_bool_id("internal.freshnessCacheChanged", true, client_ctx->settings->internal.overlayNumber);
-    mqtt_server_publish_fresh_tonies(client_ctx);
+    freshness_cache_sync_source_changed_uids(client_ctx->settings);
+    settings_set_bool_id("internal.freshnessCacheChanged", freshResp.n_tonie_marked > 0, client_ctx->settings->internal.overlayNumber);
+    mqtt_server_publish_fresh_tonies_for_overlay(client_ctx->settings->internal.overlayNumber);
 
     // No settings for TB2 in freshnessCheck
     // setTonieboxSettings(&freshResp, client_ctx->settings); 
@@ -1387,6 +2736,80 @@ error_t handleCloudSetupStatusV3(HttpConnection *connection, const char_t *uri, 
     return httpWriteResponse(connection, (uint8_t *)response_json, dataLen, false);
 }
 
+static error_t sendLocalContentMetaV3(HttpConnection *connection, const char *ruid, uint32_t version, uint32_t fileSize, const char *resumeBehavior, const char *tonieSalesId)
+{
+    cJSON *respJson = cJSON_CreateObject();
+    if (respJson == NULL)
+    {
+        return ERROR_OUT_OF_MEMORY;
+    }
+
+    if (cJSON_AddNumberToObject(respJson, "version", version) == NULL ||
+        cJSON_AddStringToObject(respJson, "contentType", "content_tonie") == NULL ||
+        cJSON_AddStringToObject(respJson, "tonieType", "content") == NULL ||
+        cJSON_AddStringToObject(respJson, "resumeBehavior", resumeBehavior) == NULL ||
+        cJSON_AddStringToObject(respJson, "tonieSalesId", tonieSalesId ? tonieSalesId : "") == NULL)
+    {
+        cJSON_Delete(respJson);
+        return ERROR_OUT_OF_MEMORY;
+    }
+
+    cJSON *contentArray = cJSON_CreateArray();
+    if (contentArray == NULL || !cJSON_AddItemToObject(respJson, "content", contentArray))
+    {
+        cJSON_Delete(contentArray);
+        cJSON_Delete(respJson);
+        return ERROR_OUT_OF_MEMORY;
+    }
+
+    cJSON *contentItem = cJSON_CreateObject();
+    if (contentItem == NULL || !cJSON_AddItemToArray(contentArray, contentItem))
+    {
+        cJSON_Delete(contentItem);
+        cJSON_Delete(respJson);
+        return ERROR_OUT_OF_MEMORY;
+    }
+
+    char name[64];
+    osSprintf(name, "teddycloud_00_%s", ruid);
+    if (cJSON_AddStringToObject(contentItem, "type", "audio") == NULL ||
+        cJSON_AddStringToObject(contentItem, "name", name) == NULL ||
+        cJSON_AddStringToObject(contentItem, "auth", "") == NULL)
+    {
+        cJSON_Delete(respJson);
+        return ERROR_OUT_OF_MEMORY;
+    }
+    cJSON *analytics = cJSON_CreateObject();
+    if (analytics == NULL || !cJSON_AddItemToObject(contentItem, "analytics", analytics))
+    {
+        cJSON_Delete(analytics);
+        cJSON_Delete(respJson);
+        return ERROR_OUT_OF_MEMORY;
+    }
+    if (cJSON_AddNumberToObject(contentItem, "fileSize", (double)fileSize) == NULL)
+    {
+        cJSON_Delete(respJson);
+        return ERROR_OUT_OF_MEMORY;
+    }
+
+    char *response_json = cJSON_PrintUnformatted(respJson);
+    if (response_json == NULL)
+    {
+        cJSON_Delete(respJson);
+        return ERROR_OUT_OF_MEMORY;
+    }
+
+    size_t dataLen = osStrlen(response_json);
+    TRACE_INFO("V3 Content Meta response: size=%" PRIuSIZE ", content=%s\n", dataLen, response_json);
+
+    httpPrepareHeader(connection, "application/json; charset=utf-8", dataLen);
+    error_t error = httpWriteResponse(connection, (uint8_t *)response_json, dataLen, false);
+
+    free(response_json);
+    cJSON_Delete(respJson);
+    return error;
+}
+
 error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
 {
     char current_time[64];
@@ -1409,14 +2832,70 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
     }
     uint8_t *token = connection->private.authentication_token;
 
-    
-    if (tonieInfo->exists && tonieInfo->valid)
+    bool_t skip_tmp_content_meta = FALSE;
+    if (tonieInfo->json._source_type == CT_SOURCE_TAP_STREAM)
+    {
+        tonie_audio_playlist_t *tap = &tonieInfo->json._tap;
+        const char *resumeBehavior = freshness_v3_resume_behavior(client_ctx->settings, &tonieInfo->json, ruid);
+        const char *tonieSalesId = tonieInfo->json.tonie_model ? tonieInfo->json.tonie_model : "";
+        uint32_t contentVersion = freshness_v3_content_meta_version(client_ctx->settings, tonieInfo, ruid, (uint32_t)tap->audio_id);
+
+        if (tap->_valid && tap->shuffle == TAP_SHUFFLE_NONE && tap->_filepath_resolved != NULL)
+        {
+            skip_tmp_content_meta = TRUE;
+            if (tap_final_cache_is_current(tap))
+            {
+                uint32_t fileSize = 0;
+                fsGetFileSize(tap->_filepath_resolved, &fileSize);
+                if (fileSize > TONIEFILE_FRAME_SIZE)
+                {
+                    fileSize -= TONIEFILE_FRAME_SIZE;
+                }
+                else
+                {
+                    fileSize = 0;
+                }
+
+                error = sendLocalContentMetaV3(connection, ruid, contentVersion, fileSize, resumeBehavior, tonieSalesId);
+                if (error == NO_ERROR)
+                {
+                    freshness_clear_cache_after_content_request(client_ctx, V3_CONTENT_META, ruid);
+                }
+                freeTonieInfo(tonieInfo);
+                return error;
+            }
+
+            toniefile_live_header_t live_header;
+            uint32_t predicted_taf_size = 0;
+            size_t *runtime_indices = NULL;
+            size_t runtime_files_count = 0;
+
+            if (tap_prepare_runtime_indices(tap, &runtime_indices, &runtime_files_count) == NO_ERROR &&
+                tap_predict_taf_live_header(tap, runtime_indices, runtime_files_count, &live_header, &predicted_taf_size) == NO_ERROR &&
+                predicted_taf_size > TONIEFILE_FRAME_SIZE &&
+                live_header.payload_size > 0)
+            {
+                tap_free_runtime_indices(runtime_indices);
+                error = sendLocalContentMetaV3(connection, ruid, contentVersion, live_header.payload_size, resumeBehavior, tonieSalesId);
+                if (error == NO_ERROR)
+                {
+                    freshness_clear_cache_after_content_request(client_ctx, V3_CONTENT_META, ruid);
+                }
+                freeTonieInfo(tonieInfo);
+                return error;
+            }
+            tap_free_runtime_indices(runtime_indices);
+        }
+    }
+
+    if (!skip_tmp_content_meta && tonieInfo->exists && tonieInfo->valid)
     {
         cJSON *respJson = cJSON_CreateObject();
-        cJSON_AddNumberToObject(respJson, "version", tonieInfo->tafHeader->audio_id);
+        uint32_t contentVersion = freshness_v3_content_meta_version(client_ctx->settings, tonieInfo, ruid, tonieInfo->tafHeader->audio_id);
+        cJSON_AddNumberToObject(respJson, "version", contentVersion);
         cJSON_AddStringToObject(respJson, "contentType", "content_tonie");
         cJSON_AddStringToObject(respJson, "tonieType", "content");
-        cJSON_AddStringToObject(respJson, "resumeBehavior", tonieInfo->json.live ? "alwaysReset" : "resume");
+        cJSON_AddStringToObject(respJson, "resumeBehavior", freshness_v3_resume_behavior(client_ctx->settings, &tonieInfo->json, ruid));
         cJSON_AddStringToObject(respJson, "tonieSalesId", tonieInfo->json.tonie_model ? tonieInfo->json.tonie_model : "");
 
         cJSON *contentArray = cJSON_CreateArray();
@@ -1496,6 +2975,10 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
 
         free(response_json);
         cJSON_Delete(respJson);
+        if (error == NO_ERROR)
+        {
+            freshness_clear_cache_after_content_request(client_ctx, V3_CONTENT_META, ruid);
+        }
         freeTonieInfo(tonieInfo);
         return error;
     }
@@ -1517,6 +3000,7 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
             freeTonieInfo(tonieInfo);
             return NO_ERROR;
         }
+        freshness_clear_cache_after_content_request(client_ctx, V3_CONTENT_META, ruid);
     }
 
     freeTonieInfo(tonieInfo);

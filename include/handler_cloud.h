@@ -30,5 +30,7 @@ error_t handleCloudFreshnessCheck(HttpConnection *connection, const char_t *uri,
 error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
 error_t handleCloudReset(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
 error_t handleContent(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
+void freshness_mark_content_mapping_changed(const char *ruid, bool_t source_changed);
+void freshness_cache_sync_source_changed_uids(settings_t *settings);
 
 #endif

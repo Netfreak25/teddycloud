@@ -1171,6 +1171,93 @@ error_t mqtt_init_box(t_ha_info *ha_box_instance, client_ctx_t *client_ctx)
     entity.url_t = "%s/ContentPicture";
     ha_add(ha_box_instance, &entity);
 
+    memset(&entity, 0x00, sizeof(entity));
+    entity.id = "BedtimeState";
+    entity.name = "Bedtime State";
+    entity.type = ha_sensor;
+    entity.stat_t = "%s/BedtimeState";
+    ha_add(ha_box_instance, &entity);
+
+    memset(&entity, 0x00, sizeof(entity));
+    entity.id = "BedtimeDuration";
+    entity.name = "Bedtime Duration";
+    entity.type = ha_sensor;
+    entity.stat_t = "%s/BedtimeDuration";
+    ha_add(ha_box_instance, &entity);
+
+    memset(&entity, 0x00, sizeof(entity));
+    entity.id = "BedtimeDefaultDuration";
+    entity.name = "Bedtime Default Duration";
+    entity.type = ha_sensor;
+    entity.stat_t = "%s/BedtimeDefaultDuration";
+    ha_add(ha_box_instance, &entity);
+
+    memset(&entity, 0x00, sizeof(entity));
+    entity.id = "BedtimeUntil";
+    entity.name = "Bedtime Until";
+    entity.type = ha_sensor;
+    entity.stat_t = "%s/BedtimeUntil";
+    ha_add(ha_box_instance, &entity);
+
+    memset(&entity, 0x00, sizeof(entity));
+    entity.id = "BatteryPercent";
+    entity.name = "Battery Percent";
+    entity.type = ha_sensor;
+    entity.stat_t = "%s/BatteryPercent";
+    entity.unit_of_meas = "%";
+    entity.dev_class = "battery";
+    entity.state_class = "measurement";
+    ha_add(ha_box_instance, &entity);
+
+    memset(&entity, 0x00, sizeof(entity));
+    entity.id = "BatteryRaw";
+    entity.name = "Battery Raw";
+    entity.type = ha_sensor;
+    entity.stat_t = "%s/BatteryRaw";
+    ha_add(ha_box_instance, &entity);
+
+    memset(&entity, 0x00, sizeof(entity));
+    entity.id = "BatteryCurrent";
+    entity.name = "Battery Current";
+    entity.type = ha_sensor;
+    entity.stat_t = "%s/BatteryCurrent";
+    ha_add(ha_box_instance, &entity);
+
+    memset(&entity, 0x00, sizeof(entity));
+    entity.id = "BatteryStatus";
+    entity.name = "Battery Status";
+    entity.type = ha_sensor;
+    entity.stat_t = "%s/BatteryStatus";
+    ha_add(ha_box_instance, &entity);
+
+    memset(&entity, 0x00, sizeof(entity));
+    entity.id = "SpeakerOutput";
+    entity.name = "Speaker Output";
+    entity.type = ha_binary_sensor;
+    entity.stat_t = "%s/SpeakerOutput";
+    ha_add(ha_box_instance, &entity);
+
+    memset(&entity, 0x00, sizeof(entity));
+    entity.id = "HeadphonesConnected";
+    entity.name = "Headphones Connected";
+    entity.type = ha_binary_sensor;
+    entity.stat_t = "%s/HeadphonesConnected";
+    ha_add(ha_box_instance, &entity);
+
+    memset(&entity, 0x00, sizeof(entity));
+    entity.id = "HeadphonesConnectedCount";
+    entity.name = "Headphones Connected Count";
+    entity.type = ha_sensor;
+    entity.stat_t = "%s/HeadphonesConnectedCount";
+    ha_add(ha_box_instance, &entity);
+
+    memset(&entity, 0x00, sizeof(entity));
+    entity.id = "HeadphonesConnectedDevices";
+    entity.name = "Headphones Connected Devices";
+    entity.type = ha_sensor;
+    entity.stat_t = "%s/HeadphonesConnectedDevices";
+    ha_add(ha_box_instance, &entity);
+
     int cmd_ctx_idx = (int)(ha_box_instance - ha_box_instances);
     if (cmd_ctx_idx >= 0 && cmd_ctx_idx < MQTT_BOX_INSTANCES)
     {

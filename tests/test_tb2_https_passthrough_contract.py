@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Static guardrails for the TB2 HTTPS pre-parser passthrough contract."""
+
+from pathlib import Path
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class Tb2HttpsPassthroughContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.http_server = (ROOT / "src/cyclone/cyclone_tcp/http/http_server.c").read_text(
+            encoding="utf-8"
+        )
+        cls.passthrough = (ROOT / "src/tb2_https_passthrough.c").read_text(
+            encoding="utf-8"
+        )
+        cls.settings = (ROOT / "src/settings.c").read_text(encoding="utf-8")
+
+    def test_passthrough_runs_before_http_parser(self):
+        callback = self.http_server.index("postTlsCallback(connection, &handled)")
+        parser = self.http_server.index("httpReadRequestHeader(connection)")
+        self.assertLess(callback, parser)
+
+    def test_capture_is_flushed_before_forwarding(self):
+        forwarder = self.passthrough[
+            self.passthrough.index("static error_t tb2_forward_ready") :
+        ]
+        capture = forwarder.index("tb2_capture_chunk(capture")
+        send = forwarder.index("tb2_tls_write_all(destination")
+        self.assertLess(capture, send)
+        self.assertIn("fsFlushFile(capture->traffic)", self.passthrough)
+
+    def test_passthrough_does_not_use_http_cloud_handlers(self):
+        forbidden = (
+            "cloud_request(",
+            "httpClientCreateRequest(",
+            "httpClientSetMethod(",
+            "httpClientAddHeaderField(",
+            "httpSendErrorResponse(",
+        )
+        for symbol in forbidden:
+            self.assertNotIn(symbol, self.passthrough)
+
+    def test_capture_defaults_are_registered(self):
+        self.assertIn('"cloud.tb2_enabled"', self.settings)
+        self.assertIn('"data/diagnostics/tb2-https-passthrough"', self.settings)
+        self.assertIn("&settings->cloud.tb2_capture_max_mib, 4096", self.settings)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

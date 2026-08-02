@@ -25,6 +25,141 @@
 
         <title>TeddyCloud</title>
 
+        <style>
+            :root {
+                --tc-dev-banner-height: 30px;
+            }
+
+            body.tc-dev-environment {
+                padding-top: var(--tc-dev-banner-height);
+            }
+
+            #tc-dev-environment-banner {
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                z-index: 2147483000;
+                box-sizing: border-box;
+                height: var(--tc-dev-banner-height);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 8px;
+                padding: 4px 12px;
+                overflow: hidden;
+                background: linear-gradient(90deg, rgba(132, 24, 32, 0.94), rgba(196, 54, 63, 0.92));
+                border-bottom: 1px solid rgba(255, 255, 255, 0.22);
+                box-shadow: 0 2px 12px rgba(132, 24, 32, 0.28);
+                color: #fff5f5;
+                font: 600 12px/1.25 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                letter-spacing: 0;
+                text-align: center;
+            }
+
+            .tc-dev-environment-label {
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            #tc-dev-environment-commit {
+                flex: 0 0 auto;
+                padding: 1px 6px;
+                border: 1px solid rgba(255, 255, 255, 0.28);
+                border-radius: 6px;
+                background: rgba(255, 255, 255, 0.15);
+                color: #ffffff;
+                font: 700 12px/1.25 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+                letter-spacing: 0;
+            }
+
+            @media (max-width: 640px) {
+                :root {
+                    --tc-dev-banner-height: 36px;
+                }
+
+                #tc-dev-environment-banner {
+                    padding: 4px 8px;
+                    font-size: 11px;
+                }
+
+                #tc-dev-environment-commit {
+                    font-size: 11px;
+                }
+            }
+        </style>
+
+            <script>
+            (() => {
+                const commitShortSettingUrl = "/api/settings/get/internal.version.git_sha_short";
+                const commitLongSettingUrl = "/api/settings/get/internal.version.git_sha";
+                const installedCommitShortSettingUrl = "/api/settings/get/internal.version.package_git_sha_short";
+                const installedCommitLongSettingUrl = "/api/settings/get/internal.version.package_git_sha";
+                const installedCommitExplicitSettingUrl = "/api/settings/get/internal.version.package_git_sha_set";
+                const unknownCommit = "unbekannt";
+
+                const fetchSettingText = async (url) => {
+                    const response = await fetch(url, { cache: "no-store" });
+                    if (!response.ok) {
+                        throw new Error(`${response.status} ${response.statusText}`);
+                    }
+                    return (await response.text()).trim();
+                };
+
+                const updateDevEnvironmentBanner = async () => {
+                    const commitElement = document.getElementById("tc-dev-environment-commit");
+                    if (!commitElement) {
+                        return;
+                    }
+
+                    const shortSha = await fetchSettingText(commitShortSettingUrl).catch(() => "");
+                    const fullSha = await fetchSettingText(commitLongSettingUrl).catch(() => "");
+                    const installedShortSha = await fetchSettingText(installedCommitShortSettingUrl).catch(() => "");
+                    const installedFullSha = await fetchSettingText(installedCommitLongSettingUrl).catch(() => "");
+                    const installedExplicit = (await fetchSettingText(installedCommitExplicitSettingUrl).catch(() => "0")).trim();
+                    const fallbackShortSha = fullSha ? fullSha.slice(0, 7) : "";
+                    const fallbackInstalledShortSha = installedFullSha ? installedFullSha.slice(0, 7) : "";
+                    const displayedCommit = shortSha || fallbackShortSha || unknownCommit;
+                    const displayedInstalledCommit = installedShortSha || fallbackInstalledShortSha || "";
+                    const hasExplicitInstalledCommit = installedExplicit === "1" || installedExplicit.toLowerCase() === "true";
+
+                    commitElement.textContent = displayedInstalledCommit
+                        ? hasExplicitInstalledCommit
+                            ? `${displayedCommit} (${displayedInstalledCommit})`
+                            : `${displayedCommit} (unbekannt: patch install commit nicht explizit gesetzt)`
+                        : displayedCommit;
+                    if (fullSha || installedFullSha) {
+                        const titleParts = [];
+                        if (fullSha) {
+                            titleParts.push(`Build: ${fullSha}`);
+                        }
+                        if (installedFullSha) {
+                            titleParts.push(`Installed patch: ${installedFullSha}`);
+                        }
+                        commitElement.title = titleParts.join(" | ");
+                    }
+                };
+
+                const startDevEnvironmentBanner = () => {
+                    updateDevEnvironmentBanner().catch((error) => {
+                        const commitElement = document.getElementById("tc-dev-environment-commit");
+                        if (commitElement) {
+                            commitElement.textContent = unknownCommit;
+                        }
+                        console.error("Error loading TeddyCloud dev commit:", error);
+                    });
+                };
+
+                if (document.readyState === "loading") {
+                    document.addEventListener("DOMContentLoaded", startDevEnvironmentBanner, { once: true });
+                } else {
+                    startDevEnvironmentBanner();
+                }
+            })();
+        </script>
+
         <script>
             (async () => {
                 try {
@@ -57,10 +192,14 @@
                 }
             })();
         </script>
-      <script type="module" crossorigin src="/web/assets/index-BWoZJW5n.js"></script>
+      <script type="module" crossorigin src="/web/assets/index-Dc5xf4kB.js"></script>
       <link rel="stylesheet" crossorigin href="/web/assets/index-CTPesxOB.css">
     </head>
-    <body>
+    <body class="tc-dev-environment">
+        <div id="tc-dev-environment-banner" role="status" aria-live="polite">
+            <span class="tc-dev-environment-label">TeddyCloud DEV-Umgebung | Commit:</span>
+            <code id="tc-dev-environment-commit">laedt</code>
+        </div>
         <noscript>You need to enable JavaScript to run this app.</noscript>
         <div id="root"></div>
     </body>

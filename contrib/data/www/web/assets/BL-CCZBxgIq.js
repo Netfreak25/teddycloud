@@ -1,0 +1,1 @@
+var e=`/web/assets/BL-CNiCNfji.svg`;export{e as default};

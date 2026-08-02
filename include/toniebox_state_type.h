@@ -2,6 +2,16 @@
 
 #include "toniefile.h"
 
+#define TBS_TB2_PLAYBACK_TONIE_MAX 64
+#define TBS_TB2_PLAYBACK_DURATION_MAX 32
+#define TBS_TB2_CLAIM_RUID_MAX 17
+#define TBS_TB2_CLAIM_BD_MAX 65
+#define TBS_TB2_BATTERY_STATUS_MAX 32
+#define TBS_TB2_HEADPHONES_CONNECTED_MAX 128
+#define TBS_TB2_REQUEST_ID_MAX 64
+#define TBS_TB2_RUNTIME_JSON_MAX 512
+#define TBS_TB2_VOLUME_LEVEL_MAX 10
+
 typedef enum
 {
     TBS_SYS_SOUND_STARTUP_JINGLE = 0x00000000,
@@ -57,8 +67,116 @@ typedef struct
 
 typedef struct
 {
+    bool valid;
+    char state[32];
+    bool duration_valid;
+    uint32_t duration;
+    bool default_duration_valid;
+    uint32_t defaultDuration;
+    bool until_valid;
+    char until[64];
+    uint32_t updated_at;
+} toniebox_state_bedtime_t;
+
+typedef enum
+{
+    TBS_TB2_PLAYBACK_STATUS_UNKNOWN,
+    TBS_TB2_PLAYBACK_STATUS_PLAYING,
+    TBS_TB2_PLAYBACK_STATUS_PAUSED,
+    TBS_TB2_PLAYBACK_STATUS_STOPPED,
+} toniebox_state_tb2_playback_status_t;
+
+typedef struct
+{
+    bool valid;
+    toniebox_state_tb2_playback_status_t status;
+    char tonie[TBS_TB2_PLAYBACK_TONIE_MAX];
+    bool ruid_valid;
+    char ruid[TBS_TB2_CLAIM_RUID_MAX];
+    bool content_version_valid;
+    uint64_t contentVersion;
+    bool chapter_valid;
+    uint32_t chapter;
+    bool chapter_until_ms_valid;
+    uint64_t chapterUntilMs;
+    bool chapter_duration_valid;
+    char chapterDuration[TBS_TB2_PLAYBACK_DURATION_MAX];
+    uint32_t updated_at;
+} toniebox_state_playback_state_t;
+
+typedef struct
+{
+    bool valid;
+    char ruid[TBS_TB2_CLAIM_RUID_MAX];
+    char bd[TBS_TB2_CLAIM_BD_MAX];
+    bool bd_all_zero;
+    uint32_t updated_at;
+} toniebox_state_claim_t;
+
+typedef struct
+{
+    bool valid;
+    bool percent_valid;
+    uint32_t percent;
+    bool raw_valid;
+    int32_t raw;
+    bool current_valid;
+    int32_t current;
+    bool status_valid;
+    char status[TBS_TB2_BATTERY_STATUS_MAX];
+    uint32_t updated_at;
+} toniebox_state_battery_t;
+
+typedef struct
+{
+    bool valid;
+    bool speaker_output_valid;
+    bool speaker_output;
+    bool connected_valid;
+    uint32_t connected_count;
+    char connected[TBS_TB2_HEADPHONES_CONNECTED_MAX];
+    uint32_t updated_at;
+} toniebox_state_headphones_t;
+
+typedef struct
+{
+    bool valid;
+    uint32_t level;
+    uint32_t updated_at;
+} toniebox_state_volume_t;
+
+typedef struct
+{
+    bool valid;
+    char request_id[TBS_TB2_REQUEST_ID_MAX];
+    bool round_trip_ms_valid;
+    uint32_t round_trip_ms;
+    uint32_t updated_at;
+} toniebox_state_pong_t;
+
+typedef struct
+{
+    bool valid;
+    bool truncated;
+    char payload[TBS_TB2_RUNTIME_JSON_MAX];
+    uint32_t updated_at;
+} toniebox_state_json_snapshot_t;
+
+typedef struct
+{
     toniebox_state_box_t box;
     toniebox_state_tag_t tag;
+    toniebox_state_bedtime_t bedtime;
+    toniebox_state_playback_state_t playback_state;
+    toniebox_state_claim_t claim;
+    toniebox_state_battery_t battery;
+    toniebox_state_headphones_t headphones;
+    toniebox_state_volume_t volume;
+    toniebox_state_pong_t pong;
+    toniebox_state_json_snapshot_t setup_status;
+    toniebox_state_json_snapshot_t metrics_events;
+    toniebox_state_json_snapshot_t metrics_fleet;
+    toniebox_state_json_snapshot_t alarm_reply;
 } toniebox_state_t;
 
 typedef enum

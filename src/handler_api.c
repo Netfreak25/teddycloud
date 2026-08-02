@@ -25,6 +25,8 @@
 #include "cert.h"
 #include "esp32.h"
 #include "cache.h"
+#include "mqtt_server.h"
+#include "toniebox_state.h"
 
 error_t parsePostData(HttpConnection *connection, char_t *post_data, size_t buffer_size)
 {
@@ -56,6 +58,21 @@ error_t parsePostData(HttpConnection *connection, char_t *post_data, size_t buff
         received += size;
     }
     return NO_ERROR;
+}
+
+static bool_t api_is_toniebox2_setting(const char *item)
+{
+    return item != NULL && strncmp(item, "toniebox2.", 10) == 0;
+}
+
+static void api_trigger_toniebox2_settings_desired(const char *item, const char *overlay)
+{
+    if (!api_is_toniebox2_setting(item))
+    {
+        return;
+    }
+
+    mqtt_server_mark_toniebox2_setting_changed(get_overlay_id(overlay), item);
 }
 
 /* sanitizes the path - needs two additional characters in worst case, so make sure 'path' has enough space */
@@ -319,6 +336,12 @@ error_t handleApiGetIndex(HttpConnection *connection, const char_t *uri, const c
         cJSON_AddStringToObject(jsonEntry, "label", opt->label);
         cJSON_AddBoolToObject(jsonEntry, "overlayed", opt->overlayed);
         cJSON_AddBoolToObject(jsonEntry, "internal", opt->internal);
+        bool_t read_only = opt->read_only;
+        if (!osStrcmp(opt->option_name, "mqtt_client_upstream.passthrough_enabled"))
+        {
+            read_only = !get_settings_ovl(overlay)->mqtt_client_upstream.enabled;
+        }
+        cJSON_AddBoolToObject(jsonEntry, "readOnly", read_only);
         cJSON_AddNumberToObject(jsonEntry, "level", opt->level);
 
         switch (opt->type)
@@ -381,6 +404,176 @@ error_t handleApiGetIndex(HttpConnection *connection, const char_t *uri, const c
     return httpWriteResponse(connection, jsonString, connection->response.contentLength, true);
 }
 
+static void api_add_optional_uint32(cJSON *json, const char *name, bool valid, uint32_t value)
+{
+    if (valid)
+    {
+        cJSON_AddNumberToObject(json, name, value);
+    }
+    else
+    {
+        cJSON_AddNullToObject(json, name);
+    }
+}
+
+static void api_add_optional_uint64(cJSON *json, const char *name, bool valid, uint64_t value)
+{
+    if (valid)
+    {
+        cJSON_AddNumberToObject(json, name, (double)value);
+    }
+    else
+    {
+        cJSON_AddNullToObject(json, name);
+    }
+}
+
+static void api_add_json_snapshot(cJSON *parent, const char *name, const toniebox_state_json_snapshot_t *snapshot)
+{
+    cJSON *json = cJSON_AddObjectToObject(parent, name);
+    cJSON_AddBoolToObject(json, "valid", snapshot->valid);
+    cJSON_AddNumberToObject(json, "updatedAt", snapshot->updated_at);
+    cJSON_AddBoolToObject(json, "truncated", snapshot->truncated);
+    if (!snapshot->valid)
+    {
+        cJSON_AddNullToObject(json, "data");
+        return;
+    }
+
+    cJSON *data = snapshot->truncated ? NULL : cJSON_Parse(snapshot->payload);
+    if (data != NULL)
+    {
+        cJSON_AddItemToObject(json, "data", data);
+    }
+    else
+    {
+        cJSON_AddStringToObject(json, "data", snapshot->payload);
+    }
+}
+
+static void api_add_toniebox_runtime(cJSON *json_entry, settings_t *settings, uint8_t overlay_id)
+{
+    toniebox_state_t *state = get_toniebox_state_id(overlay_id);
+    cJSON *runtime = cJSON_AddObjectToObject(json_entry, "runtime");
+    cJSON_AddBoolToObject(runtime, "online", settings->internal.online);
+    cJSON_AddNumberToObject(runtime, "lastConnection", (double)settings->internal.last_connection);
+
+    cJSON *controls = cJSON_AddObjectToObject(runtime, "controls");
+    cJSON_AddBoolToObject(controls, "playback", mqtt_server_has_playback_control(overlay_id));
+    cJSON_AddBoolToObject(controls, "volume", mqtt_server_has_volume_control(overlay_id));
+    cJSON_AddBoolToObject(controls, "ping", mqtt_server_has_ping_control(overlay_id));
+    cJSON_AddBoolToObject(controls, "bedtime", false);
+
+    cJSON *playback = cJSON_AddObjectToObject(runtime, "playback");
+    cJSON_AddBoolToObject(playback, "valid", state->playback_state.valid);
+    cJSON_AddStringToObject(playback, "status", tbs_toniebox2_playback_status_name(state->playback_state.status));
+    cJSON_AddNumberToObject(playback, "updatedAt", state->playback_state.updated_at);
+    if (state->playback_state.valid && state->playback_state.tonie[0] != '\0')
+    {
+        cJSON_AddStringToObject(playback, "tonie", state->playback_state.tonie);
+    }
+    else
+    {
+        cJSON_AddNullToObject(playback, "tonie");
+    }
+    if (state->playback_state.ruid_valid)
+    {
+        cJSON_AddStringToObject(playback, "ruid", state->playback_state.ruid);
+    }
+    else
+    {
+        cJSON_AddNullToObject(playback, "ruid");
+    }
+    api_add_optional_uint64(playback, "contentVersion", state->playback_state.content_version_valid,
+                            state->playback_state.contentVersion);
+    api_add_optional_uint32(playback, "chapter", state->playback_state.chapter_valid,
+                            state->playback_state.chapter);
+    api_add_optional_uint64(playback, "chapterUntilMs", state->playback_state.chapter_until_ms_valid,
+                            state->playback_state.chapterUntilMs);
+    if (state->playback_state.chapter_duration_valid)
+    {
+        cJSON_AddStringToObject(playback, "chapterDuration", state->playback_state.chapterDuration);
+    }
+    else
+    {
+        cJSON_AddNullToObject(playback, "chapterDuration");
+    }
+
+    cJSON *volume = cJSON_AddObjectToObject(runtime, "volume");
+    cJSON_AddBoolToObject(volume, "valid", state->volume.valid);
+    cJSON_AddNumberToObject(volume, "updatedAt", state->volume.updated_at);
+    api_add_optional_uint32(volume, "level", state->volume.valid, state->volume.level);
+
+    cJSON *battery = cJSON_AddObjectToObject(runtime, "battery");
+    cJSON_AddBoolToObject(battery, "valid", state->battery.valid);
+    cJSON_AddNumberToObject(battery, "updatedAt", state->battery.updated_at);
+    api_add_optional_uint32(battery, "percent", state->battery.percent_valid, state->battery.percent);
+    if (state->battery.status_valid)
+    {
+        cJSON_AddStringToObject(battery, "status", state->battery.status);
+    }
+    else
+    {
+        cJSON_AddNullToObject(battery, "status");
+    }
+
+    cJSON *headphones = cJSON_AddObjectToObject(runtime, "headphones");
+    cJSON_AddBoolToObject(headphones, "valid", state->headphones.valid);
+    cJSON_AddNumberToObject(headphones, "updatedAt", state->headphones.updated_at);
+    if (state->headphones.speaker_output_valid)
+    {
+        cJSON_AddBoolToObject(headphones, "speakerOutput", state->headphones.speaker_output);
+    }
+    else
+    {
+        cJSON_AddNullToObject(headphones, "speakerOutput");
+    }
+    api_add_optional_uint32(headphones, "connectedCount", state->headphones.connected_valid,
+                            state->headphones.connected_count);
+
+    cJSON *bedtime = cJSON_AddObjectToObject(runtime, "bedtime");
+    cJSON_AddBoolToObject(bedtime, "valid", state->bedtime.valid);
+    cJSON_AddNumberToObject(bedtime, "updatedAt", state->bedtime.updated_at);
+    if (state->bedtime.valid && state->bedtime.state[0] != '\0')
+    {
+        cJSON_AddStringToObject(bedtime, "state", state->bedtime.state);
+    }
+    else
+    {
+        cJSON_AddNullToObject(bedtime, "state");
+    }
+    api_add_optional_uint32(bedtime, "duration", state->bedtime.duration_valid, state->bedtime.duration);
+    api_add_optional_uint32(bedtime, "defaultDuration", state->bedtime.default_duration_valid,
+                            state->bedtime.defaultDuration);
+    if (state->bedtime.until_valid)
+    {
+        cJSON_AddStringToObject(bedtime, "until", state->bedtime.until);
+    }
+    else
+    {
+        cJSON_AddNullToObject(bedtime, "until");
+    }
+
+    cJSON *pong = cJSON_AddObjectToObject(runtime, "pong");
+    cJSON_AddBoolToObject(pong, "valid", state->pong.valid);
+    cJSON_AddNumberToObject(pong, "updatedAt", state->pong.updated_at);
+    if (state->pong.valid)
+    {
+        cJSON_AddStringToObject(pong, "requestId", state->pong.request_id);
+    }
+    else
+    {
+        cJSON_AddNullToObject(pong, "requestId");
+    }
+    api_add_optional_uint32(pong, "roundTripMs", state->pong.round_trip_ms_valid, state->pong.round_trip_ms);
+
+    cJSON *diagnostics = cJSON_AddObjectToObject(runtime, "diagnostics");
+    api_add_json_snapshot(diagnostics, "setup", &state->setup_status);
+    api_add_json_snapshot(diagnostics, "events", &state->metrics_events);
+    api_add_json_snapshot(diagnostics, "fleet", &state->metrics_fleet);
+    api_add_json_snapshot(diagnostics, "alarm", &state->alarm_reply);
+}
+
 error_t handleApiGetBoxes(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
 {
     cJSON *json = cJSON_CreateObject();
@@ -399,6 +592,7 @@ error_t handleApiGetBoxes(HttpConnection *connection, const char_t *uri, const c
         cJSON_AddStringToObject(jsonEntry, "commonName", settings->commonName);
         cJSON_AddStringToObject(jsonEntry, "boxName", settings->boxName);
         cJSON_AddStringToObject(jsonEntry, "boxModel", settings->boxModel); // TODO add color name + url
+        api_add_toniebox_runtime(jsonEntry, settings, (uint8_t)i);
 
         cJSON_AddItemToArray(jsonArray, jsonEntry);
     }
@@ -553,6 +747,7 @@ error_t handleApiSettingsSet(HttpConnection *connection, const char_t *uri, cons
 
         if (success)
         {
+            api_trigger_toniebox2_settings_desired(item, overlay);
             osStrcpy(response, "OK");
         }
     }
@@ -602,6 +797,7 @@ error_t handleApiSettingsReset(HttpConnection *connection, const char_t *uri, co
 
     if (success)
     {
+        api_trigger_toniebox2_settings_desired(item, overlay);
         osStrcpy(response, "OK");
     }
 
@@ -1058,28 +1254,48 @@ error_t file_save_end_cert(void *in_ctx)
     fsCloseFile(ctx->file);
     ctx->file = NULL;
 
-    /* file was uploaded, this is the cert-specific handler */
-    if (!osStrcasecmp(ctx->filename, "ca.der"))
+    const char *filename = strrchr(ctx->filename, PATH_SEPARATOR);
+    filename = filename == NULL ? ctx->filename : filename + 1;
+
+    const char *settingName = NULL;
+    if (ctx->cert_generation == GENERATION_TB1)
     {
-        TRACE_INFO("Set ca.der to %s\r\n", ctx->filename);
-        settings_set_string_ovl("core.client_cert.file.ca", ctx->filename, ctx->overlay);
+        if (!osStrcasecmp(filename, "ca.der"))
+            settingName = "core.client_cert_tb1.file.ca";
+        else if (!osStrcasecmp(filename, "client.der"))
+            settingName = "core.client_cert_tb1.file.crt";
+        else if (!osStrcasecmp(filename, "private.der"))
+            settingName = "core.client_cert_tb1.file.key";
     }
-    else if (!osStrcasecmp(ctx->filename, "client.der"))
+    else if (ctx->cert_generation == GENERATION_TB2)
     {
-        TRACE_INFO("Set client.der to %s\r\n", ctx->filename);
-        settings_set_string_ovl("core.client_cert.file.crt", ctx->filename, ctx->overlay);
-    }
-    else if (!osStrcasecmp(ctx->filename, "private.der"))
-    {
-        TRACE_INFO("Set private.der to %s\r\n", ctx->filename);
-        settings_set_string_ovl("core.client_cert.file.key", ctx->filename, ctx->overlay);
-    }
-    else
-    {
-        TRACE_INFO("Unknown file type %s\r\n", ctx->filename);
+        if (!osStrcasecmp(filename, "ca.der"))
+            settingName = "core.client_cert_tb2.file.ca";
+        else if (!osStrcasecmp(filename, "client.der"))
+            settingName = "core.client_cert_tb2.file.crt";
+        else if (!osStrcasecmp(filename, "private.der"))
+            settingName = "core.client_cert_tb2.file.key";
     }
 
-    return NO_ERROR;
+    if (settingName == NULL)
+    {
+        TRACE_ERROR("Unknown certificate file or generation: %s\r\n", ctx->filename);
+        osFreeMem(ctx->filename);
+        ctx->filename = NULL;
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    TRACE_INFO("Set %s to %s\r\n", settingName, ctx->filename);
+    if (!settings_set_string_ovl(settingName, ctx->filename, ctx->overlay))
+    {
+        osFreeMem(ctx->filename);
+        ctx->filename = NULL;
+        return ERROR_FAILURE;
+    }
+
+    osFreeMem(ctx->filename);
+    ctx->filename = NULL;
+    return settings_try_load_certs_id(get_overlay_id(ctx->overlay));
 }
 
 error_t handleApiUploadCert(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
@@ -1087,52 +1303,114 @@ error_t handleApiUploadCert(HttpConnection *connection, const char_t *uri, const
     uint_t statusCode = 500;
     char message[128] = {0};
     char overlay[16] = {0};
+    char generationName[8] = {0};
 
-    if (queryGet(queryString, "overlay", overlay, sizeof(overlay)))
+    bool hasOverlay = queryGet(queryString, "overlay", overlay, sizeof(overlay));
+    if (hasOverlay)
     {
         TRACE_DEBUG("got overlay '%s'\r\n", overlay);
     }
-    const char *rootPath = settings_get_string_ovl("internal.certdirfull", overlay);
+    bool hasGeneration = queryGet(queryString, "generation", generationName, sizeof(generationName));
+    uint8_t overlayId = get_overlay_id(overlay);
+    settings_box_generation certGeneration = GENERATION_UNKNOWN;
 
-    if (rootPath == NULL)
+    if (hasGeneration && (!osStrcasecmp(generationName, "tb1") || !osStrcmp(generationName, "1")))
+    {
+        certGeneration = GENERATION_TB1;
+    }
+    else if (hasGeneration && (!osStrcasecmp(generationName, "tb2") || !osStrcmp(generationName, "2")))
+    {
+        certGeneration = GENERATION_TB2;
+    }
+    else if (hasGeneration)
+    {
+        statusCode = 400;
+        osSnprintf(message, sizeof(message), "Invalid certificate generation '%s'", generationName);
+    }
+    else if (hasOverlay && overlayId > 0)
+    {
+        certGeneration = get_settings_id(overlayId)->toniebox.boxGeneration;
+    }
+    else if (!hasOverlay)
+    {
+        /* Preserve old API clients: the legacy global upload target is TB1. */
+        certGeneration = GENERATION_TB1;
+    }
+
+    if (message[0] == '\0' && hasOverlay && overlayId == 0)
+    {
+        statusCode = 404;
+        osSnprintf(message, sizeof(message), "Unknown overlay");
+    }
+    else if (message[0] == '\0' && hasOverlay
+             && get_settings_id(overlayId)->toniebox.boxGeneration != certGeneration)
+    {
+        statusCode = 409;
+        osSnprintf(message, sizeof(message), "Certificate generation does not match overlay");
+    }
+    else if (message[0] == '\0' && certGeneration == GENERATION_UNKNOWN)
+    {
+        statusCode = 409;
+        osSnprintf(message, sizeof(message), "Box generation is unknown");
+    }
+
+    const char *rootPath = NULL;
+    if (message[0] == '\0')
+    {
+        if (overlayId > 0 || certGeneration == GENERATION_TB1)
+            rootPath = settings_get_string_id("internal.certdirfull", overlayId);
+        else
+            rootPath = settings_get_string("internal.certdirfull_tb2");
+    }
+
+    if (message[0] != '\0')
+    {
+        TRACE_ERROR("%s\r\n", message);
+    }
+    else if (rootPath == NULL)
     {
         statusCode = 500;
-        osSnprintf(message, sizeof(message), "internal.certdirfull not set to a valid path");
-        TRACE_ERROR("internal.certdirfull not set to a valid path\r\n");
-    }
-    else if (!fsDirExists(rootPath))
-    {
-        error_t error = fsCreateDirEx(rootPath, true);
-        if (error != NO_ERROR || !fsDirExists(rootPath))
-        {
-            osSnprintf(message, sizeof(message), "internal.certdirfull '%s' does not exist and could not be created. Error: %s", rootPath, error2text(error));
-            TRACE_ERROR("internal.certdirfull '%s' does not exist and could not be created. Error: %s\r\n", rootPath, error2text(error));
-        }
+        osSnprintf(message, sizeof(message), "Certificate directory not set to a valid path");
+        TRACE_ERROR("Certificate directory not set to a valid path\r\n");
     }
     else
     {
-        multipart_cbr_t cbr;
-        file_save_ctx ctx;
-
-        osMemset(&cbr, 0x00, sizeof(cbr));
-        osMemset(&ctx, 0x00, sizeof(ctx));
-
-        cbr.multipart_start = &file_save_start;
-        cbr.multipart_add = &file_save_add;
-        cbr.multipart_end = &file_save_end_cert;
-
-        ctx.root_path = rootPath;
-        ctx.overlay = overlay;
-
-        switch (multipart_handle(connection, &cbr, &ctx))
+        if (!fsDirExists(rootPath))
         {
-        case NO_ERROR:
-            statusCode = 200;
-            osSnprintf(message, sizeof(message), "OK");
-            break;
-        default:
-            statusCode = 500;
-            break;
+            error_t error = fsCreateDirEx(rootPath, true);
+            if (error != NO_ERROR || !fsDirExists(rootPath))
+            {
+                osSnprintf(message, sizeof(message), "Certificate directory could not be created: %s", error2text(error));
+                TRACE_ERROR("Certificate directory '%s' could not be created. Error: %s\r\n", rootPath, error2text(error));
+            }
+        }
+
+        if (message[0] == '\0')
+        {
+            multipart_cbr_t cbr;
+            file_save_ctx ctx;
+
+            osMemset(&cbr, 0x00, sizeof(cbr));
+            osMemset(&ctx, 0x00, sizeof(ctx));
+
+            cbr.multipart_start = &file_save_start;
+            cbr.multipart_add = &file_save_add;
+            cbr.multipart_end = &file_save_end_cert;
+
+            ctx.root_path = rootPath;
+            ctx.overlay = overlay;
+            ctx.cert_generation = certGeneration;
+
+            switch (multipart_handle(connection, &cbr, &ctx))
+            {
+            case NO_ERROR:
+                statusCode = 200;
+                osSnprintf(message, sizeof(message), "OK");
+                break;
+            default:
+                statusCode = 500;
+                break;
+            }
         }
     }
 
@@ -3324,6 +3602,219 @@ static error_t parseJsonRequestBody(HttpConnection *connection, cJSON **outJson,
     return NO_ERROR;
 }
 
+#define API_BOX_CONTROL_BODY_MAX 256
+
+static error_t api_write_box_control_response(HttpConnection *connection, uint_t status_code, bool ok,
+                                              const char *message, const char *request_id)
+{
+    cJSON *json = cJSON_CreateObject();
+    cJSON_AddBoolToObject(json, "ok", ok);
+    if (message != NULL)
+    {
+        cJSON_AddStringToObject(json, ok ? "message" : "error", message);
+    }
+    if (request_id != NULL && request_id[0] != '\0')
+    {
+        cJSON_AddStringToObject(json, "requestId", request_id);
+    }
+
+    char *json_string = cJSON_PrintUnformatted(json);
+    cJSON_Delete(json);
+    if (json_string == NULL)
+    {
+        return ERROR_OUT_OF_MEMORY;
+    }
+
+    httpPrepareHeader(connection, "application/json; charset=utf-8", osStrlen(json_string));
+    connection->response.statusCode = status_code;
+    return httpWriteResponse(connection, json_string, connection->response.contentLength, true);
+}
+
+static bool_t api_get_box_control_overlay(const char *query_string, uint8_t *overlay_id,
+                                          uint_t *status_code, const char **message)
+{
+    char overlay[16] = "";
+    if (!queryGet(query_string, "overlay", overlay, sizeof(overlay)) || overlay[0] == '\0')
+    {
+        *status_code = 400;
+        *message = "Missing overlay";
+        return FALSE;
+    }
+
+    uint8_t id = get_overlay_id(overlay);
+    if (id == 0 || id >= MAX_OVERLAYS || !get_settings_id(id)->internal.config_used)
+    {
+        *status_code = 404;
+        *message = "Unknown overlay";
+        return FALSE;
+    }
+
+    if (get_settings_id(id)->toniebox.boxGeneration != GENERATION_TB2)
+    {
+        *status_code = 409;
+        *message = "Overlay is not a Toniebox 2";
+        return FALSE;
+    }
+
+    *overlay_id = id;
+    return TRUE;
+}
+
+static bool_t api_get_json_uint32(cJSON *json, const char *name, uint32_t *value)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(json, name);
+    if (!cJSON_IsNumber(item) || item->valuedouble < 0 || item->valuedouble > UINT32_MAX)
+    {
+        return FALSE;
+    }
+
+    uint32_t parsed = (uint32_t)item->valuedouble;
+    if ((double)parsed != item->valuedouble)
+    {
+        return FALSE;
+    }
+
+    *value = parsed;
+    return TRUE;
+}
+
+static error_t api_parse_box_control_json(HttpConnection *connection, cJSON **json)
+{
+    if (connection->request.byteCount == 0 || connection->request.byteCount > API_BOX_CONTROL_BODY_MAX)
+    {
+        return ERROR_INVALID_LENGTH;
+    }
+
+    char message[64];
+    error_t error = parseJsonRequestBody(connection, json, message, sizeof(message));
+    if (error == NO_ERROR && !cJSON_IsObject(*json))
+    {
+        cJSON_Delete(*json);
+        *json = NULL;
+        return ERROR_INVALID_SYNTAX;
+    }
+    return error;
+}
+
+error_t handleApiBoxPlayback(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
+{
+    uint8_t overlay_id = 0;
+    uint_t status_code = 200;
+    const char *message = "Playback command published";
+    if (!api_get_box_control_overlay(queryString, &overlay_id, &status_code, &message))
+    {
+        return api_write_box_control_response(connection, status_code, false, message, NULL);
+    }
+
+    cJSON *json = NULL;
+    if (api_parse_box_control_json(connection, &json) != NO_ERROR)
+    {
+        return api_write_box_control_response(connection, 400, false, "Invalid JSON payload", NULL);
+    }
+
+    cJSON *action = cJSON_GetObjectItemCaseSensitive(json, "action");
+    bool_t published = FALSE;
+    bool_t action_valid = cJSON_IsString(action) && action->valuestring != NULL;
+    if (action_valid && osStrcmp(action->valuestring, "setPosition") == 0)
+    {
+        uint32_t chapter = 0;
+        uint32_t position_ms = 0;
+        action_valid = api_get_json_uint32(json, "chapter", &chapter) &&
+                       api_get_json_uint32(json, "ms", &position_ms) &&
+                       chapter < TONIEFILE_MAX_CHAPTERS;
+        if (action_valid)
+        {
+            published = mqtt_server_publish_playback_position_for_overlay(overlay_id, chapter, position_ms);
+        }
+    }
+    else if (action_valid)
+    {
+        mqtt_server_playback_action_t playback_action;
+        if (osStrcmp(action->valuestring, "start") == 0)
+            playback_action = MQTT_SERVER_PLAYBACK_START;
+        else if (osStrcmp(action->valuestring, "pause") == 0)
+            playback_action = MQTT_SERVER_PLAYBACK_PAUSE;
+        else if (osStrcmp(action->valuestring, "next") == 0)
+            playback_action = MQTT_SERVER_PLAYBACK_NEXT;
+        else if (osStrcmp(action->valuestring, "prev") == 0)
+            playback_action = MQTT_SERVER_PLAYBACK_PREV;
+        else if (osStrcmp(action->valuestring, "restart") == 0)
+            playback_action = MQTT_SERVER_PLAYBACK_RESTART;
+        else
+            action_valid = FALSE;
+
+        if (action_valid)
+        {
+            published = mqtt_server_publish_playback_for_overlay(overlay_id, playback_action);
+        }
+    }
+
+    cJSON_Delete(json);
+    if (!action_valid)
+    {
+        return api_write_box_control_response(connection, 400, false, "Unsupported playback action", NULL);
+    }
+    if (!published)
+    {
+        return api_write_box_control_response(connection, 409, false, "Toniebox is offline or not subscribed to playback control", NULL);
+    }
+    return api_write_box_control_response(connection, 200, true, message, NULL);
+}
+
+error_t handleApiBoxVolume(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
+{
+    uint8_t overlay_id = 0;
+    uint_t status_code = 200;
+    const char *message = "Volume command published";
+    if (!api_get_box_control_overlay(queryString, &overlay_id, &status_code, &message))
+    {
+        return api_write_box_control_response(connection, status_code, false, message, NULL);
+    }
+
+    cJSON *json = NULL;
+    if (api_parse_box_control_json(connection, &json) != NO_ERROR)
+    {
+        return api_write_box_control_response(connection, 400, false, "Invalid JSON payload", NULL);
+    }
+
+    uint32_t level = 0;
+    bool_t level_valid = api_get_json_uint32(json, "level", &level) && level <= TBS_TB2_VOLUME_LEVEL_MAX;
+    cJSON_Delete(json);
+    if (!level_valid)
+    {
+        return api_write_box_control_response(connection, 400, false, "Volume level must be between 0 and 10", NULL);
+    }
+    if (!mqtt_server_publish_volume_for_overlay(overlay_id, level))
+    {
+        return api_write_box_control_response(connection, 409, false, "Toniebox is offline or not subscribed to volume control", NULL);
+    }
+    return api_write_box_control_response(connection, 200, true, message, NULL);
+}
+
+error_t handleApiBoxPing(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
+{
+    uint8_t overlay_id = 0;
+    uint_t status_code = 200;
+    const char *message = "Ping published";
+    if (!api_get_box_control_overlay(queryString, &overlay_id, &status_code, &message))
+    {
+        return api_write_box_control_response(connection, status_code, false, message, NULL);
+    }
+
+    char request_id[TBS_TB2_REQUEST_ID_MAX] = "";
+    if (!mqtt_server_publish_ping_for_overlay(overlay_id, request_id, sizeof(request_id)))
+    {
+        return api_write_box_control_response(connection, 409, false, "Toniebox is offline or not subscribed to ping control", NULL);
+    }
+    return api_write_box_control_response(connection, 200, true, message, request_id);
+}
+
+error_t handleApiBoxBedtime(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
+{
+    return api_write_box_control_response(connection, 501, false,
+                                          "Bedtime control is disabled until the STL payload schema is confirmed", NULL);
+}
+
 static error_t loadToniesCustomJsonRoot(const char *configDir, cJSON **outRoot)
 {
     if (configDir == NULL || outRoot == NULL)
@@ -4232,16 +4723,22 @@ error_t handleApiContentJsonSet(HttpConnection *connection, const char_t *uri, c
 
     contentJson_t content_json;
     load_content_json(contentPath, &content_json, true, client_ctx->settings);
+    char *old_source = strdup(content_json.source ? content_json.source : "");
+    char ruid[17];
+    osStrcpy(ruid, &uri[osStrlen(uri) - 16]);
 
     char item_data[256];
     bool_t updated = false;
+    bool_t source_changed = false;
     if (queryGet(post_data, "source", item_data, sizeof(item_data)))
     {
-        if (osStrcmp(item_data, content_json.source))
+        const char *current_source = content_json.source ? content_json.source : "";
+        if (osStrcmp(item_data, current_source))
         {
             osFreeMem(content_json.source);
             content_json.source = strdup(item_data);
             updated = true;
+            source_changed = osStrcmp(item_data, old_source ? old_source : "") != 0;
         }
     }
     if (queryGet(post_data, "tonie_model", item_data, sizeof(item_data)))
@@ -4313,12 +4810,17 @@ error_t handleApiContentJsonSet(HttpConnection *connection, const char_t *uri, c
         osFreeMem(json_path);
         if (error != NO_ERROR)
         {
+            osFreeMem(contentPath);
+            free_content_json(&content_json);
+            free(old_source);
             return error;
         }
         TRACE_INFO("Updated content json of %s\r\n", contentPath);
+        freshness_mark_content_mapping_changed(ruid, source_changed);
     }
     osFreeMem(contentPath);
     free_content_json(&content_json);
+    free(old_source);
 
     return httpOkResponse(connection);
 }

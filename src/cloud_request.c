@@ -77,65 +77,42 @@ error_t httpClientTlsInitCallbackNoCA(HttpClientContext *context,
 {
     return httpClientTlsInitCallbackBase(context, tlsContext, NULL, NULL, NULL);
 }
-error_t httpClientTlsInitCallbackClientAuthTonies(HttpClientContext *context,
-                                                  TlsContext *tlsContext)
+
+static bool client_cert_is_incomplete(const settings_cert_t *cert)
+{
+    return cert == NULL || cert->ca == NULL || osStrlen(cert->ca) == 0
+           || cert->crt == NULL || osStrlen(cert->crt) == 0
+           || cert->key == NULL || osStrlen(cert->key) == 0;
+}
+
+static error_t httpClientTlsInitCallbackClientAuthBoxine(HttpClientContext *context,
+                                                         TlsContext *tlsContext)
 {
     req_cbr_t *cbr_ctx = context->sourceCtx;
     client_ctx_t *client_ctx = ((cbr_ctx_t *)cbr_ctx->ctx)->client_ctx;
     settings_t *settings = client_ctx->settings;
+    const settings_cert_t *clientCert = &settings->internal.client_tb1;
+    const settings_cert_t *clientCertFiles = &settings->core.client_cert_tb1.file;
 
-    const char *client_ca = settings->internal.client.ca;
-    const char *client_crt = settings->internal.client.crt;
-    const char *client_key = settings->internal.client.key;
-
-    bool ca_missing = (client_ca == NULL || osStrlen(client_ca) == 0);
-    bool crt_missing = (client_crt == NULL || osStrlen(client_crt) == 0);
-    bool key_missing = (client_key == NULL || osStrlen(client_key) == 0);
-
-    if (settings->internal.overlayNumber != 0 && (ca_missing || crt_missing || key_missing))
+    if (settings->internal.overlayNumber != 0 && client_cert_is_incomplete(clientCert))
     {
-        TRACE_WARNING("Missing certificates for overlay %s, fallback to global certificates\r\n", settings->internal.overlayUniqueId);
-        if (ca_missing)
-        {
-            TRACE_WARNING(" ca.der (%s) missing\r\n", settings->core.client_cert.file.ca);
-        }
-        if (crt_missing)
-        {
-            TRACE_WARNING(" client.der (%s) missing\r\n", settings->core.client_cert.file.crt);
-        }
-        if (key_missing)
-        {
-            TRACE_WARNING(" private.der (%s) missing\r\n", settings->core.client_cert.file.key);
-        }
-
+        TRACE_WARNING("Missing TB1 Boxine certificates for overlay %u; trying the global TB1 certificate set\r\n",
+                      (unsigned int)settings->internal.overlayNumber);
         settings = get_settings();
-        client_ca = settings->internal.client.ca;
-        client_crt = settings->internal.client.crt;
-        client_key = settings->internal.client.key;
-
-        ca_missing = (client_ca == NULL || osStrlen(client_ca) == 0);
-        crt_missing = (client_crt == NULL || osStrlen(client_crt) == 0);
-        key_missing = (client_key == NULL || osStrlen(client_key) == 0);
+        clientCert = &settings->internal.client_tb1;
+        clientCertFiles = &settings->core.client_cert_tb1.file;
     }
 
-    if (ca_missing || crt_missing || key_missing)
+    if (client_cert_is_incomplete(clientCert))
     {
-        TRACE_ERROR("Failed to get certificates:\r\n");
-        if (ca_missing)
-        {
-            TRACE_ERROR(" ca.der (%s) missing\r\n", settings->core.client_cert.file.ca);
-        }
-        if (crt_missing)
-        {
-            TRACE_ERROR(" client.der (%s) missing\r\n", settings->core.client_cert.file.crt);
-        }
-        if (key_missing)
-        {
-            TRACE_ERROR(" private.der (%s) missing\r\n", settings->core.client_cert.file.key);
-        }
+        TRACE_ERROR("Failed to get complete TB1 Boxine client certificates:\r\n");
+        TRACE_ERROR(" ca.der (%s)\r\n", clientCertFiles->ca);
+        TRACE_ERROR(" client.der (%s)\r\n", clientCertFiles->crt);
+        TRACE_ERROR(" private.der (%s)\r\n", clientCertFiles->key);
         return ERROR_FAILURE;
     }
-    return httpClientTlsInitCallbackBase(context, tlsContext, client_ca, client_crt, client_key);
+
+    return httpClientTlsInitCallbackBase(context, tlsContext, clientCert->ca, clientCert->crt, clientCert->key);
 }
 
 int_t cloud_request_get(const char *server, int port, const char *uri, const char *queryString, const uint8_t *hash, req_cbr_t *cbr)
@@ -208,7 +185,7 @@ error_t web_request(const char *server, int port, bool https, const char *uri, c
     {
         HttpClientTlsInitCallback callback = httpClientTlsInitCallbackNoCA;
         if (isCloud)
-            callback = httpClientTlsInitCallbackClientAuthTonies;
+            callback = httpClientTlsInitCallbackClientAuthBoxine;
         error = httpClientRegisterTlsInitCallback(&httpClientContext, callback);
         if (error)
         {

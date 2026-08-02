@@ -1,0 +1,1 @@
+var e=`/web/assets/IO-CGax63_D.svg`;export{e as default};

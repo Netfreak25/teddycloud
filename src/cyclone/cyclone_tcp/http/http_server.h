@@ -389,6 +389,14 @@ typedef enum
 typedef error_t (*TlsInitCallback)(HttpConnection *connection,
    TlsContext *tlsContext);
 
+/**
+ * @brief Optional callback invoked after TLS and before HTTP parsing
+ * @param[in] connection Active HTTP server connection
+ * @param[out] handled Set to TRUE when the callback consumed the connection
+ **/
+typedef error_t (*HttpPostTlsCallback)(HttpConnection *connection,
+   bool_t *handled);
+
 #endif
 
 
@@ -579,6 +587,7 @@ typedef struct
 #if (HTTP_SERVER_TLS_SUPPORT == ENABLED)
    bool_t useTls;                                                ///<Deprecated flag
    TlsInitCallback tlsInitCallback;                              ///<TLS initialization callback function
+   HttpPostTlsCallback postTlsCallback;                          ///<Post-TLS pre-HTTP callback function
 #endif
 #if (HTTP_SERVER_BASIC_AUTH_SUPPORT == ENABLED || HTTP_SERVER_DIGEST_AUTH_SUPPORT == ENABLED)
    HttpRandCallback randCallback;                                ///<Random data generation callback function

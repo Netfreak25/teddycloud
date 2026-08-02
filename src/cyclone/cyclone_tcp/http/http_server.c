@@ -80,6 +80,9 @@ void httpServerGetDefaultSettings(HttpServerSettings *settings)
 
    // The HTTP server is not bound to any interface
    settings->interface = NULL;
+#if (HTTP_SERVER_TLS_SUPPORT == ENABLED)
+   settings->postTlsCallback = NULL;
+#endif
 
    // Listen to port 80
    settings->port = HTTP_PORT;
@@ -459,9 +462,24 @@ void httpConnectionTask(void *param)
       // Check status code
       if (!error)
       {
-         // Process incoming requests
-         for (counter = 0; counter < HTTP_SERVER_MAX_REQUESTS; counter++)
+#if (HTTP_SERVER_TLS_SUPPORT == ENABLED)
+         bool_t handled = FALSE;
+         if (connection->settings->postTlsCallback != NULL)
          {
+            error = connection->settings->postTlsCallback(connection, &handled);
+         }
+
+         if (handled)
+         {
+            // The callback owns the decrypted stream and bypasses HTTP parsing
+            error = NO_ERROR;
+         }
+         else
+#endif
+         {
+            // Process incoming requests
+            for (counter = 0; counter < HTTP_SERVER_MAX_REQUESTS; counter++)
+            {
             // Debug message
             TRACE_INFO("Waiting for request...\r\n");
 
@@ -644,6 +662,7 @@ void httpConnectionTask(void *param)
             {
                // Close the connection immediately
                break;
+            }
             }
          }
       }
@@ -1088,10 +1107,25 @@ error_t httpSendResponseStreamUnsafe(HttpConnection *connection, const char_t *u
    }
 
    // Format HTTP response header
-   //  TODO add status 416 on invalid ranges
    if (connection->request.Range.start > 0)
    {
       connection->request.Range.size = file_length;
+      if (connection->request.Range.start >= connection->request.Range.size)
+      {
+         if (connection->response.contentRange == NULL)
+            connection->response.contentRange = osAllocMem(255);
+
+         osSprintf((char *)connection->response.contentRange, "bytes */%" PRIu32, connection->request.Range.size);
+         connection->response.statusCode = 416;
+         connection->response.contentLength = 0;
+         connection->response.chunkedEncoding = FALSE;
+         error = httpWriteHeader(connection);
+#if (HTTP_SERVER_FS_SUPPORT == ENABLED)
+         fsCloseFile(file);
+#endif
+         return error;
+      }
+
       if (connection->request.Range.end >= connection->request.Range.size || connection->request.Range.end == 0)
          connection->request.Range.end = connection->request.Range.size - 1;
 

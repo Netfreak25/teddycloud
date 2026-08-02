@@ -26,7 +26,7 @@
 #define TONIEBOX_CUSTOM_JSON_FILE "tonieboxes.custom.json"
 #define CONFIG_FILE "config.ini"
 #define CONFIG_OVERLAY_FILE "config.overlay.ini"
-#define CONFIG_VERSION 17
+#define CONFIG_VERSION 19
 #define MAX_OVERLAYS 16 + 1
 
 typedef enum
@@ -74,10 +74,13 @@ typedef enum
 typedef struct
 {
     bool enabled;
+    bool tb2_enabled;
     char *remote_hostname;
     char *remote_hostname_tb2;
     uint32_t remote_port;
     uint32_t remote_port_tb2;
+    char *tb2_capture_dir;
+    uint32_t tb2_capture_max_mib;
     bool enableV1Claim;
     bool enableV1CloudReset;
     bool enableV1FreshnessCheck;
@@ -145,7 +148,18 @@ typedef struct
     uint32_t port;
     char *cert_crt;
     char *cert_key;
+    bool log_full_payloads;
 } settings_mqtt_server_t;
+
+typedef struct
+{
+    bool enabled;
+    bool passthrough_enabled;
+    uint32_t port;
+    char *hostname;
+    char *capture_dir;
+    uint32_t capture_max_mib;
+} settings_mqtt_client_upstream_t;
 
 typedef struct
 {
@@ -172,8 +186,16 @@ typedef struct
 
 typedef struct
 {
-    bool baby_mode; 
+    bool baby_mode;
+    uint32_t max_volume;
+    uint32_t bedtime_max_volume;
+    uint32_t max_headphone_volume;
+    uint32_t bedtime_max_headphone_volume;
     uint32_t lightring_brightness;
+    uint32_t bedtime_lightring_brightness;
+    bool scrubbing_enabled;
+    bool slap_enabled;
+    bool slap_back_left;
 } settings_toniebox2_t;
 
 typedef struct
@@ -191,6 +213,9 @@ typedef struct
     char *id;
     char *git_sha_short;
     char *git_sha;
+    char *package_git_sha_short;
+    char *package_git_sha;
+    bool package_git_sha_set;
     bool dirty;
     char *datetime;
     char *platform;
@@ -262,7 +287,8 @@ typedef struct
     int32_t returncode;
     settings_cert_t server;
     settings_cert_t server_tb2;
-    settings_cert_t client;
+    settings_cert_t client_tb1;
+    settings_cert_t client_tb2;
     settings_cert_t client_fake;
     bool config_init;
     bool config_used;
@@ -274,6 +300,7 @@ typedef struct
     char *basedirfull;
     char *cwd;
     char *certdirfull;
+    char *certdirfull_tb2;
     char *configdirfull;
     char *contentdirrel;
     char *contentdirfull;
@@ -295,7 +322,19 @@ typedef struct
     settings_internal_security_mit_t security_mit;
 
     uint64_t *freshnessCache;
+    uint64_t *freshnessCacheSourceChangedUids;
     bool freshnessCacheChanged;
+    uint64_t *v3FreshnessInventoryUids;
+    uint64_t *v3FreshnessInventoryAudioIds;
+    uint64_t *v3ForcedVersionUids;
+    uint64_t *v3ForcedVersions;
+    uint64_t *v3ForcedVersionBaseAudioIds;
+    uint64_t *toniebox2SettingsDesiredRevisions;
+    uint64_t *toniebox2SettingsDesiredPendingFields;
+    uint64_t *toniebox2SettingsDesiredValues;
+    bool toniebox2SettingsDesiredPending;
+    uint32_t toniebox2SettingsDesiredAttempts;
+    uint32_t toniebox2SettingsDesiredLastAttempt;
 
     time_t last_connection;
     char *last_ruid;
@@ -317,6 +356,7 @@ typedef struct
     uint32_t https_api_port;
     char *host_url;
     char *certdir;
+    char *certdir_tb2;
     char *configdir;
     char *contentdir;
     char *firmwaredir;
@@ -328,7 +368,9 @@ typedef struct
     char *sslkeylogfile;
     settings_cert_opt_t server_cert;
     settings_cert_opt_t server_cert_tb2;
-    settings_cert_opt_t client_cert;
+    settings_cert_opt_t client_cert_legacy;
+    settings_cert_opt_t client_cert_tb1;
+    settings_cert_opt_t client_cert_tb2;
     settings_cert_opt_t client_cert_fake;
     char *allowOrigin;
     bool boxCertAuth;
@@ -412,6 +454,7 @@ typedef struct
     settings_encode_t encode;
     settings_frontend_t frontend;
     settings_mqtt_t mqtt;
+    settings_mqtt_client_upstream_t mqtt_client_upstream;
     settings_mqtt_server_t mqtt_server;
     settings_hass_t hass;
     settings_security_mit_t security_mit;
@@ -482,6 +525,9 @@ typedef union
  *
  * @var bool internal
  * If true, this setting is intended for internal use by the system and should not be exposed to end users.
+ *
+ * @var bool read_only
+ * If true, this setting is exposed for status and configuration discovery but cannot be changed.
  */
 typedef struct
 {
@@ -495,6 +541,7 @@ typedef struct
     setting_value_t max;
     size_t size;
     bool internal;
+    bool read_only;
     bool overlayed;
     settings_level level;
 } setting_item_t;
@@ -509,6 +556,7 @@ typedef struct
 #define OPTION_ADV_TREE_DESC(o, p, d, desc, i, ov, lvl) {.option_name = o, .ptr = p, .init = {.string_value = d}, .type = TYPE_TREE_DESC, .description = desc, .label = NULL, .internal = i, .overlayed = ov, .level = lvl},
 
 #define OPTION_BOOL(o, p, d, short, desc, lvl) OPTION_ADV_BOOL(o, p, d, short, desc, false, false, lvl)
+#define OPTION_READONLY_BOOL(o, p, d, short, desc, lvl) {.option_name = o, .ptr = p, .init = {.bool_value = d}, .type = TYPE_BOOL, .description = desc, .label = short, .internal = false, .read_only = true, .overlayed = false, .level = lvl},
 #define OPTION_SIGNED(o, p, d, min, max, short, desc, lvl) OPTION_ADV_SIGNED(o, p, d, min, max, short, desc, false, false, lvl)
 #define OPTION_UNSIGNED(o, p, d, min, max, short, desc, lvl) OPTION_ADV_UNSIGNED(o, p, d, min, max, short, desc, false, false, lvl)
 #define OPTION_FLOAT(o, p, d, min, max, short, desc, lvl) OPTION_ADV_FLOAT(o, p, d, min, max, short, desc, false, false, lvl)

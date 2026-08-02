@@ -4,7 +4,7 @@
 #include <stdbool.h>
 
 #define MAX_LEN 128
-#define MAX_ENTITIES (3 * 9 + 16 * 7 + 32)
+#define MAX_ENTITIES (3 * 9 + 16 * 7 + 48)
 
 /* https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery */
 typedef enum

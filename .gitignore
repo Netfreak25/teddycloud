@@ -4,6 +4,8 @@ __pycache__/
 /install
 /config
 /data
+/data/diagnostics/tb2-mqtt-passthrough/
+/data/diagnostics/tb2-https-passthrough/
 /report
 /bin
 /stockaudio

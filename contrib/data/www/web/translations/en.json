@@ -977,6 +977,15 @@
         "boxineDisabled": "Boxine/Toniecloud is currently disabled. Enable setting 'Cloud enabled' to reconnect to Boxine/Toniecloud.",
         "boxineStatusOffline": "Not connected to Boxine/Toniecloud",
         "boxineStatusOnline": "Connected to Boxine/Toniecloud",
+        "tb2CloudStatusOffline": "No HTTPS connection to the TB2 cloud target {{hostname}}",
+        "tb2CloudUnavailable": "The TB2 cloud connection is not available yet. There is no HTTPS connection to {{hostname}}.",
+        "tb2HttpsStatus": {
+            "disabled": "TB2 HTTPS forwarding is disabled.",
+            "connecting": "Connecting to {{hostname}}:{{port}}.",
+            "tunneling": "TB2 HTTPS tunnel to {{hostname}}:{{port}} is active.",
+            "online": "The last TB2 HTTPS tunnel to {{hostname}}:{{port}} completed successfully.",
+            "error": "TB2 HTTPS forwarding failed ({{errorCode}})."
+        },
         "teddycloudStatusOffline": "Teddycloud server offline",
         "teddycloudStatusOnline": "Teddycloud server running fine"
     },
@@ -1750,6 +1759,27 @@
         "lastOnline": "last online",
         "lastPlayedTonie": "Last played Tonie: ",
         "linkToBoxCFW": "Open web interface of Toniebox",
+        "live": {
+            "battery": "Battery",
+            "bedtime": "Bedtime mode",
+            "bedtimeDuration": "{{minutes}} minutes",
+            "bedtimeUnknown": "Bedtime state unknown",
+            "bedtimeUntil": "until {{time}}",
+            "chapter": "Chapter {{number}}",
+            "chapters": "Chapters",
+            "commandFailed": "Toniebox command failed",
+            "commandFailedDetails": "The command could not be sent",
+            "headphonesConnected": "Connected headphones: {{count}}",
+            "next": "Next",
+            "pause": "Pause",
+            "playbackUnknown": "Playback state unknown",
+            "playChapter": "Play chapter {{number}}",
+            "previous": "Previous",
+            "restart": "Restart current playback",
+            "start": "Play",
+            "unknownTonie": "Unknown Tonie",
+            "volume": "Volume"
+        },
         "messages": {
             "apiAccessDisabled": "Disabled access to TeddyCloud APIs!",
             "apiAccessDisabledDetails": "Disabled access to TeddyCloud APIs for Toniebox {{mac}}",

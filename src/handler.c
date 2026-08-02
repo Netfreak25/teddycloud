@@ -5,6 +5,7 @@
 #include "mutex_manager.h"
 #include "cJSON.h"
 #include "mqtt_server.h"
+#include "handler_cloud.h"
 
 void fillBaseCtx(HttpConnection *connection, const char_t *uri, const char_t *queryString, cloudapi_t api, cbr_ctx_t *ctx, client_ctx_t *client_ctx)
 {
@@ -476,8 +477,9 @@ void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const 
 
             TRACE_INFO("Setting freshnessCache with %" PRIuSIZE " entries\r\n", freshResp->n_tonie_marked);
             settings_set_u64_array_id("internal.freshnessCache", freshResp->tonie_marked, freshResp->n_tonie_marked, ctx->client_ctx->settings->internal.overlayNumber);
-            settings_set_bool_id("internal.freshnessCacheChanged", true, ctx->client_ctx->settings->internal.overlayNumber);
-            mqtt_server_publish_fresh_tonies(ctx->client_ctx);
+            freshness_cache_sync_source_changed_uids(ctx->client_ctx->settings);
+            settings_set_bool_id("internal.freshnessCacheChanged", freshResp->n_tonie_marked > 0, ctx->client_ctx->settings->internal.overlayNumber);
+            mqtt_server_publish_fresh_tonies_for_overlay(ctx->client_ctx->settings->internal.overlayNumber);
 
             // Re-build json response from updated freshResp
             cJSON *newRespJson = cJSON_CreateObject();
@@ -594,8 +596,9 @@ void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const 
 
             TRACE_INFO("Setting freshnessCache with %" PRIuSIZE " entries\r\n", freshResp->n_tonie_marked);
             settings_set_u64_array_id("internal.freshnessCache", freshResp->tonie_marked, freshResp->n_tonie_marked, ctx->client_ctx->settings->internal.overlayNumber);
-            settings_set_bool_id("internal.freshnessCacheChanged", true, ctx->client_ctx->settings->internal.overlayNumber);
-            mqtt_server_publish_fresh_tonies(ctx->client_ctx);
+            freshness_cache_sync_source_changed_uids(ctx->client_ctx->settings);
+            settings_set_bool_id("internal.freshnessCacheChanged", freshResp->n_tonie_marked > 0, ctx->client_ctx->settings->internal.overlayNumber);
+            mqtt_server_publish_fresh_tonies_for_overlay(ctx->client_ctx->settings->internal.overlayNumber);
 
             char line[128];
             osSnprintf(line, 128, "Content-Length: %" PRIuSIZE "\r\n\r\n", ctx->bufferLen);
@@ -739,9 +742,19 @@ bool_t isValidTaf(const char *contentPath, bool checkHashAndSize)
     return valid;
 }
 
+static bool isLiveTafTmpPath(const char *path)
+{
+    static const char suffix[] = ".taf.tmp";
+    size_t pathLen = osStrlen(path);
+    size_t suffixLen = sizeof(suffix) - 1;
+
+    return pathLen >= suffixLen && osStrcmp(&path[pathLen - suffixLen], suffix) == 0;
+}
+
 void readTrackPositions(tonie_info_t *tonieInfo, FsFile *file)
 {
     bool hasError = false;
+    bool liveTafTmp = isLiveTafTmpPath(tonieInfo->contentPath);
     track_positions_t *trackPos = &tonieInfo->additional.track_positions;
     TonieboxAudioFileHeader *tafHeader = tonieInfo->tafHeader;
     trackPos->count = tafHeader->n_track_page_nums;
@@ -764,14 +777,21 @@ void readTrackPositions(tonie_info_t *tonieInfo, FsFile *file)
             if (error != NO_ERROR)
             {
                 hasError = true;
-                TRACE_ERROR("Failed to seek track position at %" PRIuSIZE " with error %s, %s\r\n", filePos, error2text(error), tonieInfo->contentPath);
+                if (!liveTafTmp || error != ERROR_END_OF_FILE)
+                {
+                    TRACE_ERROR("Failed to seek track position at %" PRIuSIZE " with error %s, %s\r\n", filePos, error2text(error), tonieInfo->contentPath);
+                }
                 break;
             }
             error = fsReadFile(file, buffer, sizeof(buffer), &readBytes);
-            if (error != NO_ERROR)
+            if (error != NO_ERROR || readBytes != sizeof(buffer))
             {
+                bool liveTafTmpReadAhead = liveTafTmp && (error == ERROR_END_OF_FILE || (error == NO_ERROR && readBytes != sizeof(buffer)));
                 hasError = true;
-                TRACE_ERROR("Failed to read track position at %" PRIuSIZE " with error %s, %s\r\n", filePos, error2text(error), tonieInfo->contentPath);
+                if (!liveTafTmpReadAhead)
+                {
+                    TRACE_ERROR("Failed to read track position at %" PRIuSIZE " with error %s, %s\r\n", filePos, error2text(error), tonieInfo->contentPath);
+                }
                 break;
             }
 
@@ -808,6 +828,12 @@ void readTrackPositions(tonie_info_t *tonieInfo, FsFile *file)
             trackPos->count = 0;
             osFreeMem(trackPos->pos);
             trackPos->pos = NULL;
+
+            if (liveTafTmp)
+            {
+                TRACE_VERBOSE("Skipping final track position validation for growing TAF %s\r\n", tonieInfo->contentPath);
+                return;
+            }
 
             if (get_settings()->core.track_pos_taf_validation)
             {
