@@ -29,6 +29,16 @@ wasm/sample-15s.mp3
 wasm/taf_encoder_test
 test-client/
 fake-server-tb2/*
+/offline-packages/
+/privacy-scan/
+/AGENTS.md
+/.codex/
+/.claude/
+/CLAUDE.md
+/GEMINI.md
+/CONTEXT_DISTILLED.md
+/context-distillate-*.md
+/build-tc-ota-update-bundle.ps1
 
 # Dev sandbox runtime data (make dev-sandbox-setup)
 /dev-sandbox/run/

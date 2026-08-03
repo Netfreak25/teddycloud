@@ -15,6 +15,7 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
         cls.passthrough = (ROOT / "src/tb2_mqtt_passthrough.c").read_text(
             encoding="utf-8"
         )
+        cls.settings = (ROOT / "src/settings.c").read_text(encoding="utf-8")
 
     def function(self, start, end):
         return self.passthrough[
@@ -156,6 +157,53 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
             self.server.index("void mqtt_server_task")
         ]
         self.assertIn("if (!box_to_upstream", observer)
+
+    def test_outbound_tls_uses_only_explicit_tb2_identity(self):
+        tls_init = self.passthrough[
+            self.passthrough.index("static bool_t tb2_mqtt_has_original_identity") :
+            self.passthrough.index("static error_t tb2_mqtt_connect_upstream")
+        ]
+        self.assertIn("settings->internal.client_tb2", tls_init)
+        self.assertNotIn("settings->internal.client_tb1", tls_init)
+        self.assertNotIn("settings->internal.client.", tls_init)
+
+    def test_box_certificate_uses_canonical_cn_overlay_mapping(self):
+        mapping = self.passthrough[
+            self.passthrough.index("static settings_t *tb2_mqtt_settings_from_certificate") :
+            self.passthrough.index("static bool_t tb2_mqtt_has_original_identity")
+        ]
+        self.assertIn("get_settings_cn(common_name)", mapping)
+        self.assertNotIn("get_overlay_id(common_name)", mapping)
+        self.assertIn("stage=box_client_auth certificate_present=true", mapping)
+
+    def test_global_tb2_identity_is_default_until_overlay_override(self):
+        selector = self.passthrough[
+            self.passthrough.index("static bool_t tb2_mqtt_overlay_has_identity_override") :
+            self.passthrough.index("static error_t tb2_mqtt_outbound_tls_init")
+        ]
+        self.assertIn("core.client_cert_tb2.file.ca", selector)
+        self.assertIn("core.client_cert_tb2.data.key", selector)
+        self.assertIn("option->overlayed", selector)
+        self.assertIn("overlay_override ? box_settings : get_settings()", selector)
+        self.assertIn("source=%s overlay_override=%s", selector)
+        self.assertIn("tb2_mqtt_connect_upstream(identity_settings", self.passthrough)
+
+    def test_new_overlay_keeps_tb2_client_identity_inherited(self):
+        self.assertIn(
+            "settings_set_overlay_client_cert_paths(i, customCertDir, FALSE)",
+            self.settings,
+        )
+        self.assertIn(
+            "settings_set_overlay_client_cert_paths(settingsId, settings->core.certdir, TRUE)",
+            self.settings,
+        )
+
+    def test_upstream_client_auth_reports_request_and_actual_response(self):
+        self.assertIn("tls_context->clientCertRequested", self.passthrough)
+        self.assertIn("tls_context->cert != NULL", self.passthrough)
+        self.assertIn('"certificate_sent"', self.passthrough)
+        self.assertIn('"empty_certificate"', self.passthrough)
+        self.assertIn('"not_sent"', self.passthrough)
 
 
 if __name__ == "__main__":

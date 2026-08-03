@@ -665,7 +665,7 @@ static void print_usage(char *argv[])
         "\r\n"
         "  --generate-client-cert-tb2 <MAC>\r\n"
         "    Generate a fake TB2 client certificate. Specify the MAC address in the format '001122334455'.\r\n"
-        "    Optional: --destination <DIR> to specify where the encoded files will be saved. Default is certs/client/<MAC>\r\n"
+        "    Optional: --destination <DIR> to specify where the encoded files will be saved. Default is certs/client_tb2/<MAC>\r\n"
         "\r\n"
         "  --add-to-settings\r\n"
         "    If set, generated TB2 certificates will automatically be configured in the config.overlay.ini.\r\n"

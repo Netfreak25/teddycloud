@@ -48,6 +48,15 @@ class Tb1BoxineCertificateContractTests(unittest.TestCase):
             overlay_load.index("settings_load_certs_id(i)"),
         )
 
+    def test_v19_migration_does_not_reenter_settings_mutex(self):
+        migration = self.settings[
+            self.settings.index("static bool settings_migrate_legacy_tb1_option") :
+            self.settings.index("static void settings_migrate_legacy_tb1_client_cert")
+        ]
+        self.assertNotIn("settings_set_string_id", migration)
+        self.assertIn("char *migratedValue = strdup(legacyValue);", migration)
+        self.assertIn("tb1Option->overlayed = true;", migration)
+
     def test_tb1_uploads_target_explicit_tb1_settings(self):
         upload = self.handler[
             self.handler.index("error_t file_save_end_cert") :

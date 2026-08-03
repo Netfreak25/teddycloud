@@ -37,6 +37,14 @@ uint_t tcpWaitForEvents(Socket *socket, uint_t eventMask, systime_t timeout);
 #define MQTT_FRESH_TONIES_DEBOUNCE_SEC 2
 #define MQTT_FRESH_TONIES_REASON_MAX 32
 #define MQTT_FRESH_TONIES_DUPLICATE_LOG_INTERVAL_SEC 60
+#define MQTT_CONNECT_FLAG_USERNAME 0x80U
+#define MQTT_CONNECT_FLAG_PASSWORD 0x40U
+#define MQTT_CONNECT_FLAG_WILL_RETAIN 0x20U
+#define MQTT_CONNECT_FLAG_WILL_QOS_MASK 0x18U
+#define MQTT_CONNECT_FLAG_WILL_QOS_SHIFT 3U
+#define MQTT_CONNECT_FLAG_WILL 0x04U
+#define MQTT_CONNECT_FLAG_CLEAN_SESSION 0x02U
+#define MQTT_CONNECT_FLAG_RESERVED 0x01U
 
 typedef struct {
     char topic[256];
@@ -119,6 +127,18 @@ typedef struct {
     const char *topic;
     error_t (*handler)(MqttClientConnection *conn, MqttMessageType type, const char *topic, const uint8_t *payload, size_t payload_len);
 } MqttHandlerEntry;
+
+typedef struct {
+    const uint8_t *data;
+    size_t length;
+    size_t offset;
+} MqttConnectReader;
+
+typedef struct {
+    const uint8_t *data;
+    size_t length;
+    size_t offset;
+} MqttConnectField;
 
 static Socket *serverSocket = NULL;
 static MqttClientConnection connections[MQTT_MAX_CONNECTIONS];
@@ -447,6 +467,7 @@ error_t mqtt_server_tls_init(TlsContext *tlsContext)
     error = tlsSetClientAuthMode(tlsContext, TLS_CLIENT_AUTH_OPTIONAL);
     if (error)
         return error;
+    TRACE_DEBUG("MQTT TLS CertificateRequest mode=optional requested=true\r\n");
 
     if (mqtt_server_cert && mqtt_server_key)
     {
@@ -1601,8 +1622,177 @@ static bool_t mqtt_get_json_decimal_text(cJSON *json, const char *name, char *va
     return FALSE;
 }
 
+static bool_t mqtt_connect_read_u8(MqttConnectReader *reader, uint8_t *value)
+{
+    if (reader == NULL || value == NULL || reader->offset >= reader->length)
+    {
+        return FALSE;
+    }
+    *value = reader->data[reader->offset++];
+    return TRUE;
+}
+
+static bool_t mqtt_connect_read_u16(MqttConnectReader *reader, uint16_t *value)
+{
+    if (reader == NULL || value == NULL || reader->length - reader->offset < 2)
+    {
+        return FALSE;
+    }
+    *value = ((uint16_t)reader->data[reader->offset] << 8) | reader->data[reader->offset + 1];
+    reader->offset += 2;
+    return TRUE;
+}
+
+static bool_t mqtt_connect_read_field(MqttConnectReader *reader, MqttConnectField *field)
+{
+    uint16_t field_length = 0;
+    if (reader == NULL || field == NULL || !mqtt_connect_read_u16(reader, &field_length) ||
+        reader->length - reader->offset < field_length)
+    {
+        return FALSE;
+    }
+    field->data = reader->data + reader->offset;
+    field->length = field_length;
+    field->offset = reader->offset;
+    reader->offset += field_length;
+    return TRUE;
+}
+
+static void mqtt_trace_masked_connect_field(const char *name, const MqttConnectField *field)
+{
+    TRACE_DEBUG("MQTT CONNECT %s=<masked> offset=%" PRIuSIZE " length=%" PRIuSIZE "\r\n",
+                name, field->offset, field->length);
+}
+
+static void mqtt_trace_plain_connect_field(const char *name, const MqttConnectField *field)
+{
+    TRACE_DEBUG("MQTT CONNECT %s='%.*s' offset=%" PRIuSIZE " length=%" PRIuSIZE "\r\n",
+                name, (int)field->length, (const char *)field->data, field->offset, field->length);
+}
+
+static void mqtt_trace_connect_parse_error(const char *field, const MqttConnectReader *reader)
+{
+    TRACE_DEBUG("MQTT CONNECT parse_error field=%s offset=%" PRIuSIZE " remaining_len=%" PRIuSIZE "\r\n",
+                field, reader->offset, reader->length);
+}
+
+static void mqtt_trace_tls_client_certificate(const MqttClientConnection *conn)
+{
+    settings_t *settings = get_settings();
+    if (settings == NULL || !settings->mqtt_server.log_connect_details)
+    {
+        return;
+    }
+
+    if (conn == NULL || conn->tlsContext == NULL ||
+        conn->tlsContext->client_cert_subject[0] == '\0')
+    {
+        TRACE_DEBUG("MQTT TLS client_certificate present=false verification=not_enforced\r\n");
+        return;
+    }
+
+    TRACE_DEBUG("MQTT TLS client_certificate present=true subject='%s' issuer='%s' serial='%s'"
+                " verification=not_enforced\r\n",
+                conn->tlsContext->client_cert_subject,
+                conn->tlsContext->client_cert_issuer,
+                conn->tlsContext->client_cert_serial);
+}
+
+static void mqtt_trace_connect_details(const uint8_t *payload, size_t payload_len)
+{
+    settings_t *settings = get_settings();
+    if (settings == NULL || !settings->mqtt_server.log_connect_details)
+    {
+        return;
+    }
+
+    MqttConnectReader reader = {.data = payload, .length = payload_len, .offset = 0};
+    MqttConnectField protocol = {0};
+    uint8_t protocol_level = 0;
+    uint8_t flags = 0;
+    uint16_t keepalive = 0;
+
+    TRACE_DEBUG("MQTT CONNECT begin remaining_len=%" PRIuSIZE "\r\n", payload_len);
+    if (payload == NULL || !mqtt_connect_read_field(&reader, &protocol))
+    {
+        mqtt_trace_connect_parse_error("protocol", &reader);
+        return;
+    }
+    if (!mqtt_connect_read_u8(&reader, &protocol_level) ||
+        !mqtt_connect_read_u8(&reader, &flags) ||
+        !mqtt_connect_read_u16(&reader, &keepalive))
+    {
+        mqtt_trace_connect_parse_error("variable_header", &reader);
+        return;
+    }
+
+    bool_t will_present = (flags & MQTT_CONNECT_FLAG_WILL) != 0;
+    bool_t username_present = (flags & MQTT_CONNECT_FLAG_USERNAME) != 0;
+    bool_t password_present = (flags & MQTT_CONNECT_FLAG_PASSWORD) != 0;
+    TRACE_DEBUG("MQTT CONNECT protocol='%.*s' level=%u flags=0x%02X keepalive=%u\r\n",
+                (int)protocol.length, (const char *)protocol.data,
+                (unsigned)protocol_level, (unsigned)flags, (unsigned)keepalive);
+    TRACE_DEBUG("MQTT CONNECT flags username=%s password=%s will_retain=%s will_qos=%u will=%s clean_session=%s reserved=%u\r\n",
+                username_present ? "true" : "false",
+                password_present ? "true" : "false",
+                (flags & MQTT_CONNECT_FLAG_WILL_RETAIN) != 0 ? "true" : "false",
+                (unsigned)((flags & MQTT_CONNECT_FLAG_WILL_QOS_MASK) >> MQTT_CONNECT_FLAG_WILL_QOS_SHIFT),
+                will_present ? "true" : "false",
+                (flags & MQTT_CONNECT_FLAG_CLEAN_SESSION) != 0 ? "true" : "false",
+                (unsigned)(flags & MQTT_CONNECT_FLAG_RESERVED));
+
+    MqttConnectField client_id = {0};
+    if (!mqtt_connect_read_field(&reader, &client_id))
+    {
+        mqtt_trace_connect_parse_error("client_id", &reader);
+        return;
+    }
+    mqtt_trace_plain_connect_field("client_id", &client_id);
+
+    if (will_present)
+    {
+        MqttConnectField will_topic = {0};
+        MqttConnectField will_payload = {0};
+        if (!mqtt_connect_read_field(&reader, &will_topic) ||
+            !mqtt_connect_read_field(&reader, &will_payload))
+        {
+            mqtt_trace_connect_parse_error("will", &reader);
+            return;
+        }
+        mqtt_trace_masked_connect_field("will_topic", &will_topic);
+        mqtt_trace_masked_connect_field("will_payload", &will_payload);
+    }
+
+    if (username_present)
+    {
+        MqttConnectField username = {0};
+        if (!mqtt_connect_read_field(&reader, &username))
+        {
+            mqtt_trace_connect_parse_error("username", &reader);
+            return;
+        }
+        mqtt_trace_masked_connect_field("username", &username);
+    }
+
+    if (password_present)
+    {
+        MqttConnectField password = {0};
+        if (!mqtt_connect_read_field(&reader, &password))
+        {
+            mqtt_trace_connect_parse_error("password", &reader);
+            return;
+        }
+        mqtt_trace_masked_connect_field("password", &password);
+    }
+
+    TRACE_DEBUG("MQTT CONNECT end consumed=%" PRIuSIZE " trailing=%" PRIuSIZE "\r\n",
+                reader.offset, reader.length - reader.offset);
+}
+
 static error_t handle_mqtt_connect(MqttClientConnection *conn, MqttMessageType type, const char *topic, const uint8_t *payload, size_t payload_len)
 {
+    mqtt_trace_tls_client_certificate(conn);
+    mqtt_trace_connect_details(payload, payload_len);
     mqtt_connection_update_context_from_cert(conn);
     TRACE_INFO("MQTT: connection established for %s\r\n", conn->client_ctx.settings->commonName);
     

@@ -44,15 +44,38 @@ class Tb2HttpsPassthroughContractTests(unittest.TestCase):
         for symbol in forbidden:
             self.assertNotIn(symbol, self.passthrough)
 
+    def test_passthrough_uses_only_tb2_client_identity(self):
+        self.assertIn("settings->internal.client_tb2", self.passthrough)
+        self.assertNotIn("settings->internal.client.", self.passthrough)
+
     def test_capture_defaults_are_registered(self):
         self.assertIn('"cloud.tb2_enabled"', self.settings)
+        self.assertIn('"cloud.tb2_passthrough_enabled"', self.settings)
         self.assertIn('"data/diagnostics/tb2-https-passthrough"', self.settings)
         self.assertIn("&settings->cloud.tb2_capture_max_mib, 4096", self.settings)
+
+    def test_passthrough_requires_both_enable_flags(self):
+        gate = self.passthrough[
+            self.passthrough.index("error_t tb2_https_passthrough_post_tls") :
+            self.passthrough.index("error_t tb2_https_passthrough_write_status")
+        ]
+        self.assertIn("!global->cloud.tb2_enabled", gate)
+        self.assertIn("!global->cloud.tb2_passthrough_enabled", gate)
+        self.assertIn('!osStrcmp(item, "cloud.tb2_passthrough_enabled")', self.settings)
+        self.assertIn("Settings_Overlay[0].cloud.tb2_passthrough_enabled = false", self.settings)
 
     def test_passthrough_logs_why_a_connection_is_skipped(self):
         self.assertIn("TB2 HTTPS passthrough skipped: client certificate identity unavailable", self.passthrough)
         self.assertIn("TB2 HTTPS passthrough skipped: client certificate is not mapped to an active overlay", self.passthrough)
         self.assertIn("TB2 HTTPS passthrough skipped: no eligible TB2 overlay resolved", self.passthrough)
+
+    def test_status_distinguishes_standby_and_armed(self):
+        status = self.passthrough[
+            self.passthrough.index("error_t tb2_https_passthrough_write_status") :
+        ]
+        self.assertIn('"passthrough_enabled"', status)
+        self.assertIn('state = "standby"', status)
+        self.assertIn('state = "armed"', status)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

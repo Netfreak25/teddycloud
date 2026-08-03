@@ -43,6 +43,26 @@ static void hex_string_to_bytes(const char *hex_string, uint8_t *output)
     }
 }
 
+static bool_t cert_file_is_nonempty(const char *filename)
+{
+    if (filename == NULL || filename[0] == '\0')
+    {
+        return FALSE;
+    }
+
+    char *filename_full = osAllocMem(256);
+    if (filename_full == NULL)
+    {
+        return FALSE;
+    }
+
+    settings_resolve_dir(&filename_full, (char *)filename, get_settings()->internal.basedirfull);
+    FsFileStat stat;
+    bool_t present = fsGetFileStat(filename_full, &stat) == NO_ERROR && stat.size > 0;
+    osFreeMem(filename_full);
+    return present;
+}
+
 error_t cert_generate_rsa(int size, RsaPrivateKey *cert_privkey, RsaPublicKey *cert_pubkey)
 {
     TRACE_INFO("Generating RSA Key... (slow, very slow!!!)\r\n");
@@ -1045,44 +1065,65 @@ error_t cert_generate_default_tb2()
     /* reload certs to reload the CA cert again */
     settings_try_load_certs_id(0);
 
-    /* generate ca.der */
+    /* Generate ca.der only when it is absent; never rewrite existing TB2 material. */
     const char *cacert_data = settings_get_string("internal.server_tb2.ca");
     const char *cacert_der = settings_get_string("core.server_cert_tb2.file.ca_der");
 
-    char *cacert_der_full = osAllocMem(256);
-    settings_resolve_dir(&cacert_der_full, (char *)cacert_der, get_settings()->internal.basedirfull);
-    if (convert_PEM_to_DER(cacert_data, cacert_der_full) != NO_ERROR)
+    if (!cert_file_is_nonempty(cacert_der))
     {
-        TRACE_ERROR("TB2 ca.pem to ca.der conversion failed\r\n");
+        char *cacert_der_full = osAllocMem(256);
+        settings_resolve_dir(&cacert_der_full, (char *)cacert_der, get_settings()->internal.basedirfull);
+        if (convert_PEM_to_DER(cacert_data, cacert_der_full) != NO_ERROR)
+        {
+            TRACE_ERROR("TB2 ca.pem to ca.der conversion failed\r\n");
+            osFreeMem(cacert_der_full);
+            return ERROR_FAILURE;
+        }
         osFreeMem(cacert_der_full);
-        return ERROR_FAILURE;
     }
-    osFreeMem(cacert_der_full);
+    else
+    {
+        TRACE_INFO("TB2 CA DER certificate already there, skipping generation!\r\n");
+    }
 
     const char *server_cert = settings_get_string("core.server_cert_tb2.file.crt");
     const char *server_key = settings_get_string("core.server_cert_tb2.file.key");
 
-    cert_generate_serial(serial, &serial_length);
-
-    TRACE_INFO("Generating TB2 Server certificate (tbs2.tonie.cloud)...\r\n");
-    const char *server_dns_names[] = { "tbs2.tonie.cloud" };
-    if (cert_generate_signed_ec("tbs2.tonie.cloud", serial, serial_length, false, false, server_cert, server_key, "internal.server_tb2.ca", "internal.server_tb2.ca_key", server_dns_names, 1) != NO_ERROR)
+    if (!cert_file_is_nonempty(server_cert) || !cert_file_is_nonempty(server_key))
     {
-        TRACE_ERROR("cert_generate_signed_ec failed for Server\r\n");
-        return ERROR_FAILURE;
+        cert_generate_serial(serial, &serial_length);
+
+        TRACE_INFO("Generating TB2 Server certificate (tbs2.tonie.cloud)...\r\n");
+        const char *server_dns_names[] = { "tbs2.tonie.cloud" };
+        if (cert_generate_signed_ec("tbs2.tonie.cloud", serial, serial_length, false, false, server_cert, server_key, "internal.server_tb2.ca", "internal.server_tb2.ca_key", server_dns_names, 1) != NO_ERROR)
+        {
+            TRACE_ERROR("cert_generate_signed_ec failed for Server\r\n");
+            return ERROR_FAILURE;
+        }
+    }
+    else
+    {
+        TRACE_INFO("TB2 Server certificate already there, skipping generation!\r\n");
     }
 
     const char *mqtt_cert = settings_get_string("mqtt_server.cert.crt");
     const char *mqtt_key = settings_get_string("mqtt_server.cert.key");
 
-    cert_generate_serial(serial, &serial_length);
-
-    TRACE_INFO("Generating TB2 MQTT certificate (ici.tonie.cloud)...\r\n");
-    const char *mqtt_dns_names[] = { "ici.tonie.cloud", "ici.dev.tonie.cloud", "ici.stage.tonie.cloud" };
-    if (cert_generate_signed_ec("ici.tonie.cloud", serial, serial_length, false, false, mqtt_cert, mqtt_key, "internal.server_tb2.ca", "internal.server_tb2.ca_key", mqtt_dns_names, 3) != NO_ERROR)
+    if (!cert_file_is_nonempty(mqtt_cert) || !cert_file_is_nonempty(mqtt_key))
     {
-        TRACE_ERROR("cert_generate_signed_ec failed for MQTT Server\r\n");
-        return ERROR_FAILURE;
+        cert_generate_serial(serial, &serial_length);
+
+        TRACE_INFO("Generating TB2 MQTT certificate (ici.tonie.cloud)...\r\n");
+        const char *mqtt_dns_names[] = { "ici.tonie.cloud", "ici.dev.tonie.cloud", "ici.stage.tonie.cloud" };
+        if (cert_generate_signed_ec("ici.tonie.cloud", serial, serial_length, false, false, mqtt_cert, mqtt_key, "internal.server_tb2.ca", "internal.server_tb2.ca_key", mqtt_dns_names, 3) != NO_ERROR)
+        {
+            TRACE_ERROR("cert_generate_signed_ec failed for MQTT Server\r\n");
+            return ERROR_FAILURE;
+        }
+    }
+    else
+    {
+        TRACE_INFO("TB2 MQTT certificate already there, skipping generation!\r\n");
     }
 
     /* reload certs to reload the other certs */
@@ -1108,8 +1149,8 @@ error_t cert_generate_mac_tb2(const char *mac, const char *dest, bool add_to_set
 
     char *actual_dest = NULL;
     if (!dest) {
-        char *certdir = get_settings()->internal.certdirfull;
-        if (!certdir) certdir = "certs/client";
+        char *certdir = get_settings()->internal.certdirfull_tb2;
+        if (!certdir) certdir = "certs/client_tb2";
         actual_dest = custom_asprintf("%s/%s", certdir, mac_lower);
     } else {
         actual_dest = custom_asprintf("%s", dest);
@@ -1184,4 +1225,3 @@ error_t cert_generate_mac_tb2(const char *mac, const char *dest, bool add_to_set
 
     return NO_ERROR;
 }
-

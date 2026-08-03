@@ -75,6 +75,7 @@ typedef struct
 {
     bool enabled;
     bool tb2_enabled;
+    bool tb2_passthrough_enabled;
     char *remote_hostname;
     char *remote_hostname_tb2;
     uint32_t remote_port;
@@ -149,6 +150,7 @@ typedef struct
     char *cert_crt;
     char *cert_key;
     bool log_full_payloads;
+    bool log_connect_details;
 } settings_mqtt_server_t;
 
 typedef enum

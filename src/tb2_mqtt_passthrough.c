@@ -105,6 +105,33 @@ struct tb2_mqtt_passthrough_session
 
 static tb2_mqtt_passthrough_status_t mqtt_passthrough_status;
 
+static void tb2_mqtt_trace_error(const char *stage, error_t error)
+{
+    TRACE_ERROR("TB2 MQTT upstream stage=%s failed error=%s code=%d\r\n",
+                stage, error2text(error), (int)error);
+}
+
+static void tb2_mqtt_trace_upstream_client_auth(const HttpClientContext *upstream)
+{
+    const TlsContext *tls_context = upstream != NULL ? upstream->tlsContext : NULL;
+    if (tls_context == NULL)
+    {
+        TRACE_DEBUG("TB2 MQTT upstream stage=client_auth certificate_request=unknown"
+                    " response=unknown reason=tls_context_missing\r\n");
+        return;
+    }
+
+    const bool_t requested = tls_context->clientCertRequested;
+    const bool_t certificate_sent = requested && tls_context->cert != NULL;
+    const char *response = !requested ? "not_sent" :
+                           certificate_sent ? "certificate_sent" : "empty_certificate";
+    TRACE_DEBUG("TB2 MQTT upstream stage=client_auth certificate_request=%s"
+                " response=%s resumed=%s\r\n",
+                requested ? "received" : "not_received",
+                response,
+                tls_context->resume ? "true" : "false");
+}
+
 static void tb2_mqtt_set_private_permissions(const char *path, bool_t directory)
 {
 #ifdef _WIN32
@@ -143,6 +170,7 @@ static settings_t *tb2_mqtt_settings_from_certificate(TlsContext *tls_context)
 {
     if (tls_context == NULL)
     {
+        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity failed reason=tls_context_missing\r\n");
         return NULL;
     }
 
@@ -150,8 +178,12 @@ static settings_t *tb2_mqtt_settings_from_certificate(TlsContext *tls_context)
     const char *issuer = tls_context->client_cert_issuer;
     if (subject == NULL || issuer == NULL || subject[0] == '\0' || issuer[0] == '\0')
     {
+        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity failed reason=certificate_identity_missing\r\n");
         return NULL;
     }
+    TRACE_DEBUG("TB2 MQTT upstream stage=box_client_auth certificate_present=true"
+                " subject='%s' issuer='%s' serial='%s'\r\n",
+                subject, issuer, tls_context->client_cert_serial);
 
     char common_name[32] = "";
     size_t subject_length = osStrlen(subject);
@@ -166,21 +198,47 @@ static settings_t *tb2_mqtt_settings_from_certificate(TlsContext *tls_context)
     }
     else
     {
+        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity failed reason=subject_format length=%"
+                    PRIuSIZE "\r\n", subject_length);
         return NULL;
     }
     osStringToLower(common_name);
 
-    uint8_t overlay_id = get_overlay_id(common_name);
     bool_t trusted_issuer = osStrstr(issuer, "Toniebox Root CA") != NULL ||
                             osStrstr(issuer, "Toniebox SubCA") != NULL ||
                             osStrstr(issuer, "Boxine Factory SubCA") != NULL;
-    settings_t *settings = overlay_id > 0 ? get_settings_id(overlay_id) : NULL;
-    if (settings == NULL || !settings->internal.config_used || !trusted_issuer)
+    if (!trusted_issuer)
     {
+        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity failed reason=issuer_untrusted\r\n");
         return NULL;
+    }
+
+    settings_t *settings = get_settings_cn(common_name);
+    bool_t overlay_found = settings != NULL && settings->internal.overlayNumber > 0 &&
+                           settings->internal.config_used &&
+                           osStrcmp(settings->commonName, common_name) == 0;
+    if (!overlay_found)
+    {
+        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity failed reason=overlay_validation"
+                    " overlay_found=%s config_used=%s trusted_issuer=%s\r\n",
+                    overlay_found ? "true" : "false",
+                    settings != NULL && settings->internal.config_used ? "true" : "false",
+                    trusted_issuer ? "true" : "false");
+        return NULL;
+    }
+    if (settings->toniebox.boxGeneration == GENERATION_UNKNOWN)
+    {
+        settings_set_unsigned_id("toniebox.boxGeneration", GENERATION_TB2,
+                                 settings->internal.overlayNumber);
+        settings_load_certs_id(settings->internal.overlayNumber);
+        TRACE_DEBUG("TB2 MQTT upstream stage=map_box_identity generation=tb2 source=mqtt\r\n");
     }
     if (settings->toniebox.boxGeneration != GENERATION_TB2)
     {
+        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity failed reason=box_generation"
+                    " actual=%u expected=%u\r\n",
+                    (unsigned)settings->toniebox.boxGeneration,
+                    (unsigned)GENERATION_TB2);
         return NULL;
     }
     return settings;
@@ -188,40 +246,101 @@ static settings_t *tb2_mqtt_settings_from_certificate(TlsContext *tls_context)
 
 static bool_t tb2_mqtt_has_original_identity(settings_t *settings)
 {
-    return settings != NULL && settings->internal.client.ca != NULL &&
-           settings->internal.client.crt != NULL && settings->internal.client.key != NULL &&
-           settings->internal.client.ca[0] != '\0' && settings->internal.client.crt[0] != '\0' &&
-           settings->internal.client.key[0] != '\0';
+    return settings != NULL && settings->internal.client_tb2.ca != NULL &&
+           settings->internal.client_tb2.crt != NULL && settings->internal.client_tb2.key != NULL &&
+           settings->internal.client_tb2.ca[0] != '\0' && settings->internal.client_tb2.crt[0] != '\0' &&
+           settings->internal.client_tb2.key[0] != '\0';
+}
+
+static bool_t tb2_mqtt_overlay_has_identity_override(const settings_t *settings)
+{
+    static const char *const identity_options[] = {
+        "core.client_cert_tb2.file.ca",
+        "core.client_cert_tb2.file.crt",
+        "core.client_cert_tb2.file.key",
+        "core.client_cert_tb2.data.ca",
+        "core.client_cert_tb2.data.crt",
+        "core.client_cert_tb2.data.key",
+    };
+
+    if (settings == NULL || settings->internal.overlayNumber == 0 ||
+        settings->internal.overlayUniqueId == NULL)
+    {
+        return FALSE;
+    }
+
+    for (size_t i = 0; i < sizeof(identity_options) / sizeof(identity_options[0]); i++)
+    {
+        setting_item_t *option = settings_get_by_name_ovl(identity_options[i],
+                                                           settings->internal.overlayUniqueId);
+        if (option != NULL && option->overlayed)
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static settings_t *tb2_mqtt_select_identity_settings(settings_t *box_settings)
+{
+    bool_t overlay_override = tb2_mqtt_overlay_has_identity_override(box_settings);
+    settings_t *identity_settings = overlay_override ? box_settings : get_settings();
+    TRACE_DEBUG("TB2 MQTT upstream stage=select_identity source=%s overlay_override=%s\r\n",
+                overlay_override ? "box_overlay" : "global_default",
+                overlay_override ? "true" : "false");
+    return identity_settings;
 }
 
 static error_t tb2_mqtt_outbound_tls_init(HttpClientContext *context, TlsContext *tls_context)
 {
     settings_t *settings = (settings_t *)context->sourceCtx;
+    TRACE_DEBUG("TB2 MQTT upstream stage=tls_init begin server=%s identity=%s\r\n",
+                context->serverName,
+                tb2_mqtt_has_original_identity(settings) ? "available" : "unavailable");
     if (!tb2_mqtt_has_original_identity(settings))
     {
+        tb2_mqtt_trace_error("tls_identity", ERROR_FAILURE);
         return ERROR_FAILURE;
     }
 
     error_t error = tlsSetPrng(tls_context, rand_get_algo(), rand_get_context());
-    if (!error)
+    if (error)
     {
-        error = tlsSetTrustedCaList(tls_context, settings->internal.client.ca,
-                                    osStrlen(settings->internal.client.ca));
+        tb2_mqtt_trace_error("tls_prng", error);
     }
     if (!error)
     {
-        error = tlsAddCertificate(tls_context, settings->internal.client.crt,
-                                  osStrlen(settings->internal.client.crt),
-                                  settings->internal.client.key,
-                                  osStrlen(settings->internal.client.key));
+        error = tlsSetTrustedCaList(tls_context, settings->internal.client_tb2.ca,
+                                    osStrlen(settings->internal.client_tb2.ca));
+        if (error)
+        {
+            tb2_mqtt_trace_error("tls_ca", error);
+        }
+    }
+    if (!error)
+    {
+        error = tlsAddCertificate(tls_context, settings->internal.client_tb2.crt,
+                                  osStrlen(settings->internal.client_tb2.crt),
+                                  settings->internal.client_tb2.key,
+                                  osStrlen(settings->internal.client_tb2.key));
+        if (error)
+        {
+            tb2_mqtt_trace_error("tls_client_certificate", error);
+        }
     }
     if (!error)
     {
         error = tlsSetServerName(tls_context, context->serverName);
+        if (error)
+        {
+            tb2_mqtt_trace_error("tls_server_name", error);
+        }
     }
     if (!error)
     {
         tls_context_key_log_init(tls_context);
+        TRACE_DEBUG("TB2 MQTT upstream stage=tls_init ready server=%s\r\n",
+                    context->serverName);
     }
     return error;
 }
@@ -232,10 +351,23 @@ static error_t tb2_mqtt_connect_upstream(settings_t *box_settings, HttpClientCon
     upstream->serverName = global->mqtt_client_upstream.hostname;
     upstream->sourceCtx = box_settings;
 
+    TRACE_DEBUG("TB2 MQTT upstream stage=connect begin target=%s:%u timeout_ms=%u\r\n",
+                global->mqtt_client_upstream.hostname,
+                (unsigned)global->mqtt_client_upstream.port,
+                (unsigned)global->core.http_client_timeout);
+
     error_t error = httpClientSetTimeout(upstream, global->core.http_client_timeout);
+    if (error)
+    {
+        tb2_mqtt_trace_error("configure_timeout", error);
+    }
     if (!error)
     {
         error = httpClientRegisterTlsInitCallback(upstream, tb2_mqtt_outbound_tls_init);
+        if (error)
+        {
+            tb2_mqtt_trace_error("register_tls_callback", error);
+        }
     }
     if (error)
     {
@@ -245,8 +377,11 @@ static error_t tb2_mqtt_connect_upstream(settings_t *box_settings, HttpClientCon
     void *resolver = resolve_host(global->mqtt_client_upstream.hostname);
     if (resolver == NULL)
     {
+        tb2_mqtt_trace_error("dns_resolve", ERROR_ADDRESS_NOT_FOUND);
         return ERROR_ADDRESS_NOT_FOUND;
     }
+    TRACE_DEBUG("TB2 MQTT upstream stage=dns_resolve success host=%s\r\n",
+                global->mqtt_client_upstream.hostname);
 
     error = ERROR_ADDRESS_NOT_FOUND;
     for (int position = 0;; position++)
@@ -256,18 +391,38 @@ static error_t tb2_mqtt_connect_upstream(settings_t *box_settings, HttpClientCon
         {
             break;
         }
+        TRACE_DEBUG("TB2 MQTT upstream stage=tcp_connect attempt=%d address=%s port=%u\r\n",
+                    position + 1, ipAddrToString(&address, NULL),
+                    (unsigned)global->mqtt_client_upstream.port);
         error = httpClientConnect(upstream, &address,
                                   (uint16_t)global->mqtt_client_upstream.port);
         if (!error)
         {
+            tb2_mqtt_trace_upstream_client_auth(upstream);
+            TRACE_DEBUG("TB2 MQTT upstream stage=tcp_tls_connect success attempt=%d address=%s\r\n",
+                        position + 1, ipAddrToString(&address, NULL));
             break;
         }
+        tb2_mqtt_trace_error("tcp_tls_connect", error);
     }
     resolve_free(resolver);
 
     if (!error && upstream->socket != NULL)
     {
-        socketSetTimeout(upstream->socket, TB2_MQTT_TUNNEL_IO_TIMEOUT_MS);
+        error_t timeout_error = socketSetTimeout(upstream->socket, TB2_MQTT_TUNNEL_IO_TIMEOUT_MS);
+        if (timeout_error)
+        {
+            tb2_mqtt_trace_error("configure_tunnel_timeout", timeout_error);
+            return timeout_error;
+        }
+        TRACE_DEBUG("TB2 MQTT upstream stage=connect ready target=%s:%u io_timeout_ms=%u\r\n",
+                    global->mqtt_client_upstream.hostname,
+                    (unsigned)global->mqtt_client_upstream.port,
+                    (unsigned)TB2_MQTT_TUNNEL_IO_TIMEOUT_MS);
+    }
+    else if (error)
+    {
+        tb2_mqtt_trace_error("connect_exhausted", error);
     }
     return error;
 }
@@ -678,10 +833,12 @@ static error_t tb2_mqtt_tls_write_all(TlsContext *destination, const uint8_t *da
         error_t error = tlsWrite(destination, data + offset, length - offset, &written, 0);
         if (error)
         {
+            tb2_mqtt_trace_error("tls_write", error);
             return error;
         }
         if (written == 0)
         {
+            tb2_mqtt_trace_error("tls_write_zero", ERROR_WRITE_FAILED);
             return ERROR_WRITE_FAILED;
         }
         offset += written;
@@ -719,6 +876,7 @@ static error_t tb2_mqtt_record_packet(tb2_mqtt_passthrough_session_t *session,
                                             generated, packet_complete);
     if (error)
     {
+        tb2_mqtt_trace_error("capture_write", error);
         return ERROR_WRITE_FAILED;
     }
 
@@ -1068,12 +1226,13 @@ static error_t tb2_mqtt_forward_ready(tb2_mqtt_passthrough_session_t *session,
         return NO_ERROR;
     if (error)
     {
+        TRACE_ERROR("TB2 MQTT upstream stage=tls_read direction=%s failed error=%s code=%d\r\n",
+                    box_to_upstream ? "box_to_upstream" : "upstream_to_box",
+                    error2text(error), (int)error);
         return error;
     }
     if (received == 0)
-    {
         return ERROR_END_OF_STREAM;
-    }
     return tb2_mqtt_process_stream(session, box_to_upstream, buffer, received);
 }
 
@@ -1121,10 +1280,22 @@ error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
         return NO_ERROR;
     }
     *handled = TRUE;
+    TRACE_DEBUG("TB2 MQTT upstream stage=passthrough_start armed=true\r\n");
 
     settings_t *box_settings = tb2_mqtt_settings_from_certificate(box_tls);
-    if (!tb2_mqtt_has_original_identity(box_settings))
+    settings_t *identity_settings = tb2_mqtt_select_identity_settings(box_settings);
+    if (box_settings == NULL || !tb2_mqtt_has_original_identity(identity_settings))
     {
+        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity identity_material"
+                    " settings=%s ca=%s certificate=%s key=%s\r\n",
+                    box_settings != NULL ? "available" : "unavailable",
+                    identity_settings != NULL && identity_settings->internal.client_tb2.ca != NULL &&
+                            identity_settings->internal.client_tb2.ca[0] != '\0' ? "available" : "missing",
+                    identity_settings != NULL && identity_settings->internal.client_tb2.crt != NULL &&
+                            identity_settings->internal.client_tb2.crt[0] != '\0' ? "available" : "missing",
+                    identity_settings != NULL && identity_settings->internal.client_tb2.key != NULL &&
+                            identity_settings->internal.client_tb2.key[0] != '\0' ? "available" : "missing");
+        tb2_mqtt_trace_error("map_box_identity", ERROR_FAILURE);
         tb2_mqtt_status_attempt_failed("identity_unavailable");
         return ERROR_FAILURE;
     }
@@ -1145,6 +1316,7 @@ error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
     error_t error = tb2_mqtt_capture_open(&created->capture, get_settings());
     if (error)
     {
+        tb2_mqtt_trace_error("capture_open", error);
         tb2_mqtt_status_attempt_failed("capture_open_failed");
         osFreeMem(created);
         return error;
@@ -1153,19 +1325,26 @@ error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
     tb2_mqtt_status_start();
 
     error = httpClientInit(&created->upstream);
+    if (error)
+    {
+        tb2_mqtt_trace_error("http_client_init", error);
+    }
     if (!error)
     {
         created->upstream_initialized = TRUE;
-        error = tb2_mqtt_connect_upstream(box_settings, &created->upstream);
+        error = tb2_mqtt_connect_upstream(identity_settings, &created->upstream);
     }
     if (error)
     {
+        tb2_mqtt_trace_error("passthrough_connect", error);
         tb2_mqtt_passthrough_close(created, "connect_failed", FALSE);
         return error;
     }
 
     socketSetTimeout(box_socket, TB2_MQTT_TUNNEL_IO_TIMEOUT_MS);
     tb2_mqtt_status_tunneling();
+    TRACE_DEBUG("TB2 MQTT upstream stage=passthrough_start tunneling=true session=%s\r\n",
+                created->capture.session_id);
     *session = created;
     if (box_settings_out != NULL)
         *box_settings_out = box_settings;

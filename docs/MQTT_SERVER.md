@@ -21,6 +21,7 @@ The server-side ICI settings are:
 | `mqtt_server.cert.crt` | `certs/server_tb2/ici.pem` | PEM server certificate loaded for the TLS endpoint. |
 | `mqtt_server.cert.key` | `certs/server_tb2/ici.key` | PEM server private key loaded for the TLS endpoint. |
 | `mqtt_server.log_full_payloads` | `false` | Expert diagnostic switch for base64 full-payload capture of large MQTT publishes. |
+| `mqtt_server.log_connect_details` | `false` | Logs the MQTT CONNECT structure and plain client ID at global log level 5; credentials and Will fields remain masked. |
 
 The separate **MQTT Client Upstream** category controls the optional TB2 ICI
 packet proxy:
@@ -40,8 +41,9 @@ These settings are deliberately separate from both the generic external
 The internal `mqtt_server` remains the incoming TLS endpoint. After that TLS
 handshake and before MQTT packet parsing, an armed forwarder maps the presented
 box certificate to an overlay and opens a second TLS connection using the
-original per-box identity from `core.client_cert.*`. The local
-`mqtt_server.cert.*` identity is never reused for the outbound role.
+original per-box identity from `core.client_cert_tb2.*`. It must never fall back
+to the TB1 `core.client_cert_tb1.*` identity. The local `mqtt_server.cert.*` ICI
+identity is never reused for the outbound role.
 
 For an armed connection, decrypted MQTT application bytes are reassembled into
 complete MQTT packets in both directions. Fragmented packets and multiple
@@ -78,6 +80,25 @@ battery/events/fleet/headphones metrics, playback, volume, and existing
 app-reply status handlers even when the publish is suppressed. It does not run
 handlers that publish desired settings or control commands. Cloud-to-box
 publishes are logged and captured only; TeddyCloud never reacts to them.
+
+At global log level `5`, connection diagnostics use the filter prefix
+`TB2 MQTT upstream`; packet decisions use `TB2 MQTT proxy`. They report the DNS,
+TCP, TLS and packet-forwarding stage, destination address, direction, MQTT packet
+type/topic/QoS, the selected forwarding setting, and textual and numeric error
+codes. Certificate, key and credential contents are not written to these logs.
+After a successful upstream TLS handshake, `stage=client_auth` reports whether
+the ICI server sent a TLS CertificateRequest and whether CycloneTLS answered
+with the configured TB2 certificate, an empty certificate list, or no client
+certificate because none was requested. The log also marks resumed sessions.
+The incoming box certificate is logged as `stage=box_client_auth` before
+passthrough selection and is resolved through the same canonical CN-to-overlay
+mapping used by the normal MQTT server path.
+The outbound client identity defaults to the global `core.client_cert_tb2.*`
+settings. A box-specific identity is selected only when at least one TB2 client
+certificate file or data setting is actively overridden in that box overlay;
+`stage=select_identity` reports the selected source. Newly discovered overlays
+keep these TB2 settings inherited instead of activating empty per-box paths.
+
 The separate **ICI Upstream** navbar tag polls
 `GET /api/mqtt-client-upstream/status` every five seconds. States are
 `disabled`, `standby`, `armed`, `connecting`, `tunneling` and `error`; only an
@@ -214,6 +235,18 @@ The payload bytes are base64 encoded so reverse-engineering exports can recover
 the complete RX/TX body. In that mode the old large-payload preview intentionally
 uses `payload=<full-capture>` instead of a truncated payload fragment, so
 analysis tools do not mistake the preview for the real payload.
+
+When `mqtt_server.log_connect_details` is enabled and the global log level is
+`5`, the server logs the CONNECT protocol, version, flags, keepalive, field
+presence, byte offsets and exact field lengths. The client ID is shown as
+plaintext while this expert switch is enabled. Will data, username and password
+remain masked.
+The TLS listener requests a client certificate with optional authentication.
+At log level `5`, `MQTT TLS CertificateRequest` confirms that the request is
+enabled. With CONNECT diagnostics enabled, `MQTT TLS client_certificate` shows
+whether the box answered and, when present, its subject, issuer and serial.
+`verification=not_enforced` is explicit because the listener currently observes
+the certificate without requiring a trusted client-CA chain.
 
 ## Box Topics
 

@@ -341,6 +341,10 @@ error_t handleApiGetIndex(HttpConnection *connection, const char_t *uri, const c
         {
             read_only = !get_settings_ovl(overlay)->mqtt_client_upstream.enabled;
         }
+        else if (!osStrcmp(opt->option_name, "cloud.tb2_passthrough_enabled"))
+        {
+            read_only = !get_settings_ovl(overlay)->cloud.tb2_enabled;
+        }
         cJSON_AddBoolToObject(jsonEntry, "readOnly", read_only);
         cJSON_AddNumberToObject(jsonEntry, "level", opt->level);
 

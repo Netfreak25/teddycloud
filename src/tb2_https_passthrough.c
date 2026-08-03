@@ -168,18 +168,45 @@ static settings_t *tb2_settings_from_certificate(HttpConnection *connection)
     return settings;
 }
 
-static bool_t tb2_has_original_identity(settings_t *settings)
+static bool_t tb2_identity_is_complete(const settings_cert_t *identity)
 {
-    return settings != NULL && settings->internal.client.ca != NULL &&
-           settings->internal.client.crt != NULL && settings->internal.client.key != NULL &&
-           settings->internal.client.ca[0] != '\0' && settings->internal.client.crt[0] != '\0' &&
-           settings->internal.client.key[0] != '\0';
+    return identity != NULL && identity->ca != NULL && identity->crt != NULL &&
+           identity->key != NULL && identity->ca[0] != '\0' && identity->crt[0] != '\0' &&
+           identity->key[0] != '\0';
+}
+
+static const settings_cert_t *tb2_resolve_original_identity(settings_t *settings)
+{
+    if (settings == NULL)
+    {
+        return NULL;
+    }
+
+    const settings_cert_t *identity = &settings->internal.client_tb2;
+    if (tb2_identity_is_complete(identity))
+    {
+        return identity;
+    }
+
+    if (settings->internal.overlayNumber != 0)
+    {
+        identity = &get_settings()->internal.client_tb2;
+        if (tb2_identity_is_complete(identity))
+        {
+            TRACE_WARNING("Missing TB2 certificates for overlay %u; using the global TB2 certificate set\r\n",
+                          (unsigned int)settings->internal.overlayNumber);
+            return identity;
+        }
+    }
+
+    return NULL;
 }
 
 static error_t tb2_outbound_tls_init(HttpClientContext *context, TlsContext *tls_context)
 {
     settings_t *settings = (settings_t *)context->sourceCtx;
-    if (!tb2_has_original_identity(settings))
+    const settings_cert_t *identity = tb2_resolve_original_identity(settings);
+    if (identity == NULL)
     {
         return ERROR_FAILURE;
     }
@@ -187,15 +214,12 @@ static error_t tb2_outbound_tls_init(HttpClientContext *context, TlsContext *tls
     error_t error = tlsSetPrng(tls_context, rand_get_algo(), rand_get_context());
     if (!error)
     {
-        error = tlsSetTrustedCaList(tls_context, settings->internal.client.ca,
-                                    osStrlen(settings->internal.client.ca));
+        error = tlsSetTrustedCaList(tls_context, identity->ca, osStrlen(identity->ca));
     }
     if (!error)
     {
-        error = tlsAddCertificate(tls_context, settings->internal.client.crt,
-                                  osStrlen(settings->internal.client.crt),
-                                  settings->internal.client.key,
-                                  osStrlen(settings->internal.client.key));
+        error = tlsAddCertificate(tls_context, identity->crt, osStrlen(identity->crt),
+                                  identity->key, osStrlen(identity->key));
     }
     if (!error)
     {
@@ -708,7 +732,7 @@ error_t tb2_https_passthrough_post_tls(HttpConnection *connection, bool_t *handl
 {
     *handled = FALSE;
     settings_t *global = get_settings();
-    if (!global->cloud.tb2_enabled)
+    if (!global->cloud.tb2_enabled || !global->cloud.tb2_passthrough_enabled)
     {
         TRACE_DEBUG("TB2 HTTPS passthrough skipped: forwarding is disabled\r\n");
         return NO_ERROR;
@@ -807,9 +831,27 @@ error_t tb2_https_passthrough_write_status(HttpConnection *connection)
     }
 
     osAcquireMutex(&passthrough_status.mutex);
+    const char *state;
+    if (!settings->cloud.tb2_enabled)
+    {
+        state = "disabled";
+    }
+    else if (!settings->cloud.tb2_passthrough_enabled)
+    {
+        state = "standby";
+    }
+    else if (osStrcmp(passthrough_status.state, "disabled") == 0)
+    {
+        state = "armed";
+    }
+    else
+    {
+        state = passthrough_status.state;
+    }
+
     cJSON_AddBoolToObject(json, "enabled", settings->cloud.tb2_enabled);
-    cJSON_AddStringToObject(json, "state",
-                           settings->cloud.tb2_enabled ? passthrough_status.state : "disabled");
+    cJSON_AddBoolToObject(json, "passthrough_enabled", settings->cloud.tb2_passthrough_enabled);
+    cJSON_AddStringToObject(json, "state", state);
     cJSON_AddStringToObject(json, "hostname", settings->cloud.remote_hostname_tb2);
     cJSON_AddNumberToObject(json, "port", settings->cloud.remote_port_tb2);
     cJSON_AddNumberToObject(json, "bytes_box_to_upstream",

@@ -77,7 +77,7 @@ static void option_map_init(uint8_t settingsId)
 
     OPTION_TREE_DESC("core", "HTTP server", LEVEL_BASIC)
     OPTION_STRING("core.host_url", &settings->core.host_url, "http://localhost", "Host URL", "URL to teddyCloud server", LEVEL_BASIC)
-    OPTION_STRING("core.certdir", &settings->core.certdir, "certs/client", "Cert dir", "Directory to upload global TB1 or box-specific client certificates", LEVEL_EXPERT)
+    OPTION_STRING("core.certdir", &settings->core.certdir, "certs/client_tb1", "Cert dir", "Directory to upload global TB1 or box-specific client certificates", LEVEL_EXPERT)
     OPTION_STRING("core.certdir_tb2", &settings->core.certdir_tb2, "certs/client_tb2", "Cert dir (TB2)", "Directory to upload genuine TB2 client certificates", LEVEL_EXPERT)
     OPTION_INTERNAL_STRING("core.configdir", &settings->core.configdir, CONFIG_BASE_PATH, "Configuration dir", LEVEL_EXPERT)
     OPTION_STRING("core.contentdir", &settings->core.contentdir, "default", "Content dir", "Directory for placing cloud content", LEVEL_DETAIL)
@@ -94,11 +94,11 @@ static void option_map_init(uint8_t settingsId)
 
     OPTION_TREE_DESC("core.server_cert", "HTTPS server certificates", LEVEL_EXPERT)
     OPTION_TREE_DESC("core.server_cert.file", "File certificates", LEVEL_EXPERT)
-    OPTION_STRING("core.server_cert.file.ca", &settings->core.server_cert.file.ca, "certs/server/ca-root.pem", "CA certificate", "CA certificate", LEVEL_EXPERT)
-    OPTION_STRING("core.server_cert.file.ca_der", &settings->core.server_cert.file.ca_der, "certs/server/ca.der", "CA certificate as DER", "CA certificate as DER", LEVEL_EXPERT)
-    OPTION_STRING("core.server_cert.file.ca_key", &settings->core.server_cert.file.ca_key, "certs/server/ca-key.pem", "CA key", "CA key", LEVEL_EXPERT)
-    OPTION_STRING("core.server_cert.file.crt", &settings->core.server_cert.file.crt, "certs/server/teddy-cert.pem", "Server certificate", "Server certificate", LEVEL_EXPERT)
-    OPTION_STRING("core.server_cert.file.key", &settings->core.server_cert.file.key, "certs/server/teddy-key.pem", "Server key", "Server key", LEVEL_EXPERT)
+    OPTION_STRING("core.server_cert.file.ca", &settings->core.server_cert.file.ca, "certs/server_tb1/ca-root.pem", "CA certificate", "CA certificate", LEVEL_EXPERT)
+    OPTION_STRING("core.server_cert.file.ca_der", &settings->core.server_cert.file.ca_der, "certs/server_tb1/ca.der", "CA certificate as DER", "CA certificate as DER", LEVEL_EXPERT)
+    OPTION_STRING("core.server_cert.file.ca_key", &settings->core.server_cert.file.ca_key, "certs/server_tb1/ca-key.pem", "CA key", "CA key", LEVEL_EXPERT)
+    OPTION_STRING("core.server_cert.file.crt", &settings->core.server_cert.file.crt, "certs/server_tb1/teddy-cert.pem", "Server certificate", "Server certificate", LEVEL_EXPERT)
+    OPTION_STRING("core.server_cert.file.key", &settings->core.server_cert.file.key, "certs/server_tb1/teddy-key.pem", "Server key", "Server key", LEVEL_EXPERT)
     OPTION_TREE_DESC("core.server_cert.data", "Raw certificates", LEVEL_EXPERT)
     OPTION_STRING("core.server_cert.data.ca", &settings->core.server_cert.data.ca, "", "CA certificate data", "CA certificate data", LEVEL_EXPERT)
     OPTION_INTERNAL_STRING("core.server_cert.data.ca_key", &settings->core.server_cert.data.ca_key, "", "CA key data", LEVEL_EXPERT)
@@ -132,9 +132,9 @@ static void option_map_init(uint8_t settingsId)
 
     OPTION_TREE_DESC("core.client_cert_tb1", "Cloud client certificates (TB1)", LEVEL_DETAIL)
     OPTION_TREE_DESC("core.client_cert_tb1.file", "Per-box certificate files (TB1)", LEVEL_DETAIL)
-    OPTION_STRING("core.client_cert_tb1.file.ca", &settings->core.client_cert_tb1.file.ca, "certs/client/ca.der", "Client CA (TB1)", "Original TB1 upstream trust CA", LEVEL_DETAIL)
-    OPTION_STRING("core.client_cert_tb1.file.crt", &settings->core.client_cert_tb1.file.crt, "certs/client/client.der", "Client certificate (TB1)", "Original TB1 upstream client certificate", LEVEL_DETAIL)
-    OPTION_STRING("core.client_cert_tb1.file.key", &settings->core.client_cert_tb1.file.key, "certs/client/private.der", "Client key (TB1)", "Original TB1 upstream private key", LEVEL_DETAIL)
+    OPTION_STRING("core.client_cert_tb1.file.ca", &settings->core.client_cert_tb1.file.ca, "certs/client_tb1/ca.der", "Client CA (TB1)", "Original TB1 upstream trust CA", LEVEL_DETAIL)
+    OPTION_STRING("core.client_cert_tb1.file.crt", &settings->core.client_cert_tb1.file.crt, "certs/client_tb1/client.der", "Client certificate (TB1)", "Original TB1 upstream client certificate", LEVEL_DETAIL)
+    OPTION_STRING("core.client_cert_tb1.file.key", &settings->core.client_cert_tb1.file.key, "certs/client_tb1/private.der", "Client key (TB1)", "Original TB1 upstream private key", LEVEL_DETAIL)
     OPTION_TREE_DESC("core.client_cert_tb1.data", "Raw certificates (TB1)", LEVEL_SECRET)
     OPTION_INTERNAL_STRING("core.client_cert_tb1.data.ca", &settings->core.client_cert_tb1.data.ca, "", "Client Certificate Authority (TB1)", LEVEL_EXPERT)
     OPTION_INTERNAL_STRING("core.client_cert_tb1.data.crt", &settings->core.client_cert_tb1.data.crt, "", "Client certificate data (TB1)", LEVEL_EXPERT)
@@ -153,9 +153,9 @@ static void option_map_init(uint8_t settingsId)
     /* settings for fake client certs */
     OPTION_TREE_DESC("core.client_cert_fake", "Fake client certificates", LEVEL_DETAIL)
     OPTION_TREE_DESC("core.client_cert_fake.file", "Fake File certificates", LEVEL_DETAIL)
-    OPTION_STRING("core.client_cert_fake.file.ca", &settings->core.client_cert_fake.file.ca, "certs/client/ca.fake.der", "Fake Client CA", "Fake Client Certificate Authority", LEVEL_DETAIL)
-    OPTION_STRING("core.client_cert_fake.file.crt", &settings->core.client_cert_fake.file.crt, "certs/client/client.fake.der", "Fake Client certificate", "Fake Client certificate", LEVEL_DETAIL)
-    OPTION_STRING("core.client_cert_fake.file.key", &settings->core.client_cert_fake.file.key, "certs/client/private.fake.der", "Fake Client key", "Fake Client key", LEVEL_DETAIL)
+    OPTION_STRING("core.client_cert_fake.file.ca", &settings->core.client_cert_fake.file.ca, "certs/client_tb1/ca.fake.der", "Fake Client CA", "Fake Client Certificate Authority", LEVEL_DETAIL)
+    OPTION_STRING("core.client_cert_fake.file.crt", &settings->core.client_cert_fake.file.crt, "certs/client_tb1/client.fake.der", "Fake Client certificate", "Fake Client certificate", LEVEL_DETAIL)
+    OPTION_STRING("core.client_cert_fake.file.key", &settings->core.client_cert_fake.file.key, "certs/client_tb1/private.fake.der", "Fake Client key", "Fake Client key", LEVEL_DETAIL)
     OPTION_TREE_DESC("core.client_cert_fake.data", "Raw certificates", LEVEL_SECRET)
     OPTION_INTERNAL_STRING("core.client_cert_fake.data.ca", &settings->core.client_cert_fake.data.ca, "", "Fake Client Certificate Authority", LEVEL_EXPERT)
     OPTION_INTERNAL_STRING("core.client_cert_fake.data.crt", &settings->core.client_cert_fake.data.crt, "", "Fake Client certificate data", LEVEL_EXPERT)
@@ -301,7 +301,8 @@ static void option_map_init(uint8_t settingsId)
 
     OPTION_TREE_DESC("cloud", "Cloud", LEVEL_BASIC)
     OPTION_BOOL("cloud.enabled", &settings->cloud.enabled, FALSE, "Enable TB1 HTTPS Upstream", "Enable HTTPS forwarding to Boxine/Toniecloud for TB1", LEVEL_BASIC)
-    OPTION_BOOL("cloud.tb2_enabled", &settings->cloud.tb2_enabled, FALSE, "Enable TB2 HTTPS Upstream", "Enable transparent TB2 HTTPS forwarding and capture", LEVEL_BASIC)
+    OPTION_BOOL("cloud.tb2_enabled", &settings->cloud.tb2_enabled, FALSE, "Enable TB2 HTTPS Upstream", "Enable the TB2 HTTPS upstream path", LEVEL_BASIC)
+    OPTION_BOOL("cloud.tb2_passthrough_enabled", &settings->cloud.tb2_passthrough_enabled, FALSE, "Enable transparent TB2 HTTPS capture forwarder", "Forward TB2 HTTPS traffic unchanged while recording a full local capture", LEVEL_DETAIL)
     OPTION_STRING("cloud.remote_hostname", &settings->cloud.remote_hostname, "prod.de.tbs.toys", "Cloud hostname", "Hostname of remote cloud server", LEVEL_EXPERT)
     OPTION_STRING("cloud.remote_hostname_tb2", &settings->cloud.remote_hostname_tb2, "tbs2.tonie.cloud", "TB2 HTTPS server hostname", "Hostname of the TB2 HTTPS upstream server", LEVEL_EXPERT)
     OPTION_UNSIGNED("cloud.remote_port", &settings->cloud.remote_port, 443, 1, 65535, "Cloud port", "Port of remote cloud server", LEVEL_EXPERT)
@@ -474,6 +475,7 @@ static void option_map_init(uint8_t settingsId)
     OPTION_STRING("mqtt_server.cert.crt", &settings->mqtt_server.cert_crt, "certs/server_tb2/ici.pem", "Server certificate", "Path to server certificate file (PEM format)", LEVEL_DETAIL)
     OPTION_STRING("mqtt_server.cert.key", &settings->mqtt_server.cert_key, "certs/server_tb2/ici.key", "Server key", "Path to server key file (PEM format)", LEVEL_DETAIL)
     OPTION_BOOL("mqtt_server.log_full_payloads", &settings->mqtt_server.log_full_payloads, FALSE, "Log full MQTT payloads", "Log large MQTT server payloads as base64 for reverse-engineering exports.", LEVEL_EXPERT)
+    OPTION_BOOL("mqtt_server.log_connect_details", &settings->mqtt_server.log_connect_details, FALSE, "Log MQTT CONNECT details", "Log MQTT CONNECT structure and plain client ID at debug level 5. Username, password and Will fields remain masked.", LEVEL_EXPERT)
 
     OPTION_TREE_DESC("hass", "Home Assistant", LEVEL_DETAIL)
     OPTION_STRING("hass.name", &settings->hass.name, "teddyCloud - Server", "Home Assistant name", "Home Assistant name", LEVEL_DETAIL)
@@ -588,11 +590,11 @@ settings_t *get_settings_id(uint8_t settingsId)
 }
 
 /**
- * Point both generation-specific option groups at the physical certificate
- * files of one box. Runtime selection still exposes and loads only the group
- * matching toniebox.boxGeneration.
+ * Point the TB1 option group and, when requested for migration compatibility,
+ * the TB2 option group at the physical certificate files of one box.
  */
-static void settings_set_overlay_client_cert_paths(uint8_t settingsId, const char *certDir)
+static void settings_set_overlay_client_cert_paths(uint8_t settingsId, const char *certDir,
+                                                   bool_t includeTb2)
 {
     char *ca = custom_asprintf("%s%c%s", certDir, PATH_SEPARATOR, "ca.der");
     char *crt = custom_asprintf("%s%c%s", certDir, PATH_SEPARATOR, "client.der");
@@ -601,9 +603,12 @@ static void settings_set_overlay_client_cert_paths(uint8_t settingsId, const cha
     settings_set_string_id("core.client_cert_tb1.file.ca", ca, settingsId);
     settings_set_string_id("core.client_cert_tb1.file.crt", crt, settingsId);
     settings_set_string_id("core.client_cert_tb1.file.key", key, settingsId);
-    settings_set_string_id("core.client_cert_tb2.file.ca", ca, settingsId);
-    settings_set_string_id("core.client_cert_tb2.file.crt", crt, settingsId);
-    settings_set_string_id("core.client_cert_tb2.file.key", key, settingsId);
+    if (includeTb2)
+    {
+        settings_set_string_id("core.client_cert_tb2.file.ca", ca, settingsId);
+        settings_set_string_id("core.client_cert_tb2.file.crt", crt, settingsId);
+        settings_set_string_id("core.client_cert_tb2.file.key", key, settingsId);
+    }
 
     osFreeMem(ca);
     osFreeMem(crt);
@@ -613,7 +618,9 @@ static void settings_set_overlay_client_cert_paths(uint8_t settingsId, const cha
 static bool settings_migrate_legacy_tb1_option(uint8_t settingsId, const char *legacyName, const char *tb1Name)
 {
     setting_item_t *legacyOption = settings_get_by_name_id(legacyName, settingsId);
-    if (legacyOption == NULL || legacyOption->type != TYPE_STRING)
+    setting_item_t *tb1Option = settings_get_by_name_id(tb1Name, settingsId);
+    if (legacyOption == NULL || legacyOption->type != TYPE_STRING ||
+        tb1Option == NULL || tb1Option->type != TYPE_STRING)
     {
         return false;
     }
@@ -623,7 +630,32 @@ static bool settings_migrate_legacy_tb1_option(uint8_t settingsId, const char *l
     }
 
     const char *legacyValue = *((char **)legacyOption->ptr);
-    return legacyValue != NULL && settings_set_string_id(tb1Name, legacyValue, settingsId);
+    if (legacyValue == NULL)
+    {
+        return false;
+    }
+
+    /* settings_load() already holds MUTEX_SETTINGS. The public setter would
+     * enter settings_changed_id() for global options and deadlock here. */
+    char *migratedValue = strdup(legacyValue);
+    if (migratedValue == NULL)
+    {
+        return false;
+    }
+
+    char **tb1Value = (char **)tb1Option->ptr;
+    char *oldValue = *tb1Value;
+    *tb1Value = migratedValue;
+    if (settingsId > 0)
+    {
+        tb1Option->overlayed = true;
+    }
+    if (oldValue != NULL)
+    {
+        osFreeMem(oldValue);
+    }
+
+    return true;
 }
 
 static void settings_migrate_legacy_tb1_client_cert(uint8_t settingsId)
@@ -681,7 +713,7 @@ static bool settings_migrate_id(uint8_t settingsId)
     }
     if (settings->configVersion < 18 && settingsId > 0)
     {
-        settings_set_overlay_client_cert_paths(settingsId, settings->core.certdir);
+        settings_set_overlay_client_cert_paths(settingsId, settings->core.certdir, TRUE);
     }
     if (settings->configVersion < 19)
     {
@@ -724,7 +756,7 @@ settings_t *get_settings_cn(const char *commonName)
                 osStringToLower(boxId);
                 char *customCertDir = custom_asprintf("%s%c%s", certDir, PATH_SEPARATOR, boxId);
                 settings_set_string_id("core.certdir", customCertDir, i);
-                settings_set_overlay_client_cert_paths(i, customCertDir);
+                settings_set_overlay_client_cert_paths(i, customCertDir, FALSE);
                 osFreeMem(customCertDir);
 
                 Settings_Overlay[i].internal.config_used = true;
@@ -1518,11 +1550,23 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
         return false;
     }
 
+    if (settingsId == 0 && !osStrcmp(item, "cloud.tb2_passthrough_enabled") &&
+        value && !Settings_Overlay[0].cloud.tb2_enabled)
+    {
+        TRACE_WARNING("TB2 HTTPS passthrough requires cloud.tb2_enabled\r\n");
+        return false;
+    }
+
     *((bool *)opt->ptr) = value;
 
     if (settingsId == 0 && !osStrcmp(item, "mqtt_client_upstream.enabled") && !value)
     {
         Settings_Overlay[0].mqtt_client_upstream.passthrough_enabled = false;
+    }
+
+    if (settingsId == 0 && !osStrcmp(item, "cloud.tb2_enabled") && !value)
+    {
+        Settings_Overlay[0].cloud.tb2_passthrough_enabled = false;
     }
 
     if (settingsId > 0)
@@ -1995,12 +2039,29 @@ void settings_load_all_certs()
 
 error_t settings_try_load_certs_id(uint8_t settingsId)
 {
-    ERR_RETURN(load_cert("internal.server.ca", "core.server_cert.file.ca", "core.server_cert.data.ca", settingsId));
-    ERR_RETURN(load_cert("internal.server.ca_key", "core.server_cert.file.ca_key", "core.server_cert.data.ca_key", settingsId));
-    ERR_RETURN(load_cert("internal.server.crt", "core.server_cert.file.crt", "core.server_cert.data.crt", settingsId));
-    ERR_RETURN(load_cert("internal.server.key", "core.server_cert.file.key", "core.server_cert.data.key", settingsId));
+    error_t tb1_error = NO_ERROR;
+    error_t error = load_cert("internal.server.ca", "core.server_cert.file.ca", "core.server_cert.data.ca", settingsId);
+    if (error != NO_ERROR)
+    {
+        tb1_error = error;
+    }
+    error = load_cert("internal.server.ca_key", "core.server_cert.file.ca_key", "core.server_cert.data.ca_key", settingsId);
+    if (error != NO_ERROR && tb1_error == NO_ERROR)
+    {
+        tb1_error = error;
+    }
+    error = load_cert("internal.server.crt", "core.server_cert.file.crt", "core.server_cert.data.crt", settingsId);
+    if (error != NO_ERROR && tb1_error == NO_ERROR)
+    {
+        tb1_error = error;
+    }
+    error = load_cert("internal.server.key", "core.server_cert.file.key", "core.server_cert.data.key", settingsId);
+    if (error != NO_ERROR && tb1_error == NO_ERROR)
+    {
+        tb1_error = error;
+    }
 
-    /* do not fail if TB2 certs are missing, just load them if they exist */
+    /* Load TB2 independently so a missing TB1 path cannot trigger TB2 regeneration. */
     load_cert("internal.server_tb2.ca", "core.server_cert_tb2.file.ca", "core.server_cert_tb2.data.ca", settingsId);
     load_cert("internal.server_tb2.ca_key", "core.server_cert_tb2.file.ca_key", "core.server_cert_tb2.data.ca_key", settingsId);
     load_cert("internal.server_tb2.crt", "core.server_cert_tb2.file.crt", "core.server_cert_tb2.data.crt", settingsId);
@@ -2032,21 +2093,26 @@ error_t settings_try_load_certs_id(uint8_t settingsId)
 
     test_boxine_ca(settingsId);
 
-    const char *server_crt = settings_get_string("internal.server.crt");
-    const char *server_ca_crt = settings_get_string("internal.server.ca");
+    const char *server_crt = settings_get_string_id("internal.server.crt", settingsId);
+    const char *server_ca_crt = settings_get_string_id("internal.server.ca", settingsId);
+    settings_set_string_id("internal.server.cert_chain", "", settingsId);
+    if (server_crt && server_ca_crt && osStrlen(server_crt) > 0 && osStrlen(server_ca_crt) > 0)
+    {
+        char *chain = custom_asprintf("%s%s", server_crt, server_ca_crt);
+        settings_set_string_id("internal.server.cert_chain", chain, settingsId);
+        osFreeMem(chain);
+    }
 
-    char *chain = custom_asprintf("%s%s", server_crt, server_ca_crt);
-    settings_set_string_id("internal.server.cert_chain", chain, settingsId);
-    osFreeMem(chain);
-
-    const char *server_crt_tb2 = settings_get_string("internal.server_tb2.crt");
-    const char *server_ca_crt_tb2 = settings_get_string("internal.server_tb2.ca");
-    if (server_crt_tb2 && server_ca_crt_tb2 && osStrlen(server_crt_tb2) > 0) {
+    const char *server_crt_tb2 = settings_get_string_id("internal.server_tb2.crt", settingsId);
+    const char *server_ca_crt_tb2 = settings_get_string_id("internal.server_tb2.ca", settingsId);
+    settings_set_string_id("internal.server_tb2.cert_chain", "", settingsId);
+    if (server_crt_tb2 && server_ca_crt_tb2 && osStrlen(server_crt_tb2) > 0 && osStrlen(server_ca_crt_tb2) > 0)
+    {
         char *chain_tb2 = custom_asprintf("%s%s", server_crt_tb2, server_ca_crt_tb2);
         settings_set_string_id("internal.server_tb2.cert_chain", chain_tb2, settingsId);
         osFreeMem(chain_tb2);
     }
-    return NO_ERROR;
+    return tb1_error;
 }
 
 error_t settings_load_certs_id(uint8_t settingsId)
@@ -2064,26 +2130,36 @@ error_t settings_load_certs_id(uint8_t settingsId)
             TRACE_INFO("   No TB1 certificates found. Generating.\r\n");
             TRACE_INFO("   This will take several minutes...\r\n");
             TRACE_INFO("********************************************\r\n");
-            cert_generate_default();
+            error_t generation_error = cert_generate_default();
+            if (generation_error != NO_ERROR)
+            {
+                TRACE_ERROR("TB1 certificate generation failed (error %d)\r\n", generation_error);
+                return generation_error;
+            }
             TRACE_INFO("********************************************\r\n");
             TRACE_INFO("   FINISHED TB1 GENERATION\r\n");
             TRACE_INFO("********************************************\r\n");
         }
 
         const char *ca_tb2 = settings_get_string_id("internal.server_tb2.ca", settingsId);
-        const char *key_tb2 = settings_get_string_id("internal.server_tb2.key", settingsId);
+        const char *ca_key_tb2 = settings_get_string_id("internal.server_tb2.ca_key", settingsId);
         const char *crt_tb2 = settings_get_string_id("internal.server_tb2.crt", settingsId);
-        const char *pkey_tb2 = settings_get_string_id("internal.server_tb2.key", settingsId);
+        const char *key_tb2 = settings_get_string_id("internal.server_tb2.key", settingsId);
 
         if (!ca_tb2 || osStrlen(ca_tb2) == 0 ||
-            !key_tb2 || osStrlen(key_tb2) == 0 ||
+            !ca_key_tb2 || osStrlen(ca_key_tb2) == 0 ||
             !crt_tb2 || osStrlen(crt_tb2) == 0 ||
-            !pkey_tb2 || osStrlen(pkey_tb2) == 0)
+            !key_tb2 || osStrlen(key_tb2) == 0)
         {
             TRACE_INFO("********************************************\r\n");
             TRACE_INFO("   No TB2 certificates found. Generating.\r\n");
             TRACE_INFO("********************************************\r\n");
-            cert_generate_default_tb2();
+            error_t generation_error = cert_generate_default_tb2();
+            if (generation_error != NO_ERROR)
+            {
+                TRACE_ERROR("TB2 certificate generation failed (error %d)\r\n", generation_error);
+                return generation_error;
+            }
             TRACE_INFO("********************************************\r\n");
             TRACE_INFO("   FINISHED TB2 GENERATION\r\n");
             TRACE_INFO("********************************************\r\n");

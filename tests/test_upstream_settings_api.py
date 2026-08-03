@@ -25,6 +25,7 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         "cloud.tb2_capture_dir",
         "cloud.tb2_capture_max_mib",
         "cloud.tb2_enabled",
+        "cloud.tb2_passthrough_enabled",
     )
 
     @classmethod
@@ -119,6 +120,9 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         self.assertFalse(https_enabled["valueInit"])
         self.assertFalse(https_enabled["readOnly"])
         self.assertEqual(https_enabled["label"], "Enable TB2 HTTPS Upstream")
+        https_passthrough = options["cloud.tb2_passthrough_enabled"]
+        self.assertFalse(https_passthrough["valueInit"])
+        self.assertTrue(https_passthrough["readOnly"])
         self.assertEqual(options["cloud.remote_port_tb2"]["valueInit"], 443)
         self.assertEqual(
             options["cloud.remote_hostname_tb2"]["valueInit"],
@@ -129,6 +133,14 @@ class UpstreamSettingsApiTests(unittest.TestCase):
             "data/diagnostics/tb2-https-passthrough",
         )
         self.assertEqual(options["cloud.tb2_capture_max_mib"]["valueInit"], 4096)
+
+        tb1_ca = options["core.client_cert_tb1.file.ca"]
+        tb2_ca = options["core.client_cert_tb2.file.ca"]
+        self.assertEqual(tb1_ca["label"], "Client CA (TB1)")
+        self.assertEqual(tb1_ca["valueInit"], "certs/client_tb1/ca.der")
+        self.assertEqual(tb2_ca["label"], "Client CA (TB2)")
+        self.assertEqual(tb2_ca["valueInit"], "certs/client_tb2/ca.der")
+        self.assertNotEqual(tb1_ca["valueInit"], tb2_ca["valueInit"])
 
     def test_mqtt_passthrough_requires_upstream_and_disables_with_it(self):
         self.set_setting("mqtt_client_upstream.enabled", "false")
@@ -146,18 +158,30 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         self.set_setting("mqtt_client_upstream.enabled", "false")
         self.assertEqual(self.get_setting("mqtt_client_upstream.passthrough_enabled"), "false")
 
-    def test_tb2_https_enable_switch_can_be_changed(self):
+    def test_tb2_https_passthrough_requires_upstream_and_disables_with_it(self):
+        self.set_setting("cloud.tb2_enabled", "false")
+        status, body = self.set_setting("cloud.tb2_passthrough_enabled", "true")
+        self.assertEqual(status, 200)
+        self.assertEqual(body.strip(), "ERROR")
+
         status, body = self.set_setting("cloud.tb2_enabled", "true")
         self.assertEqual(status, 200)
         self.assertEqual(body.strip(), "OK")
         self.assertEqual(self.get_setting("cloud.tb2_enabled"), "true")
+        status, body = self.set_setting("cloud.tb2_passthrough_enabled", "true")
+        self.assertEqual(status, 200)
+        self.assertEqual(body.strip(), "OK")
 
         status, body = self.request("GET", "/api/tb2-https-upstream/status")
         self.assertEqual(status, 200)
         payload = json.loads(body)
         self.assertTrue(payload["enabled"])
-        self.assertIn(payload["state"], ("disabled", "online", "error"))
+        self.assertTrue(payload["passthrough_enabled"])
+        self.assertIn(payload["state"], ("armed", "connecting", "tunneling", "online", "error"))
         self.assertEqual(payload["hostname"], self.get_setting("cloud.remote_hostname_tb2"))
+
+        self.set_setting("cloud.tb2_enabled", "false")
+        self.assertEqual(self.get_setting("cloud.tb2_passthrough_enabled"), "false")
 
     def test_configurable_endpoints_survive_reload(self):
         persisted = {
@@ -172,6 +196,7 @@ class UpstreamSettingsApiTests(unittest.TestCase):
             "cloud.tb2_capture_dir": "data/diagnostics/tb2-test-capture",
             "cloud.tb2_capture_max_mib": "128",
             "cloud.tb2_enabled": "true",
+            "cloud.tb2_passthrough_enabled": "true",
         }
         runtime_only = {
             "mqtt_client_upstream.port": "18884",
@@ -185,6 +210,7 @@ class UpstreamSettingsApiTests(unittest.TestCase):
             "cloud.tb2_capture_dir": "data/diagnostics/tb2-runtime-only",
             "cloud.tb2_capture_max_mib": "129",
             "cloud.tb2_enabled": "false",
+            "cloud.tb2_passthrough_enabled": "false",
         }
 
         for name, value in persisted.items():
