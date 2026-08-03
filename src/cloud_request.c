@@ -91,21 +91,23 @@ static error_t httpClientTlsInitCallbackClientAuthBoxine(HttpClientContext *cont
     req_cbr_t *cbr_ctx = context->sourceCtx;
     client_ctx_t *client_ctx = ((cbr_ctx_t *)cbr_ctx->ctx)->client_ctx;
     settings_t *settings = client_ctx->settings;
-    const settings_cert_t *clientCert = &settings->internal.client_tb1;
-    const settings_cert_t *clientCertFiles = &settings->core.client_cert_tb1.file;
+    const bool_t useTb2Identity = settings->toniebox.boxGeneration == GENERATION_TB2;
+    const char *generation = useTb2Identity ? "TB2" : "TB1";
+    const settings_cert_t *clientCert = useTb2Identity ? &settings->internal.client_tb2 : &settings->internal.client_tb1;
+    const settings_cert_t *clientCertFiles = useTb2Identity ? &settings->core.client_cert_tb2.file : &settings->core.client_cert_tb1.file;
 
     if (settings->internal.overlayNumber != 0 && client_cert_is_incomplete(clientCert))
     {
-        TRACE_WARNING("Missing TB1 Boxine certificates for overlay %u; trying the global TB1 certificate set\r\n",
-                      (unsigned int)settings->internal.overlayNumber);
+        TRACE_WARNING("Missing %s Boxine certificates for overlay %u; trying the global %s certificate set\r\n",
+                      generation, (unsigned int)settings->internal.overlayNumber, generation);
         settings = get_settings();
-        clientCert = &settings->internal.client_tb1;
-        clientCertFiles = &settings->core.client_cert_tb1.file;
+        clientCert = useTb2Identity ? &settings->internal.client_tb2 : &settings->internal.client_tb1;
+        clientCertFiles = useTb2Identity ? &settings->core.client_cert_tb2.file : &settings->core.client_cert_tb1.file;
     }
 
     if (client_cert_is_incomplete(clientCert))
     {
-        TRACE_ERROR("Failed to get complete TB1 Boxine client certificates:\r\n");
+        TRACE_ERROR("Failed to get complete %s Boxine client certificates:\r\n", generation);
         TRACE_ERROR(" ca.der (%s)\r\n", clientCertFiles->ca);
         TRACE_ERROR(" client.der (%s)\r\n", clientCertFiles->crt);
         TRACE_ERROR(" private.der (%s)\r\n", clientCertFiles->key);

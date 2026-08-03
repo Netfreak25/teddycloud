@@ -105,6 +105,7 @@ static settings_t *tb2_settings_from_certificate(HttpConnection *connection)
 {
     if (connection == NULL || connection->tlsContext == NULL)
     {
+        TRACE_DEBUG("TB2 HTTPS passthrough skipped: TLS context unavailable\r\n");
         return NULL;
     }
 
@@ -112,6 +113,7 @@ static settings_t *tb2_settings_from_certificate(HttpConnection *connection)
     const char *issuer = connection->tlsContext->client_cert_issuer;
     if (subject == NULL || issuer == NULL || subject[0] == '\0' || issuer[0] == '\0')
     {
+        TRACE_DEBUG("TB2 HTTPS passthrough skipped: client certificate identity unavailable\r\n");
         return NULL;
     }
 
@@ -128,6 +130,7 @@ static settings_t *tb2_settings_from_certificate(HttpConnection *connection)
     }
     else
     {
+        TRACE_DEBUG("TB2 HTTPS passthrough skipped: unsupported client certificate subject format\r\n");
         return NULL;
     }
     osStringToLower(common_name);
@@ -142,6 +145,7 @@ static settings_t *tb2_settings_from_certificate(HttpConnection *connection)
     }
     if (settings == NULL || !settings->internal.config_used)
     {
+        TRACE_DEBUG("TB2 HTTPS passthrough skipped: client certificate is not mapped to an active overlay\r\n");
         return NULL;
     }
 
@@ -149,10 +153,16 @@ static settings_t *tb2_settings_from_certificate(HttpConnection *connection)
     {
         if (!tb2_issuer)
         {
+            TRACE_DEBUG("TB2 HTTPS passthrough skipped: mapped overlay is not TB2 and issuer is not the TB2 root\r\n");
             return NULL;
         }
-        settings_set_unsigned_id("toniebox.boxGeneration", GENERATION_TB2,
-                                 settings->internal.overlayNumber);
+        if (!settings_set_unsigned_id("toniebox.boxGeneration", GENERATION_TB2,
+                                      settings->internal.overlayNumber))
+        {
+            TRACE_DEBUG("TB2 HTTPS passthrough skipped: failed to mark mapped overlay as TB2\r\n");
+            return NULL;
+        }
+        settings_try_load_certs_id(settings->internal.overlayNumber);
     }
 
     return settings;
@@ -700,12 +710,14 @@ error_t tb2_https_passthrough_post_tls(HttpConnection *connection, bool_t *handl
     settings_t *global = get_settings();
     if (!global->cloud.tb2_enabled)
     {
+        TRACE_DEBUG("TB2 HTTPS passthrough skipped: forwarding is disabled\r\n");
         return NO_ERROR;
     }
 
     settings_t *box_settings = tb2_settings_from_certificate(connection);
     if (box_settings == NULL)
     {
+        TRACE_DEBUG("TB2 HTTPS passthrough skipped: no eligible TB2 overlay resolved\r\n");
         return NO_ERROR;
     }
     *handled = TRUE;

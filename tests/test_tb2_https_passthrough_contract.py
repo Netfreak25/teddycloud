@@ -49,6 +49,10 @@ class Tb2HttpsPassthroughContractTests(unittest.TestCase):
         self.assertIn('"data/diagnostics/tb2-https-passthrough"', self.settings)
         self.assertIn("&settings->cloud.tb2_capture_max_mib, 4096", self.settings)
 
+    def test_passthrough_logs_why_a_connection_is_skipped(self):
+        self.assertIn("TB2 HTTPS passthrough skipped: client certificate identity unavailable", self.passthrough)
+        self.assertIn("TB2 HTTPS passthrough skipped: client certificate is not mapped to an active overlay", self.passthrough)
+        self.assertIn("TB2 HTTPS passthrough skipped: no eligible TB2 overlay resolved", self.passthrough)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
