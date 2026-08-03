@@ -95,9 +95,6 @@
             (() => {
                 const commitShortSettingUrl = "/api/settings/get/internal.version.git_sha_short";
                 const commitLongSettingUrl = "/api/settings/get/internal.version.git_sha";
-                const installedCommitShortSettingUrl = "/api/settings/get/internal.version.package_git_sha_short";
-                const installedCommitLongSettingUrl = "/api/settings/get/internal.version.package_git_sha";
-                const installedCommitExplicitSettingUrl = "/api/settings/get/internal.version.package_git_sha_set";
                 const unknownCommit = "unbekannt";
 
                 const fetchSettingText = async (url) => {
@@ -116,29 +113,12 @@
 
                     const shortSha = await fetchSettingText(commitShortSettingUrl).catch(() => "");
                     const fullSha = await fetchSettingText(commitLongSettingUrl).catch(() => "");
-                    const installedShortSha = await fetchSettingText(installedCommitShortSettingUrl).catch(() => "");
-                    const installedFullSha = await fetchSettingText(installedCommitLongSettingUrl).catch(() => "");
-                    const installedExplicit = (await fetchSettingText(installedCommitExplicitSettingUrl).catch(() => "0")).trim();
                     const fallbackShortSha = fullSha ? fullSha.slice(0, 7) : "";
-                    const fallbackInstalledShortSha = installedFullSha ? installedFullSha.slice(0, 7) : "";
                     const displayedCommit = shortSha || fallbackShortSha || unknownCommit;
-                    const displayedInstalledCommit = installedShortSha || fallbackInstalledShortSha || "";
-                    const hasExplicitInstalledCommit = installedExplicit === "1" || installedExplicit.toLowerCase() === "true";
 
-                    commitElement.textContent = displayedInstalledCommit
-                        ? hasExplicitInstalledCommit
-                            ? `${displayedCommit} (${displayedInstalledCommit})`
-                            : `${displayedCommit} (unbekannt: patch install commit nicht explizit gesetzt)`
-                        : displayedCommit;
-                    if (fullSha || installedFullSha) {
-                        const titleParts = [];
-                        if (fullSha) {
-                            titleParts.push(`Build: ${fullSha}`);
-                        }
-                        if (installedFullSha) {
-                            titleParts.push(`Installed patch: ${installedFullSha}`);
-                        }
-                        commitElement.title = titleParts.join(" | ");
+                    commitElement.textContent = displayedCommit;
+                    if (fullSha) {
+                        commitElement.title = `Build: ${fullSha}`;
                     }
                 };
 
