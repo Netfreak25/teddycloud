@@ -16,17 +16,17 @@ class Tb1BoxineCertificateContractTests(unittest.TestCase):
         cls.settings = (ROOT / "src/settings.c").read_text(encoding="utf-8")
         cls.settings_header = (ROOT / "include/settings.h").read_text(encoding="utf-8")
 
-    def test_boxine_callback_selects_explicit_identity_by_box_generation(self):
+    def test_boxine_callback_uses_only_tb1_identity(self):
         callback = self.cloud[
             self.cloud.index("httpClientTlsInitCallbackClientAuthBoxine") :
             self.cloud.index("int_t cloud_request_get")
         ]
         self.assertIn("settings->internal.client_tb1", callback)
         self.assertIn("settings->core.client_cert_tb1.file", callback)
-        self.assertIn("settings->internal.client_tb2", callback)
-        self.assertIn("settings->core.client_cert_tb2.file", callback)
-        self.assertIn("settings->toniebox.boxGeneration == GENERATION_TB2", callback)
         self.assertIn("settings = get_settings();", callback)
+        self.assertNotIn("settings->internal.client_tb2", callback)
+        self.assertNotIn("settings->core.client_cert_tb2.file", callback)
+        self.assertNotIn("boxGeneration", callback)
 
     def test_v20_keeps_legacy_tb1_migration_before_loading_certificates(self):
         self.assertIn("#define CONFIG_VERSION 20", self.settings_header)

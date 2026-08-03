@@ -979,13 +979,21 @@
         "boxineStatusOnline": "Connected to Boxine/Toniecloud",
         "tb2CloudStatusOffline": "No HTTPS connection to the TB2 cloud target {{hostname}}",
         "tb2CloudUnavailable": "The TB2 cloud connection is not available yet. There is no HTTPS connection to {{hostname}}.",
+        "tb2HttpsMode": {
+            "active": "Active mode: {{mode}}",
+            "disabled": "Disabled",
+            "mixed": "Mixed per box",
+            "transparent": "Transparent proxy",
+            "v3": "v3 cloud path"
+        },
         "tb2HttpsStatus": {
             "disabled": "TB2 HTTPS forwarding is disabled.",
-            "standby": "TB2 HTTPS upstream is enabled; transparent forwarding is disabled.",
-            "armed": "TB2 HTTPS forwarding is armed and waiting for a connection.",
+            "ready": "TB2 HTTPS forwarding is ready for {{hostname}}:{{port}}.",
+            "request_active": "A TB2 v3 request to {{hostname}}:{{port}} is active.",
             "connecting": "Connecting to {{hostname}}:{{port}}.",
+            "httpStatus": "Last v3 HTTP status: {{httpStatus}}.",
             "tunneling": "TB2 HTTPS tunnel to {{hostname}}:{{port}} is active.",
-            "online": "The last TB2 HTTPS tunnel to {{hostname}}:{{port}} completed successfully.",
+            "success": "The last TB2 HTTPS operation completed successfully.",
             "error": "TB2 HTTPS forwarding failed ({{errorCode}})."
         },
         "teddycloudStatusOffline": "Teddycloud server offline",
@@ -1034,6 +1042,11 @@
         "information": "Information",
         "keepScrolling": "Keep scrolling to see more options.",
         "legacyGui": "Legacy Admin GUI",
+        "cloudGroups": {
+            "global": "Global",
+            "title": "Cloud",
+            "v3Endpoints": "TB2 v3 endpoint forwarding"
+        },
         "mqttForwarding": {
             "suppress": "Suppress",
             "description": "Enabled switches forward the corresponding topic in both directions.",

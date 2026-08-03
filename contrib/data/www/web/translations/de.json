@@ -977,6 +977,23 @@
         "boxineDisabled": "Boxine/Toniecloud ist derzeit deaktiviert. Aktiviere die Einstellung 'Cloud enabled', um die Verbindung zu Boxine/Toniecloud wiederherzustellen.",
         "boxineStatusOffline": "Nicht mit Boxine/Toniecloud verbunden",
         "boxineStatusOnline": "Mit Boxine/Toniecloud verbunden",
+        "tb2HttpsMode": {
+            "active": "Aktiver Modus: {{mode}}",
+            "disabled": "Deaktiviert",
+            "mixed": "Je Box gemischt",
+            "transparent": "Transparenter Proxy",
+            "v3": "v3-Cloudpfad"
+        },
+        "tb2HttpsStatus": {
+            "disabled": "Die TB2-HTTPS-Weiterleitung ist deaktiviert.",
+            "ready": "Die TB2-HTTPS-Weiterleitung ist f\u00fcr {{hostname}}:{{port}} bereit.",
+            "request_active": "Eine TB2-v3-Anfrage an {{hostname}}:{{port}} ist aktiv.",
+            "connecting": "Verbindung zu {{hostname}}:{{port}} wird hergestellt.",
+            "httpStatus": "Letzter v3-HTTP-Status: {{httpStatus}}.",
+            "tunneling": "Der TB2-HTTPS-Tunnel zu {{hostname}}:{{port}} ist aktiv.",
+            "success": "Der letzte TB2-HTTPS-Vorgang war erfolgreich.",
+            "error": "Die TB2-HTTPS-Weiterleitung ist fehlgeschlagen ({{errorCode}})."
+        },
         "tb2CloudStatusOffline": "Keine HTTPS-Verbindung zum TB2-Cloud-Ziel {{hostname}}",
         "tb2CloudUnavailable": "Die TB2-Cloud-Verbindung ist noch nicht verfügbar. Es besteht keine HTTPS-Verbindung zu {{hostname}}.",
         "teddycloudStatusOffline": "TeddyCloud Server offline",
@@ -1025,6 +1042,11 @@
         "information": "Information",
         "keepScrolling": "Weiter scrollen, um weitere Optionen zu sehen.",
         "legacyGui": "Alte Admin-GUI",
+        "cloudGroups": {
+            "global": "Global",
+            "title": "Cloud",
+            "v3Endpoints": "Weiterleitung der TB2-v3-Endpunkte"
+        },
         "mqttForwarding": {
             "suppress": "Unterdr\u00fccken",
             "description": "Aktive Schalter leiten das jeweilige Topic in beide Richtungen weiter.",
