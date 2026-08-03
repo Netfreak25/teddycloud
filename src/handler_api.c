@@ -341,10 +341,6 @@ error_t handleApiGetIndex(HttpConnection *connection, const char_t *uri, const c
         {
             read_only = !get_settings_ovl(overlay)->mqtt_client_upstream.enabled;
         }
-        else if (!osStrcmp(opt->option_name, "cloud.tb2_passthrough_enabled"))
-        {
-            read_only = !get_settings_ovl(overlay)->cloud.tb2_enabled;
-        }
         cJSON_AddBoolToObject(jsonEntry, "readOnly", read_only);
         cJSON_AddNumberToObject(jsonEntry, "level", opt->level);
 
@@ -771,15 +767,15 @@ error_t handleApiSettingsReset(HttpConnection *connection, const char_t *uri, co
         TRACE_DEBUG("got overlay '%s'\r\n", overlay);
     }
     setting_item_t *opt = settings_get_by_name_ovl(item, overlay);
-    setting_item_t *opt_src = settings_get_by_name(item);
     bool success = false;
 
-    if (opt && opt_src)
+    if (opt)
     {
-        if (opt->overlayed || opt == opt_src)
+        uint8_t settingsId = get_overlay_id(overlay);
+        if (opt->overlayed || settingsId == 0)
         {
-            overlay_settings_init_opt(opt, opt_src);
-            if (opt == opt_src)
+            success = settings_reset_id(item, settingsId);
+            if (settingsId == 0)
             {
                 TRACE_INFO("Setting: '%s' reset to default\r\n", item);
             }
@@ -787,7 +783,6 @@ error_t handleApiSettingsReset(HttpConnection *connection, const char_t *uri, co
             {
                 TRACE_INFO("Setting: '%s' overlay removed\r\n", item);
             }
-            success = true;
         }
         else
         {

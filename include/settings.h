@@ -26,7 +26,7 @@
 #define TONIEBOX_CUSTOM_JSON_FILE "tonieboxes.custom.json"
 #define CONFIG_FILE "config.ini"
 #define CONFIG_OVERLAY_FILE "config.overlay.ini"
-#define CONFIG_VERSION 19
+#define CONFIG_VERSION 20
 #define MAX_OVERLAYS 16 + 1
 
 typedef enum
@@ -75,6 +75,9 @@ typedef struct
 {
     bool enabled;
     bool tb2_enabled;
+    bool tb2_v3_enabled;
+    bool tb2_capture_enabled;
+    /* Load-only compatibility value for configuration versions below 20. */
     bool tb2_passthrough_enabled;
     char *remote_hostname;
     char *remote_hostname_tb2;
@@ -745,6 +748,7 @@ setting_item_t *settings_get_ovl(int index, const char *overlay_name);
 bool settings_set_bool(const char *item, bool value);
 bool settings_set_bool_ovl(const char *item, bool value, const char *overlay_name);
 bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId);
+bool settings_reset_id(const char *item, uint8_t settingsId);
 
 /**
  * @brief Gets the value of a boolean setting item.

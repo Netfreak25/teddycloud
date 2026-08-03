@@ -28,8 +28,8 @@ class Tb1BoxineCertificateContractTests(unittest.TestCase):
         self.assertIn("settings->toniebox.boxGeneration == GENERATION_TB2", callback)
         self.assertIn("settings = get_settings();", callback)
 
-    def test_v19_migrates_legacy_tb1_values_before_loading_certificates(self):
-        self.assertIn("#define CONFIG_VERSION 19", self.settings_header)
+    def test_v20_keeps_legacy_tb1_migration_before_loading_certificates(self):
+        self.assertIn("#define CONFIG_VERSION 20", self.settings_header)
         self.assertIn('OPTION_INTERNAL_STRING("core.client_cert.file.ca"', self.settings)
         self.assertIn('OPTION_STRING("core.client_cert_tb1.file.ca"', self.settings)
         self.assertIn('"core.client_cert.file.ca",', self.settings)
@@ -48,7 +48,7 @@ class Tb1BoxineCertificateContractTests(unittest.TestCase):
             overlay_load.index("settings_load_certs_id(i)"),
         )
 
-    def test_v19_migration_does_not_reenter_settings_mutex(self):
+    def test_tb1_migration_does_not_reenter_settings_mutex(self):
         migration = self.settings[
             self.settings.index("static bool settings_migrate_legacy_tb1_option") :
             self.settings.index("static void settings_migrate_legacy_tb1_client_cert")

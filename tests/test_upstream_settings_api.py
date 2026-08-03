@@ -24,8 +24,9 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         "cloud.remote_hostname_tb2",
         "cloud.tb2_capture_dir",
         "cloud.tb2_capture_max_mib",
+        "cloud.tb2_capture_enabled",
         "cloud.tb2_enabled",
-        "cloud.tb2_passthrough_enabled",
+        "cloud.tb2_v3_enabled",
     )
 
     @classmethod
@@ -119,10 +120,10 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         https_enabled = options["cloud.tb2_enabled"]
         self.assertFalse(https_enabled["valueInit"])
         self.assertFalse(https_enabled["readOnly"])
-        self.assertEqual(https_enabled["label"], "Enable TB2 HTTPS Upstream")
-        https_passthrough = options["cloud.tb2_passthrough_enabled"]
-        self.assertFalse(https_passthrough["valueInit"])
-        self.assertTrue(https_passthrough["readOnly"])
+        self.assertEqual(https_enabled["label"], "Enable transparent TB2 HTTPS proxy")
+        self.assertFalse(options["cloud.tb2_v3_enabled"]["valueInit"])
+        self.assertTrue(options["cloud.tb2_capture_enabled"]["valueInit"])
+        self.assertNotIn("cloud.tb2_passthrough_enabled", options)
         self.assertEqual(options["cloud.remote_port_tb2"]["valueInit"], 443)
         self.assertEqual(
             options["cloud.remote_hostname_tb2"]["valueInit"],
@@ -158,19 +159,21 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         self.set_setting("mqtt_client_upstream.enabled", "false")
         self.assertEqual(self.get_setting("mqtt_client_upstream.passthrough_enabled"), "false")
 
-    def test_tb2_https_passthrough_requires_upstream_and_disables_with_it(self):
+    def test_tb2_https_modes_are_mutually_exclusive(self):
         self.set_setting("cloud.tb2_enabled", "false")
-        status, body = self.set_setting("cloud.tb2_passthrough_enabled", "true")
+        self.set_setting("cloud.tb2_v3_enabled", "false")
+
+        status, body = self.set_setting("cloud.tb2_v3_enabled", "true")
         self.assertEqual(status, 200)
-        self.assertEqual(body.strip(), "ERROR")
+        self.assertEqual(body.strip(), "OK")
+        self.assertEqual(self.get_setting("cloud.tb2_v3_enabled"), "true")
+        self.assertEqual(self.get_setting("cloud.tb2_enabled"), "false")
 
         status, body = self.set_setting("cloud.tb2_enabled", "true")
         self.assertEqual(status, 200)
         self.assertEqual(body.strip(), "OK")
         self.assertEqual(self.get_setting("cloud.tb2_enabled"), "true")
-        status, body = self.set_setting("cloud.tb2_passthrough_enabled", "true")
-        self.assertEqual(status, 200)
-        self.assertEqual(body.strip(), "OK")
+        self.assertEqual(self.get_setting("cloud.tb2_v3_enabled"), "false")
 
         status, body = self.request("GET", "/api/tb2-https-upstream/status")
         self.assertEqual(status, 200)
@@ -180,8 +183,9 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         self.assertIn(payload["state"], ("armed", "connecting", "tunneling", "online", "error"))
         self.assertEqual(payload["hostname"], self.get_setting("cloud.remote_hostname_tb2"))
 
-        self.set_setting("cloud.tb2_enabled", "false")
-        self.assertEqual(self.get_setting("cloud.tb2_passthrough_enabled"), "false")
+        status, body = self.set_setting("cloud.tb2_passthrough_enabled", "false")
+        self.assertEqual(status, 200)
+        self.assertEqual(body.strip(), "ERROR")
 
     def test_configurable_endpoints_survive_reload(self):
         persisted = {
@@ -195,8 +199,9 @@ class UpstreamSettingsApiTests(unittest.TestCase):
             "cloud.remote_hostname_tb2": "tb2-https-test.invalid",
             "cloud.tb2_capture_dir": "data/diagnostics/tb2-test-capture",
             "cloud.tb2_capture_max_mib": "128",
+            "cloud.tb2_capture_enabled": "false",
             "cloud.tb2_enabled": "true",
-            "cloud.tb2_passthrough_enabled": "true",
+            "cloud.tb2_v3_enabled": "false",
         }
         runtime_only = {
             "mqtt_client_upstream.port": "18884",
@@ -209,8 +214,9 @@ class UpstreamSettingsApiTests(unittest.TestCase):
             "cloud.remote_hostname_tb2": "tb2-runtime-only.invalid",
             "cloud.tb2_capture_dir": "data/diagnostics/tb2-runtime-only",
             "cloud.tb2_capture_max_mib": "129",
+            "cloud.tb2_capture_enabled": "true",
             "cloud.tb2_enabled": "false",
-            "cloud.tb2_passthrough_enabled": "false",
+            "cloud.tb2_v3_enabled": "true",
         }
 
         for name, value in persisted.items():

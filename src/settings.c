@@ -27,6 +27,12 @@ static error_t settings_load_ovl(bool overlay);
 static setting_item_t *settings_get_by_name_id(const char *item, uint8_t settingsId);
 static char *settings_sanitize_box_id(const char *input_id);
 static bool settings_migrate_id(uint8_t settingsId);
+static void settings_normalize_tb2_https_modes(uint8_t settingsId);
+
+#define CLOUD_TB2_PROXY_SETTING "cloud.tb2_enabled"
+#define CLOUD_TB2_V3_SETTING "cloud.tb2_v3_enabled"
+#define CLOUD_TB2_CAPTURE_SETTING "cloud.tb2_capture_enabled"
+#define CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING "cloud.tb2_passthrough_enabled"
 
 /* macros */
 #define ERR_RETURN(command)    \
@@ -301,8 +307,10 @@ static void option_map_init(uint8_t settingsId)
 
     OPTION_TREE_DESC("cloud", "Cloud", LEVEL_BASIC)
     OPTION_BOOL("cloud.enabled", &settings->cloud.enabled, FALSE, "Enable TB1 HTTPS Upstream", "Enable HTTPS forwarding to Boxine/Toniecloud for TB1", LEVEL_BASIC)
-    OPTION_BOOL("cloud.tb2_enabled", &settings->cloud.tb2_enabled, FALSE, "Enable TB2 HTTPS Upstream", "Enable the TB2 HTTPS upstream path", LEVEL_BASIC)
-    OPTION_BOOL("cloud.tb2_passthrough_enabled", &settings->cloud.tb2_passthrough_enabled, FALSE, "Enable transparent TB2 HTTPS capture forwarder", "Forward TB2 HTTPS traffic unchanged while recording a full local capture", LEVEL_DETAIL)
+    OPTION_BOOL(CLOUD_TB2_PROXY_SETTING, &settings->cloud.tb2_enabled, FALSE, "Enable transparent TB2 HTTPS proxy", "Forward decrypted TB2 HTTPS traffic unchanged to the upstream server", LEVEL_BASIC)
+    OPTION_BOOL(CLOUD_TB2_V3_SETTING, &settings->cloud.tb2_v3_enabled, FALSE, "Enable TB2 v3 cloud path", "Handle and forward supported TB2 v3 HTTPS endpoints", LEVEL_BASIC)
+    OPTION_BOOL(CLOUD_TB2_CAPTURE_SETTING, &settings->cloud.tb2_capture_enabled, TRUE, "Capture transparent TB2 HTTPS traffic", "Write the complete unredacted transparent TB2 HTTPS traffic capture", LEVEL_DETAIL)
+    OPTION_INTERNAL_BOOL(CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING, &settings->cloud.tb2_passthrough_enabled, FALSE, "Legacy TB2 HTTPS passthrough switch", LEVEL_NONE)
     OPTION_STRING("cloud.remote_hostname", &settings->cloud.remote_hostname, "prod.de.tbs.toys", "Cloud hostname", "Hostname of remote cloud server", LEVEL_EXPERT)
     OPTION_STRING("cloud.remote_hostname_tb2", &settings->cloud.remote_hostname_tb2, "tbs2.tonie.cloud", "TB2 HTTPS server hostname", "Hostname of the TB2 HTTPS upstream server", LEVEL_EXPERT)
     OPTION_UNSIGNED("cloud.remote_port", &settings->cloud.remote_port, 443, 1, 65535, "Cloud port", "Port of remote cloud server", LEVEL_EXPERT)
@@ -683,6 +691,111 @@ static void settings_migrate_legacy_tb1_client_cert(uint8_t settingsId)
     }
 }
 
+static bool settings_is_tb2_https_mode(const char *item)
+{
+    return item != NULL &&
+           (!osStrcmp(item, CLOUD_TB2_PROXY_SETTING) || !osStrcmp(item, CLOUD_TB2_V3_SETTING));
+}
+
+static void settings_select_tb2_https_mode(uint8_t settingsId, const char *selectedMode)
+{
+    settings_t *settings = &Settings_Overlay[settingsId];
+    const char *disabledMode = !osStrcmp(selectedMode, CLOUD_TB2_PROXY_SETTING)
+                                   ? CLOUD_TB2_V3_SETTING
+                                   : CLOUD_TB2_PROXY_SETTING;
+    setting_item_t *disabledOption = settings_get_by_name_id(disabledMode, settingsId);
+
+    if (!osStrcmp(disabledMode, CLOUD_TB2_PROXY_SETTING))
+    {
+        settings->cloud.tb2_enabled = false;
+    }
+    else
+    {
+        settings->cloud.tb2_v3_enabled = false;
+    }
+    if (settingsId > 0 && disabledOption != NULL)
+    {
+        disabledOption->overlayed = true;
+    }
+    settings->cloud.tb2_passthrough_enabled = settings->cloud.tb2_enabled;
+}
+
+static void settings_normalize_tb2_https_modes(uint8_t settingsId)
+{
+    settings_t *settings = &Settings_Overlay[settingsId];
+
+    if (settings->cloud.tb2_enabled && settings->cloud.tb2_v3_enabled)
+    {
+        TRACE_WARNING("Both TB2 HTTPS modes are enabled for settings %u; keeping transparent proxy mode\r\n",
+                      (unsigned int)settingsId);
+        settings->cloud.tb2_v3_enabled = false;
+        if (settingsId > 0)
+        {
+            setting_item_t *v3Option = settings_get_by_name_id(CLOUD_TB2_V3_SETTING, settingsId);
+            if (v3Option != NULL)
+            {
+                v3Option->overlayed = true;
+            }
+        }
+    }
+
+    /* Keep the old in-memory gate working until the runtime is switched to the
+     * single proxy setting in the next implementation section. The internal
+     * compatibility option is never written back to configuration version 20. */
+    settings->cloud.tb2_passthrough_enabled = settings->cloud.tb2_enabled;
+    setting_item_t *legacyOption = settings_get_by_name_id(CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING,
+                                                            settingsId);
+    if (legacyOption != NULL)
+    {
+        legacyOption->overlayed = false;
+    }
+}
+
+static void settings_migrate_tb2_https_modes(uint8_t settingsId)
+{
+    settings_t *settings = &Settings_Overlay[settingsId];
+    setting_item_t *proxyOption = settings_get_by_name_id(CLOUD_TB2_PROXY_SETTING, settingsId);
+    setting_item_t *v3Option = settings_get_by_name_id(CLOUD_TB2_V3_SETTING, settingsId);
+    setting_item_t *tb1CloudOption = settings_get_by_name_id("cloud.enabled", settingsId);
+
+    if (settingsId == 0)
+    {
+        const bool transparentProxyEnabled = settings->cloud.tb2_enabled &&
+                                             settings->cloud.tb2_passthrough_enabled;
+        settings->cloud.tb2_enabled = transparentProxyEnabled;
+        settings->cloud.tb2_v3_enabled = !transparentProxyEnabled && settings->cloud.enabled;
+        return;
+    }
+
+    /* The legacy transparent forwarder only inspected global settings. Do not
+     * turn previously ineffective overlay values into active per-box modes. */
+    settings->cloud.tb2_enabled = Settings_Overlay[0].cloud.tb2_enabled;
+    if (proxyOption != NULL)
+    {
+        proxyOption->overlayed = false;
+    }
+
+    if (tb1CloudOption != NULL && tb1CloudOption->overlayed)
+    {
+        if (!Settings_Overlay[0].cloud.tb2_enabled)
+        {
+            settings->cloud.tb2_v3_enabled = settings->cloud.enabled;
+            if (v3Option != NULL)
+            {
+                v3Option->overlayed = true;
+            }
+        }
+        else if (!settings->cloud.enabled)
+        {
+            settings->cloud.tb2_v3_enabled = false;
+            if (v3Option != NULL)
+            {
+                v3Option->overlayed = true;
+            }
+        }
+    }
+}
+
 static bool settings_migrate_id(uint8_t settingsId)
 {
     settings_t *settings = &Settings_Overlay[settingsId];
@@ -718,6 +831,10 @@ static bool settings_migrate_id(uint8_t settingsId)
     if (settings->configVersion < 19)
     {
         settings_migrate_legacy_tb1_client_cert(settingsId);
+    }
+    if (settings->configVersion < 20)
+    {
+        settings_migrate_tb2_https_modes(settingsId);
     }
 
     return true;
@@ -1401,6 +1518,7 @@ static error_t settings_load_ovl(bool overlay)
         for (uint8_t i = 1; i < MAX_OVERLAYS; i++)
         {
             migrated = settings_migrate_id(i) || migrated;
+            settings_normalize_tb2_https_modes(i);
             settings_generate_internal_dirs(&Settings_Overlay[i]);
             settings_load_certs_id(i);
             Settings_Overlay[i].internal.config_changed = false;
@@ -1414,6 +1532,7 @@ static error_t settings_load_ovl(bool overlay)
     {
         settings_source_config_version = Settings_Overlay[0].configVersion;
         bool migrated = settings_migrate_id(0);
+        settings_normalize_tb2_https_modes(0);
         settings_generate_internal_dirs(get_settings());
         settings_load_certs_id(0);
         if (migrated)
@@ -1533,6 +1652,12 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
         return false;
     }
 
+    if (!osStrcmp(item, CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING))
+    {
+        TRACE_WARNING("Setting '%s' is deprecated and cannot be changed\r\n", item);
+        return false;
+    }
+
     if (opt->read_only)
     {
         if (value != opt->init.bool_value)
@@ -1550,23 +1675,20 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
         return false;
     }
 
-    if (settingsId == 0 && !osStrcmp(item, "cloud.tb2_passthrough_enabled") &&
-        value && !Settings_Overlay[0].cloud.tb2_enabled)
-    {
-        TRACE_WARNING("TB2 HTTPS passthrough requires cloud.tb2_enabled\r\n");
-        return false;
-    }
-
     *((bool *)opt->ptr) = value;
+
+    if (settings_is_tb2_https_mode(item) && value)
+    {
+        settings_select_tb2_https_mode(settingsId, item);
+    }
+    else if (!osStrcmp(item, CLOUD_TB2_PROXY_SETTING))
+    {
+        Settings_Overlay[settingsId].cloud.tb2_passthrough_enabled = value;
+    }
 
     if (settingsId == 0 && !osStrcmp(item, "mqtt_client_upstream.enabled") && !value)
     {
         Settings_Overlay[0].mqtt_client_upstream.passthrough_enabled = false;
-    }
-
-    if (settingsId == 0 && !osStrcmp(item, "cloud.tb2_enabled") && !value)
-    {
-        Settings_Overlay[0].cloud.tb2_passthrough_enabled = false;
     }
 
     if (settingsId > 0)
@@ -1574,6 +1696,38 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
         opt->overlayed = true;
     }
     else if (!opt->internal)
+    {
+        settings_changed_id(settingsId);
+    }
+    return true;
+}
+
+bool settings_reset_id(const char *item, uint8_t settingsId)
+{
+    if (item == NULL || settingsId >= MAX_OVERLAYS)
+    {
+        return false;
+    }
+
+    setting_item_t *option = settings_get_by_name_id(item, settingsId);
+    setting_item_t *globalOption = settings_get_by_name_id(item, 0);
+    if (option == NULL || globalOption == NULL || (!option->overlayed && settingsId > 0))
+    {
+        return false;
+    }
+
+    overlay_settings_init_opt(option, globalOption);
+    if (settings_is_tb2_https_mode(item) && *((bool *)option->ptr))
+    {
+        settings_select_tb2_https_mode(settingsId, item);
+    }
+    else if (!osStrcmp(item, CLOUD_TB2_PROXY_SETTING))
+    {
+        Settings_Overlay[settingsId].cloud.tb2_passthrough_enabled =
+            Settings_Overlay[settingsId].cloud.tb2_enabled;
+    }
+
+    if (settingsId == 0 && !option->internal)
     {
         settings_changed_id(settingsId);
     }

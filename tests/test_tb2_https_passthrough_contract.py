@@ -50,19 +50,58 @@ class Tb2HttpsPassthroughContractTests(unittest.TestCase):
 
     def test_capture_defaults_are_registered(self):
         self.assertIn('"cloud.tb2_enabled"', self.settings)
+        self.assertIn('"cloud.tb2_v3_enabled"', self.settings)
+        self.assertIn('"cloud.tb2_capture_enabled"', self.settings)
         self.assertIn('"cloud.tb2_passthrough_enabled"', self.settings)
+        self.assertIn("OPTION_INTERNAL_BOOL(CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING", self.settings)
         self.assertIn('"data/diagnostics/tb2-https-passthrough"', self.settings)
         self.assertIn("&settings->cloud.tb2_capture_max_mib, 4096", self.settings)
 
-    def test_passthrough_requires_both_enable_flags(self):
+    def test_legacy_runtime_gate_mirrors_the_single_proxy_setting(self):
         gate = self.passthrough[
             self.passthrough.index("error_t tb2_https_passthrough_post_tls") :
             self.passthrough.index("error_t tb2_https_passthrough_write_status")
         ]
         self.assertIn("!global->cloud.tb2_enabled", gate)
         self.assertIn("!global->cloud.tb2_passthrough_enabled", gate)
-        self.assertIn('!osStrcmp(item, "cloud.tb2_passthrough_enabled")', self.settings)
-        self.assertIn("Settings_Overlay[0].cloud.tb2_passthrough_enabled = false", self.settings)
+        self.assertIn(
+            "settings->cloud.tb2_passthrough_enabled = settings->cloud.tb2_enabled;",
+            self.settings,
+        )
+
+    def test_v20_migration_preserves_active_mode_and_excludes_conflicts(self):
+        migration = self.settings[
+            self.settings.rindex("static void settings_migrate_tb2_https_modes") :
+            self.settings.rindex("static bool settings_migrate_id")
+        ]
+        self.assertIn(
+            "settings->cloud.tb2_enabled &&\n                                             settings->cloud.tb2_passthrough_enabled",
+            migration,
+        )
+        self.assertIn(
+            "settings->cloud.tb2_v3_enabled = !transparentProxyEnabled && settings->cloud.enabled;",
+            migration,
+        )
+        self.assertIn("settings->configVersion < 20", self.settings)
+
+    def test_mode_setter_and_reset_keep_modes_mutually_exclusive(self):
+        selector = self.settings[
+            self.settings.rindex("static void settings_select_tb2_https_mode") :
+            self.settings.rindex("static void settings_normalize_tb2_https_modes")
+        ]
+        setter = self.settings[
+            self.settings.index("bool settings_set_bool_id") :
+            self.settings.index("bool settings_reset_id")
+        ]
+        reset = self.settings[
+            self.settings.index("bool settings_reset_id") :
+            self.settings.index("int32_t settings_get_signed")
+        ]
+        self.assertIn("disabledOption->overlayed = true;", selector)
+        self.assertIn("settings_select_tb2_https_mode(settingsId, item);", setter)
+        self.assertIn("CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING", setter)
+        self.assertIn("is deprecated and cannot be changed", setter)
+        self.assertIn("settings_select_tb2_https_mode(settingsId, item);", reset)
 
     def test_passthrough_logs_why_a_connection_is_skipped(self):
         self.assertIn("TB2 HTTPS passthrough skipped: client certificate identity unavailable", self.passthrough)
