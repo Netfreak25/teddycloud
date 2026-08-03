@@ -176,6 +176,17 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
         self.assertNotIn("get_overlay_id(common_name)", mapping)
         self.assertIn("stage=box_client_auth certificate_present=true", mapping)
 
+    def test_certificate_and_topic_box_ids_are_case_insensitive(self):
+        self.assertNotIn(
+            "osStrcmp(conn->box_common_name", self.server
+        )
+        self.assertIn(
+            "osStrcasecmp(conn->box_common_name, common_name)", self.server
+        )
+        self.assertIn(
+            "osStrcasecmp(conn->box_common_name, topic_common_name)", self.server
+        )
+
     def test_global_tb2_identity_is_default_until_overlay_override(self):
         selector = self.passthrough[
             self.passthrough.index("static bool_t tb2_mqtt_overlay_has_identity_override") :

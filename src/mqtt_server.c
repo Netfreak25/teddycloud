@@ -243,7 +243,7 @@ static bool_t mqtt_promote_connection_to_box(MqttClientConnection *conn, setting
         return FALSE;
     }
 
-    if (conn->box_common_name[0] != '\0' && osStrcmp(conn->box_common_name, common_name) != 0)
+    if (conn->box_common_name[0] != '\0' && osStrcasecmp(conn->box_common_name, common_name) != 0)
     {
         TRACE_WARNING("MQTT connection topic/cert mismatch: existing box=%s new box=%s source=%s\r\n",
                       conn->box_common_name,
@@ -1030,7 +1030,7 @@ static bool_t mqtt_connection_matches_box_overlay(MqttClientConnection *conn, se
     {
         return FALSE;
     }
-    if (conn->box_common_name[0] == '\0' || osStrcmp(conn->box_common_name, settings->commonName) != 0)
+    if (conn->box_common_name[0] == '\0' || osStrcasecmp(conn->box_common_name, settings->commonName) != 0)
     {
         return FALSE;
     }
@@ -1975,7 +1975,7 @@ static error_t handle_mqtt_publish_claim(MqttClientConnection *conn, MqttMessage
         return NO_ERROR;
     }
 
-    if (!conn->box_connection || conn->box_common_name[0] == '\0' || osStrcmp(conn->box_common_name, topic_common_name) != 0 ||
+    if (!conn->box_connection || conn->box_common_name[0] == '\0' || osStrcasecmp(conn->box_common_name, topic_common_name) != 0 ||
         conn->client_ctx.settings == NULL)
     {
         TRACE_INFO("Ignoring claim from non-matching MQTT connection topic=%s\r\n", topic);
@@ -2108,7 +2108,7 @@ static error_t handle_mqtt_publish_app_reply_bedtime_state(MqttClientConnection 
         return NO_ERROR;
     }
 
-    if (!conn->box_connection || conn->box_common_name[0] == '\0' || osStrcmp(conn->box_common_name, topic_common_name) != 0 ||
+    if (!conn->box_connection || conn->box_common_name[0] == '\0' || osStrcasecmp(conn->box_common_name, topic_common_name) != 0 ||
         conn->client_ctx.settings == NULL)
     {
         TRACE_INFO("Ignoring bedtime-state reply from non-matching MQTT connection topic=%s\r\n", topic);
@@ -2231,7 +2231,7 @@ static error_t handle_mqtt_publish_metrics_battery(MqttClientConnection *conn, M
         return NO_ERROR;
     }
 
-    if (!conn->box_connection || conn->box_common_name[0] == '\0' || osStrcmp(conn->box_common_name, topic_common_name) != 0 ||
+    if (!conn->box_connection || conn->box_common_name[0] == '\0' || osStrcasecmp(conn->box_common_name, topic_common_name) != 0 ||
         conn->client_ctx.settings == NULL)
     {
         TRACE_INFO("Ignoring battery metrics from non-matching MQTT connection topic=%s\r\n", topic);
@@ -2287,7 +2287,7 @@ static error_t handle_mqtt_publish_metrics_headphones(MqttClientConnection *conn
         return NO_ERROR;
     }
 
-    if (!conn->box_connection || conn->box_common_name[0] == '\0' || osStrcmp(conn->box_common_name, topic_common_name) != 0 ||
+    if (!conn->box_connection || conn->box_common_name[0] == '\0' || osStrcasecmp(conn->box_common_name, topic_common_name) != 0 ||
         conn->client_ctx.settings == NULL)
     {
         TRACE_INFO("Ignoring headphones metrics from non-matching MQTT connection topic=%s\r\n", topic);
@@ -2358,7 +2358,7 @@ static bool_t mqtt_topic_matches_box_connection(MqttClientConnection *conn, cons
     }
 
     if (conn == NULL || !conn->box_connection || conn->box_common_name[0] == '\0' ||
-        osStrcmp(conn->box_common_name, topic_common_name) != 0 || conn->client_ctx.settings == NULL)
+        osStrcasecmp(conn->box_common_name, topic_common_name) != 0 || conn->client_ctx.settings == NULL)
     {
         TRACE_INFO("Ignoring %s from non-matching MQTT connection topic=%s\r\n", label, topic);
         return FALSE;
@@ -2558,7 +2558,7 @@ static error_t handle_mqtt_publish_playback_state(MqttClientConnection *conn, Mq
         return NO_ERROR;
     }
 
-    if (!conn->box_connection || conn->box_common_name[0] == '\0' || osStrcmp(conn->box_common_name, topic_common_name) != 0 ||
+    if (!conn->box_connection || conn->box_common_name[0] == '\0' || osStrcasecmp(conn->box_common_name, topic_common_name) != 0 ||
         conn->client_ctx.settings == NULL)
     {
         TRACE_INFO("Ignoring playback-state from non-matching MQTT connection topic=%s\r\n", topic);
