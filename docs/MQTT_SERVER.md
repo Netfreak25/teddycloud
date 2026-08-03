@@ -22,17 +22,18 @@ The server-side ICI settings are:
 | `mqtt_server.cert.key` | `certs/server_tb2/ici.key` | PEM server private key loaded for the TLS endpoint. |
 | `mqtt_server.log_full_payloads` | `false` | Expert diagnostic switch for base64 full-payload capture of large MQTT publishes. |
 
-The separate **MQTT Client Upstream** category controls the optional transparent
-TB2 ICI capture forwarder:
+The separate **MQTT Client Upstream** category controls the optional TB2 ICI
+packet proxy:
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
 | `mqtt_client_upstream.enabled` | `false` | Enables the TB2 MQTT cloud path. |
-| `mqtt_client_upstream.passthrough_enabled` | `false` | Arms transparent forwarding and full local capture; requires `enabled=true`. |
+| `mqtt_client_upstream.passthrough_enabled` | `false` | Arms packet-aware forwarding and full local capture; requires `enabled=true`. |
 | `mqtt_client_upstream.port` | `8883` | Tonies ICI upstream MQTT port. |
 | `mqtt_client_upstream.hostname` | `ici.tonie.cloud` | Tonies ICI upstream hostname. |
 | `mqtt_client_upstream.capture_dir` | `data/diagnostics/tb2-mqtt-passthrough` | Local session capture directory. |
 | `mqtt_client_upstream.capture_max_mib` | `4096` | Maximum total size of completed captures. |
+| `mqtt_client_upstream.forward.*` | `true` | Forwards the selected topic class in both directions. `false` suppresses it locally. |
 
 These settings are deliberately separate from both the generic external
 `mqtt.*` client and the internal TB2-facing `mqtt_server.*` listener.
@@ -42,12 +43,41 @@ box certificate to an overlay and opens a second TLS connection using the
 original per-box identity from `core.client_cert.*`. The local
 `mqtt_server.cert.*` identity is never reused for the outbound role.
 
-For an armed connection, decrypted MQTT application bytes are captured and
-forwarded unchanged in both directions. No local MQTT parser, handler, ACK,
-publish, cache or control path runs for that connection. The box's original
-CONNECT data, including any ICI credential it carries, is forwarded without
-inspection or reconstruction.
+For an armed connection, decrypted MQTT application bytes are reassembled into
+complete MQTT packets in both directions. Fragmented packets and multiple
+packets in one TLS read are supported up to MQTT's own Remaining Length limit;
+there is no additional proxy packet-size limit. Packets that do not match a
+disabled forwarding option are sent byte-for-byte unchanged. The box's original
+CONNECT data, including any ICI credential it carries, is therefore still
+forwarded without reconstruction.
 
+Every `mqtt_client_upstream.forward.*` option defaults to `true`. Setting one to
+`false` suppresses its matching `PUBLISH` in both directions. The available
+classes are `claim`, `volume`, `bi_events`, `fresh_tonies`, individual log
+sources plus `logs.other`, and the listed children plus `other` for `metrics`,
+`app_reply`, `settings`, `playback`, and `app_control`. Matching is performed on
+`toniebox/<id>/...` topic segments. Log `source` values are read exactly and
+case-sensitively from valid JSON; missing, invalid, or unlisted sources use
+`logs.other`. An `other` option applies only to the group root and children that
+have no dedicated option.
+
+All forwarding options are overlay-capable. An explicit box value wins;
+otherwise the current global value is read for every packet, so a global change
+also affects existing sessions immediately. The WebUI presents global options
+as forwarding switches and box options as `Global | Forward | Suppress`.
+
+Suppressed QoS 0 publishes are dropped. For QoS 1 the proxy returns `PUBACK` to
+the sender. For QoS 2 it keeps independent packet-ID state per direction,
+returns `PUBREC`, and completes matching and duplicate `PUBREL` packets with
+`PUBCOMP`. ACKs and `PUBREL` packets that do not belong to a locally suppressed
+publish are forwarded unchanged.
+
+TeddyCloud observes box-to-cloud publishes before the forwarding decision. It
+processes claims and the passive status paths for settings confirms, setup,
+battery/events/fleet/headphones metrics, playback, volume, and existing
+app-reply status handlers even when the publish is suppressed. It does not run
+handlers that publish desired settings or control commands. Cloud-to-box
+publishes are logged and captured only; TeddyCloud never reacts to them.
 The separate **ICI Upstream** navbar tag polls
 `GET /api/mqtt-client-upstream/status` every five seconds. States are
 `disabled`, `standby`, `armed`, `connecting`, `tunneling` and `error`; only an
@@ -55,7 +85,12 @@ active tunnel is green. The API contains no credential values, certificate
 paths, payloads or box identifiers.
 
 Each session writes `session.json` and a full Base64 `traffic.jsonl` capture.
-Capture data is intentionally sensitive, local-only and excluded from Git.
+The capture is packet-based and records `packet_type`, optional `topic`,
+`forwarded`, optional `filter_id`, `generated`, and `packet_complete`. Locally
+generated ACKs and an incomplete final packet are captured as well. Session and
+status data contain separate forwarded/suppressed message counters for each
+direction. Capture data is intentionally sensitive, local-only and excluded
+from Git.
 
 There is no `mqtt_server.hostname` setting in the code. Hostname selection is
 handled outside the listener by DNS/network routing and by the certificate

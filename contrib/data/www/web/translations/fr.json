@@ -1025,6 +1025,14 @@
         "information": "Informations",
         "keepScrolling": "Continuez à faire défiler pour voir plus d'options.",
         "legacyGui": "Ancienne GUI Admin",
+        "mqttForwarding": {
+            "suppress": "Supprimer",
+            "description": "Les commutateurs activés transfèrent le topic correspondant dans les deux sens.",
+            "forward": "Transférer",
+            "global": "Utiliser global",
+            "searchSources": "Rechercher les sources de journal",
+            "title": "Filtres de transfert bidirectionnel"
+        },
         "levelLabel": "Niveau des paramètres",
         "navigationTitle": "Paramètres",
         "notifications": {

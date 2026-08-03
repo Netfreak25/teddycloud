@@ -106,6 +106,14 @@ class UpstreamSettingsApiTests(unittest.TestCase):
             "data/diagnostics/tb2-mqtt-passthrough",
         )
         self.assertEqual(options["mqtt_client_upstream.capture_max_mib"]["valueInit"], 4096)
+        mqtt_forward_options = {
+            name: option
+            for name, option in options.items()
+            if name.startswith("mqtt_client_upstream.forward.")
+        }
+        self.assertEqual(len(mqtt_forward_options), 63)
+        self.assertTrue(all(option["valueInit"] for option in mqtt_forward_options.values()))
+        self.assertNotIn("mqtt_client_upstream.block.claim", options)
 
         https_enabled = options["cloud.tb2_enabled"]
         self.assertFalse(https_enabled["valueInit"])

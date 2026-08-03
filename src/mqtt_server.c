@@ -2496,6 +2496,58 @@ static const MqttHandlerEntry mqtt_handlers[] = {
     {MQTT_MSG_PUBLISH, NULL, &handle_mqtt_publish_generic}
 };
 
+static const MqttHandlerEntry mqtt_passthrough_observer_handlers[] = {
+    {MQTT_MSG_PUBLISH, "toniebox/+/claim/+", &handle_mqtt_publish_claim},
+    {MQTT_MSG_PUBLISH, "toniebox/+/settings/confirm", &handle_mqtt_publish_settings_confirm},
+    {MQTT_MSG_PUBLISH, "toniebox/+/app-reply/bedtime-state", &handle_mqtt_publish_app_reply_bedtime_state},
+    {MQTT_MSG_PUBLISH, "toniebox/+/app-reply/pong", &handle_mqtt_publish_app_reply_pong},
+    {MQTT_MSG_PUBLISH, "toniebox/+/app-reply/alarm", &handle_mqtt_publish_app_reply_alarm},
+    {MQTT_MSG_PUBLISH, "toniebox/+/setup/status", &handle_mqtt_publish_setup_status},
+    {MQTT_MSG_PUBLISH, "toniebox/+/metrics/battery", &handle_mqtt_publish_metrics_battery},
+    {MQTT_MSG_PUBLISH, "toniebox/+/metrics/events", &handle_mqtt_publish_metrics_events},
+    {MQTT_MSG_PUBLISH, "toniebox/+/metrics/fleet", &handle_mqtt_publish_metrics_fleet},
+    {MQTT_MSG_PUBLISH, "toniebox/+/metrics/headphones", &handle_mqtt_publish_metrics_headphones},
+    {MQTT_MSG_PUBLISH, "toniebox/+/playback/state", &handle_mqtt_publish_playback_state},
+    {MQTT_MSG_PUBLISH, "toniebox/+/volume/state", &handle_mqtt_publish_volume_state},
+};
+
+static void mqtt_passthrough_observe_publish(void *context, bool_t box_to_upstream,
+                                             const char *topic, const uint8_t *payload,
+                                             size_t payload_len, uint8_t qos)
+{
+    MqttClientConnection *conn = context;
+    const char *direction = box_to_upstream ? "box_to_upstream" : "upstream_to_box";
+    mqtt_trace_full_publish(direction, topic, payload, payload_len, qos);
+
+    size_t preview_len = payload_len < MQTT_LOG_INLINE_PAYLOAD_SIZE ? payload_len :
+                                                                    MQTT_LOG_INLINE_PAYLOAD_SIZE;
+    TRACE_DEBUG("MQTT PASSTHROUGH PUBLISH dir=%s topic='%s' qos=%u payload='%.*s'%s len=%" PRIuSIZE "\r\n",
+                direction, topic != NULL ? topic : "-", (unsigned)qos,
+                (int)preview_len, payload != NULL ? (const char *)payload : "",
+                payload_len > preview_len ? "..." : "", payload_len);
+
+    if (!box_to_upstream || conn == NULL)
+    {
+        return;
+    }
+    mqtt_connection_update_context(conn, topic);
+    for (size_t i = 0; i < sizeof(mqtt_passthrough_observer_handlers) /
+                            sizeof(mqtt_passthrough_observer_handlers[0]); i++)
+    {
+        const MqttHandlerEntry *entry = &mqtt_passthrough_observer_handlers[i];
+        if (mqtt_topic_match(entry->topic, topic))
+        {
+            error_t error = entry->handler(conn, MQTT_MSG_PUBLISH, topic, payload, payload_len);
+            if (error)
+            {
+                TRACE_WARNING("MQTT passthrough observer handler failed topic='%s' error=%s code=%d\r\n",
+                              topic, error2text(error), (int)error);
+            }
+            break;
+        }
+    }
+}
+
 void mqtt_server_task()
 {
     if (serverSocket == NULL)
@@ -2549,10 +2601,19 @@ void mqtt_server_task()
                         if (conn->tlsContext != NULL && tb2_mqtt_passthrough_is_armed())
                         {
                             bool_t handled = FALSE;
+                            settings_t *passthrough_box_settings = NULL;
                             error = tb2_mqtt_passthrough_start(conn->tlsContext, conn->socket,
-                                                               &conn->passthrough, &handled);
+                                                               &conn->passthrough, &handled,
+                                                               mqtt_passthrough_observe_publish, conn,
+                                                               &passthrough_box_settings);
                             if (!error && handled)
                             {
+                                if (passthrough_box_settings != NULL)
+                                {
+                                    mqtt_promote_connection_to_box(conn, passthrough_box_settings,
+                                                                   passthrough_box_settings->commonName,
+                                                                   "passthrough certificate");
+                                }
                                 error = tb2_mqtt_passthrough_forward_initial(conn->passthrough,
                                                                              conn->buffer,
                                                                              conn->buffer_len);

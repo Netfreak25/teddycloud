@@ -1025,6 +1025,14 @@
         "information": "Information",
         "keepScrolling": "Weiter scrollen, um weitere Optionen zu sehen.",
         "legacyGui": "Alte Admin-GUI",
+        "mqttForwarding": {
+            "suppress": "Unterdr\u00fccken",
+            "description": "Aktive Schalter leiten das jeweilige Topic in beide Richtungen weiter.",
+            "forward": "Weiterleiten",
+            "global": "Global \u00fcbernehmen",
+            "searchSources": "Log-Sources durchsuchen",
+            "title": "Bidirektionale Weiterleitungsfilter"
+        },
         "levelLabel": "Settings level",
         "navigationTitle": "Einstellungen",
         "notifications": {

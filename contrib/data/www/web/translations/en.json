@@ -981,6 +981,8 @@
         "tb2CloudUnavailable": "The TB2 cloud connection is not available yet. There is no HTTPS connection to {{hostname}}.",
         "tb2HttpsStatus": {
             "disabled": "TB2 HTTPS forwarding is disabled.",
+            "standby": "TB2 HTTPS upstream is enabled; transparent forwarding is disabled.",
+            "armed": "TB2 HTTPS forwarding is armed and waiting for a connection.",
             "connecting": "Connecting to {{hostname}}:{{port}}.",
             "tunneling": "TB2 HTTPS tunnel to {{hostname}}:{{port}} is active.",
             "online": "The last TB2 HTTPS tunnel to {{hostname}}:{{port}} completed successfully.",
@@ -1032,6 +1034,14 @@
         "information": "Information",
         "keepScrolling": "Keep scrolling to see more options.",
         "legacyGui": "Legacy Admin GUI",
+        "mqttForwarding": {
+            "suppress": "Suppress",
+            "description": "Enabled switches forward the corresponding topic in both directions.",
+            "forward": "Forward",
+            "global": "Use global",
+            "searchSources": "Search log sources",
+            "title": "Bidirectional forwarding filters"
+        },
         "levelLabel": "Settings level",
         "navigationTitle": "Settings",
         "notifications": {

@@ -1025,6 +1025,14 @@
         "information": "Información",
         "keepScrolling": "Sigue desplazándote para ver más opciones.",
         "legacyGui": "Interfaz de administración heredada",
+        "mqttForwarding": {
+            "suppress": "Suprimir",
+            "description": "Los interruptores activados reenvían el tema correspondiente en ambas direcciones.",
+            "forward": "Reenviar",
+            "global": "Usar global",
+            "searchSources": "Buscar fuentes de registro",
+            "title": "Filtros de reenvío bidireccional"
+        },
         "levelLabel": "Nivel de configuración",
         "navigationTitle": "Configuración",
         "notifications": {
