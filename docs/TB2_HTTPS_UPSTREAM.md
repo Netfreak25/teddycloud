@@ -112,8 +112,11 @@ sessions, byte counters, timestamps and error code.
 
 The WebUI uses the shared `TON`/`TONIES` navbar status for whichever TB2 HTTPS
 mode is active. Its tooltip shows both the selected mode and current state. The
-settings view groups cloud options under `Global`, `TB1` and `TB2`; v3 endpoint
-switches appear beneath the v3 master switch.
+settings view uses the shared `Global`, `TB1` and `TB2` scope layout for all
+public settings. The v3 endpoint switches remain visible beneath the v3 master
+switch. They are disabled while the effective v3 mode is off, without changing
+their stored values. Box overlays show only `Global` plus their detected
+generation, so TB1 and TB2 options cannot leak into the other generation.
 
 ## Verification boundary
 

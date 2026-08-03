@@ -996,6 +996,14 @@
             "success": "The last TB2 HTTPS operation completed successfully.",
             "error": "TB2 HTTPS forwarding failed ({{errorCode}})."
         },
+        "mqttUpstreamStatus": {
+            "disabled": "ICI upstream is disabled.",
+            "standby": "ICI upstream is enabled; transparent forwarding is disabled.",
+            "armed": "ICI forwarding is armed and waiting for a TB2 connection.",
+            "connecting": "Connecting to {{hostname}}:{{port}}.",
+            "tunneling": "The transparent ICI tunnel to {{hostname}}:{{port}} is active.",
+            "error": "ICI forwarding failed ({{errorCode}})."
+        },
         "teddycloudStatusOffline": "Teddycloud server offline",
         "teddycloudStatusOnline": "Teddycloud server running fine"
     },
@@ -1042,10 +1050,32 @@
         "information": "Information",
         "keepScrolling": "Keep scrolling to see more options.",
         "legacyGui": "Legacy Admin GUI",
-        "cloudGroups": {
-            "global": "Global",
-            "title": "Cloud",
-            "v3Endpoints": "TB2 v3 endpoint forwarding"
+        "scopeTabs": {
+            "global": "Global"
+        },
+        "scopeSections": {
+            "logging": "Logging",
+            "server": "Server",
+            "storage": "Storage",
+            "content": "Content",
+            "security": "Security",
+            "encoding": "Encoding",
+            "webui": "WebUI",
+            "cloudContent": "Cross-generation cloud and content options",
+            "mqtt": "MQTT and Home Assistant",
+            "diagnostics": "Diagnostics",
+            "tonieJson": "Tonie data",
+            "boxGeneral": "General box settings",
+            "certificates": "Certificates",
+            "cloud": "Cloud",
+            "boxBehavior": "Box behavior",
+            "rtnl": "RTNL",
+            "tools": "Tools",
+            "httpsCloud": "HTTPS cloud",
+            "iciUpstream": "ICI MQTT upstream",
+            "iciServer": "ICI MQTT server",
+            "v3Endpoints": "TB2 v3 endpoint forwarding",
+            "unclassified": "Unclassified"
         },
         "mqttForwarding": {
             "suppress": "Suppress",

@@ -1042,10 +1042,32 @@
         "information": "Information",
         "keepScrolling": "Weiter scrollen, um weitere Optionen zu sehen.",
         "legacyGui": "Alte Admin-GUI",
-        "cloudGroups": {
-            "global": "Global",
-            "title": "Cloud",
-            "v3Endpoints": "Weiterleitung der TB2-v3-Endpunkte"
+        "scopeTabs": {
+            "global": "Global"
+        },
+        "scopeSections": {
+            "logging": "Logging",
+            "server": "Server",
+            "storage": "Speicher",
+            "content": "Content",
+            "security": "Sicherheit",
+            "encoding": "Encoding",
+            "webui": "WebUI",
+            "cloudContent": "Generations\u00fcbergreifende Cloud- und Content-Optionen",
+            "mqtt": "MQTT und Home Assistant",
+            "diagnostics": "Diagnose",
+            "tonieJson": "Tonie-Daten",
+            "boxGeneral": "Allgemeine Box-Einstellungen",
+            "certificates": "Zertifikate",
+            "cloud": "Cloud",
+            "boxBehavior": "Box-Verhalten",
+            "rtnl": "RTNL",
+            "tools": "Werkzeuge",
+            "httpsCloud": "HTTPS-Cloud",
+            "iciUpstream": "ICI-MQTT-Upstream",
+            "iciServer": "ICI-MQTT-Server",
+            "v3Endpoints": "Weiterleitung der TB2-v3-Endpunkte",
+            "unclassified": "Nicht zugeordnet"
         },
         "mqttForwarding": {
             "suppress": "Unterdr\u00fccken",
