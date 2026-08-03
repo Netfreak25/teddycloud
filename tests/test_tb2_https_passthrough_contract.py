@@ -17,6 +17,12 @@ class Tb2HttpsPassthroughContractTests(unittest.TestCase):
         cls.passthrough = (ROOT / "src/tb2_https_passthrough.c").read_text(
             encoding="utf-8"
         )
+        cls.identity = (ROOT / "src/tb2_client_identity.c").read_text(
+            encoding="utf-8"
+        )
+        cls.status = (ROOT / "src/tb2_https_status.c").read_text(encoding="utf-8")
+        cls.cloud_request = (ROOT / "src/cloud_request.c").read_text(encoding="utf-8")
+        cls.cloud_handler = (ROOT / "src/handler_cloud.c").read_text(encoding="utf-8")
         cls.settings = (ROOT / "src/settings.c").read_text(encoding="utf-8")
 
     def test_passthrough_runs_before_http_parser(self):
@@ -45,8 +51,18 @@ class Tb2HttpsPassthroughContractTests(unittest.TestCase):
             self.assertNotIn(symbol, self.passthrough)
 
     def test_passthrough_uses_only_tb2_client_identity(self):
-        self.assertIn("settings->internal.client_tb2", self.passthrough)
+        self.assertIn("tb2_client_identity_resolve(settings, NULL)", self.passthrough)
+        self.assertIn("tb2_client_identity_resolve(settings, NULL)", self.cloud_request)
         self.assertNotIn("settings->internal.client.", self.passthrough)
+        self.assertNotIn("client_tb1", self.identity)
+
+    def test_tb2_identity_defaults_global_and_uses_only_explicit_overlay(self):
+        self.assertIn('"global_default"', self.identity)
+        self.assertIn('"box_overlay"', self.identity)
+        self.assertIn("settings_is_overlayed_id", self.identity)
+        self.assertIn("? &box_settings->internal.client_tb2", self.identity)
+        self.assertIn(": &get_settings()->internal.client_tb2", self.identity)
+        self.assertIn("refusing global fallback", self.identity)
 
     def test_capture_defaults_are_registered(self):
         self.assertIn('"cloud.tb2_enabled"', self.settings)
@@ -57,17 +73,14 @@ class Tb2HttpsPassthroughContractTests(unittest.TestCase):
         self.assertIn('"data/diagnostics/tb2-https-passthrough"', self.settings)
         self.assertIn("&settings->cloud.tb2_capture_max_mib, 4096", self.settings)
 
-    def test_legacy_runtime_gate_mirrors_the_single_proxy_setting(self):
+    def test_runtime_uses_only_the_single_proxy_setting(self):
         gate = self.passthrough[
             self.passthrough.index("error_t tb2_https_passthrough_post_tls") :
             self.passthrough.index("error_t tb2_https_passthrough_write_status")
         ]
-        self.assertIn("!global->cloud.tb2_enabled", gate)
-        self.assertIn("!global->cloud.tb2_passthrough_enabled", gate)
-        self.assertIn(
-            "settings->cloud.tb2_passthrough_enabled = settings->cloud.tb2_enabled;",
-            self.settings,
-        )
+        self.assertIn("tb2_https_proxy_is_configured()", gate)
+        self.assertIn("!box_settings->cloud.tb2_enabled", gate)
+        self.assertNotIn("tb2_passthrough_enabled", gate)
 
     def test_v20_migration_preserves_active_mode_and_excludes_conflicts(self):
         migration = self.settings[
@@ -108,13 +121,44 @@ class Tb2HttpsPassthroughContractTests(unittest.TestCase):
         self.assertIn("TB2 HTTPS passthrough skipped: client certificate is not mapped to an active overlay", self.passthrough)
         self.assertIn("TB2 HTTPS passthrough skipped: no eligible TB2 overlay resolved", self.passthrough)
 
-    def test_status_distinguishes_standby_and_armed(self):
-        status = self.passthrough[
-            self.passthrough.index("error_t tb2_https_passthrough_write_status") :
-        ]
-        self.assertIn('"passthrough_enabled"', status)
-        self.assertIn('state = "standby"', status)
-        self.assertIn('state = "armed"', status)
+    def test_capture_is_optional_without_changing_raw_capture_format(self):
+        self.assertIn("if (!settings->cloud.tb2_capture_enabled)", self.passthrough)
+        self.assertIn("if (!capture->enabled)", self.passthrough)
+        self.assertIn('cJSON_AddStringToObject(entry, "data_base64", encoded)', self.passthrough)
+        self.assertIn("if (capture.enabled)", self.passthrough)
+
+    def test_v3_handlers_use_dedicated_mode_and_request_context(self):
+        self.assertNotRegex(self.cloud_handler, r"cloud\.enabled.*enableV3")
+        self.assertNotRegex(
+            self.cloud_handler,
+            r"cloud_request_(?:get|post)\([^\n]*remote_hostname_tb2",
+        )
+        self.assertGreaterEqual(self.cloud_handler.count("cloud_request_tb2_get("), 4)
+        self.assertGreaterEqual(self.cloud_handler.count("cloud_request_tb2_post("), 3)
+        self.assertIn("settings->cloud.tb2_v3_enabled", self.cloud_request)
+        self.assertIn("settings->cloud.remote_port_tb2", self.cloud_request)
+        self.assertIn("httpClientTlsInitCallbackClientAuthTb2", self.cloud_request)
+
+    def test_transport_errors_do_not_switch_modes(self):
+        self.assertNotIn("settings_set_bool", self.cloud_request)
+        self.assertNotIn("settings_set_bool", self.passthrough)
+
+    def test_unified_status_reports_modes_and_independent_transports(self):
+        self.assertIn("return tb2_https_status_write(connection);", self.passthrough)
+        for field in (
+            '"mode"',
+            '"mode_counts"',
+            '"v3"',
+            '"transparent"',
+            '"last_http_status"',
+            '"active_requests"',
+            '"active_sessions"',
+        ):
+            self.assertIn(field, self.status)
+        self.assertIn('return "mixed";', self.status)
+        self.assertIn('"request_active"', self.status)
+        self.assertIn("tb2_https_status_v3_start(uri)", self.cloud_request)
+        self.assertIn("tb2_https_status_v3_finish(error, http_status)", self.cloud_request)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

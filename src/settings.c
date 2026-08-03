@@ -717,7 +717,6 @@ static void settings_select_tb2_https_mode(uint8_t settingsId, const char *selec
     {
         disabledOption->overlayed = true;
     }
-    settings->cloud.tb2_passthrough_enabled = settings->cloud.tb2_enabled;
 }
 
 static void settings_normalize_tb2_https_modes(uint8_t settingsId)
@@ -739,10 +738,7 @@ static void settings_normalize_tb2_https_modes(uint8_t settingsId)
         }
     }
 
-    /* Keep the old in-memory gate working until the runtime is switched to the
-     * single proxy setting in the next implementation section. The internal
-     * compatibility option is never written back to configuration version 20. */
-    settings->cloud.tb2_passthrough_enabled = settings->cloud.tb2_enabled;
+    /* The legacy option is load-only input for the v19 -> v20 migration. */
     setting_item_t *legacyOption = settings_get_by_name_id(CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING,
                                                             settingsId);
     if (legacyOption != NULL)
@@ -1586,6 +1582,17 @@ setting_item_t *settings_get_by_name_ovl(const char *item, const char *overlay_n
     return settings_get_by_name_id(item, get_overlay_id(overlay_name));
 }
 
+bool settings_is_overlayed_id(const char *item, uint8_t settingsId)
+{
+    if (settingsId == 0 || settingsId >= MAX_OVERLAYS)
+    {
+        return false;
+    }
+
+    setting_item_t *option = settings_get_by_name_id(item, settingsId);
+    return option != NULL && option->overlayed;
+}
+
 static setting_item_t *settings_get_by_name_id(const char *item, uint8_t settingsId)
 {
     int pos = 0;
@@ -1681,11 +1688,6 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
     {
         settings_select_tb2_https_mode(settingsId, item);
     }
-    else if (!osStrcmp(item, CLOUD_TB2_PROXY_SETTING))
-    {
-        Settings_Overlay[settingsId].cloud.tb2_passthrough_enabled = value;
-    }
-
     if (settingsId == 0 && !osStrcmp(item, "mqtt_client_upstream.enabled") && !value)
     {
         Settings_Overlay[0].mqtt_client_upstream.passthrough_enabled = false;
@@ -1721,12 +1723,6 @@ bool settings_reset_id(const char *item, uint8_t settingsId)
     {
         settings_select_tb2_https_mode(settingsId, item);
     }
-    else if (!osStrcmp(item, CLOUD_TB2_PROXY_SETTING))
-    {
-        Settings_Overlay[settingsId].cloud.tb2_passthrough_enabled =
-            Settings_Overlay[settingsId].cloud.tb2_enabled;
-    }
-
     if (settingsId == 0 && !option->internal)
     {
         settings_changed_id(settingsId);

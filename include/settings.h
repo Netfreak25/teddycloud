@@ -829,6 +829,9 @@ bool settings_set_float_id(const char *item, float value, uint8_t settingsId);
 setting_item_t *settings_get_by_name(const char *item);
 setting_item_t *settings_get_by_name_ovl(const char *item, const char *overlay_name);
 
+/** Returns whether a setting has an explicit value in the selected overlay. */
+bool settings_is_overlayed_id(const char *item, uint8_t settingsId);
+
 /**
  * @brief Retrieves the value of a string setting item.
  *

@@ -24,6 +24,8 @@
 #include "stdbool.h"          // for bool, true, false
 #include "tls.h"              // for TlsContext, _TlsContext (ptr only)
 #include "tls_adapter.h"      // for tls_context_key_log_init
+#include "tb2_client_identity.h"
+#include "tb2_https_status.h"
 
 #define MAX_REDIRECTS 5
 
@@ -91,23 +93,21 @@ static error_t httpClientTlsInitCallbackClientAuthBoxine(HttpClientContext *cont
     req_cbr_t *cbr_ctx = context->sourceCtx;
     client_ctx_t *client_ctx = ((cbr_ctx_t *)cbr_ctx->ctx)->client_ctx;
     settings_t *settings = client_ctx->settings;
-    const bool_t useTb2Identity = settings->toniebox.boxGeneration == GENERATION_TB2;
-    const char *generation = useTb2Identity ? "TB2" : "TB1";
-    const settings_cert_t *clientCert = useTb2Identity ? &settings->internal.client_tb2 : &settings->internal.client_tb1;
-    const settings_cert_t *clientCertFiles = useTb2Identity ? &settings->core.client_cert_tb2.file : &settings->core.client_cert_tb1.file;
+    const settings_cert_t *clientCert = &settings->internal.client_tb1;
+    const settings_cert_t *clientCertFiles = &settings->core.client_cert_tb1.file;
 
     if (settings->internal.overlayNumber != 0 && client_cert_is_incomplete(clientCert))
     {
-        TRACE_WARNING("Missing %s Boxine certificates for overlay %u; trying the global %s certificate set\r\n",
-                      generation, (unsigned int)settings->internal.overlayNumber, generation);
+        TRACE_WARNING("Missing TB1 Boxine certificates for overlay %u; trying the global TB1 certificate set\r\n",
+                      (unsigned int)settings->internal.overlayNumber);
         settings = get_settings();
-        clientCert = useTb2Identity ? &settings->internal.client_tb2 : &settings->internal.client_tb1;
-        clientCertFiles = useTb2Identity ? &settings->core.client_cert_tb2.file : &settings->core.client_cert_tb1.file;
+        clientCert = &settings->internal.client_tb1;
+        clientCertFiles = &settings->core.client_cert_tb1.file;
     }
 
     if (client_cert_is_incomplete(clientCert))
     {
-        TRACE_ERROR("Failed to get complete %s Boxine client certificates:\r\n", generation);
+        TRACE_ERROR("Failed to get complete TB1 Boxine client certificates:\r\n");
         TRACE_ERROR(" ca.der (%s)\r\n", clientCertFiles->ca);
         TRACE_ERROR(" client.der (%s)\r\n", clientCertFiles->crt);
         TRACE_ERROR(" private.der (%s)\r\n", clientCertFiles->key);
@@ -116,6 +116,34 @@ static error_t httpClientTlsInitCallbackClientAuthBoxine(HttpClientContext *cont
 
     return httpClientTlsInitCallbackBase(context, tlsContext, clientCert->ca, clientCert->crt, clientCert->key);
 }
+
+static error_t httpClientTlsInitCallbackClientAuthTb2(HttpClientContext *context,
+                                                       TlsContext *tlsContext)
+{
+    req_cbr_t *cbr_ctx = context->sourceCtx;
+    client_ctx_t *client_ctx = ((cbr_ctx_t *)cbr_ctx->ctx)->client_ctx;
+    settings_t *settings = client_ctx != NULL ? client_ctx->settings : get_settings();
+    const settings_cert_t *identity = tb2_client_identity_resolve(settings, NULL);
+    if (identity == NULL)
+    {
+        return ERROR_FAILURE;
+    }
+    return httpClientTlsInitCallbackBase(context, tlsContext, identity->ca, identity->crt,
+                                         identity->key);
+}
+
+typedef enum
+{
+    WEB_REQUEST_CLOUD_NONE,
+    WEB_REQUEST_CLOUD_TB1,
+    WEB_REQUEST_CLOUD_TB2,
+} web_request_cloud_t;
+
+static error_t web_request_internal(const char *server, int port, bool https, const char *uri,
+                                    const char *queryString, const char *method,
+                                    const uint8_t *body, size_t bodyLen, const uint8_t *hash,
+                                    req_cbr_t *cbr, web_request_cloud_t cloud_mode,
+                                    bool printTextData, uint32_t *statusCode);
 
 int_t cloud_request_get(const char *server, int port, const char *uri, const char *queryString, const uint8_t *hash, req_cbr_t *cbr)
 {
@@ -127,6 +155,30 @@ int_t cloud_request_post(const char *server, int port, const char *uri, const ch
     return cloud_request(server, port, true, uri, queryString, "POST", body, bodyLen, hash, cbr);
 }
 
+int_t cloud_request_tb2_get(const char *server, int port, const char *uri,
+                            const char *queryString, const uint8_t *hash, req_cbr_t *cbr)
+{
+    tb2_https_status_v3_start(uri);
+    uint32_t http_status = 0;
+    error_t error = web_request_internal(server, port, true, uri, queryString, "GET", NULL, 0,
+                                         hash, cbr, WEB_REQUEST_CLOUD_TB2, true, &http_status);
+    tb2_https_status_v3_finish(error, http_status);
+    return error;
+}
+
+int_t cloud_request_tb2_post(const char *server, int port, const char *uri,
+                             const char *queryString, const uint8_t *body, size_t bodyLen,
+                             const uint8_t *hash, req_cbr_t *cbr)
+{
+    tb2_https_status_v3_start(uri);
+    uint32_t http_status = 0;
+    error_t error = web_request_internal(server, port, true, uri, queryString, "POST", body,
+                                         bodyLen, hash, cbr, WEB_REQUEST_CLOUD_TB2, true,
+                                         &http_status);
+    tb2_https_status_v3_finish(error, http_status);
+    return error;
+}
+
 char_t *ipv4AddrToString(Ipv4Addr ipAddr, char_t *str);
 
 int_t cloud_request(const char *server, int port, bool https, const char *uri, const char *queryString, const char *method, const uint8_t *body, size_t bodyLen, const uint8_t *hash, req_cbr_t *cbr)
@@ -134,6 +186,18 @@ int_t cloud_request(const char *server, int port, bool https, const char *uri, c
     return web_request(server, port, https, uri, queryString, method, body, bodyLen, hash, cbr, true, true, NULL);
 }
 error_t web_request(const char *server, int port, bool https, const char *uri, const char *queryString, const char *method, const uint8_t *body, size_t bodyLen, const uint8_t *hash, req_cbr_t *cbr, bool isCloud, bool printTextData, uint32_t *statusCode)
+{
+    return web_request_internal(server, port, https, uri, queryString, method, body, bodyLen,
+                                hash, cbr,
+                                isCloud ? WEB_REQUEST_CLOUD_TB1 : WEB_REQUEST_CLOUD_NONE,
+                                printTextData, statusCode);
+}
+
+static error_t web_request_internal(const char *server, int port, bool https, const char *uri,
+                                    const char *queryString, const char *method,
+                                    const uint8_t *body, size_t bodyLen, const uint8_t *hash,
+                                    req_cbr_t *cbr, web_request_cloud_t cloud_mode,
+                                    bool printTextData, uint32_t *statusCode)
 {
     cbr_ctx_t *cbr_ctx = (cbr_ctx_t *)cbr->ctx;
     client_ctx_t *client_ctx = cbr_ctx->client_ctx;
@@ -150,11 +214,16 @@ error_t web_request(const char *server, int port, bool https, const char *uri, c
         settings = client_ctx->settings;
     }
 
+    const bool isCloud = cloud_mode != WEB_REQUEST_CLOUD_NONE;
     if (isCloud)
     {
-        if (!settings->cloud.enabled)
+        const bool_t cloud_enabled = cloud_mode == WEB_REQUEST_CLOUD_TB2
+                                         ? settings->cloud.tb2_v3_enabled
+                                         : settings->cloud.enabled;
+        if (!cloud_enabled)
         {
-            TRACE_INFO("Cloud requests generally blocked in settings\r\n");
+            TRACE_INFO("%s cloud requests blocked in settings\r\n",
+                       cloud_mode == WEB_REQUEST_CLOUD_TB2 ? "TB2 v3" : "TB1");
             stats_update("cloud_blocked", 1);
             return ERROR_ADDRESS_NOT_FOUND;
         }
@@ -167,11 +236,15 @@ error_t web_request(const char *server, int port, bool https, const char *uri, c
     {
         if (!server)
         {
-            server = settings->cloud.remote_hostname;
+            server = cloud_mode == WEB_REQUEST_CLOUD_TB2
+                         ? settings->cloud.remote_hostname_tb2
+                         : settings->cloud.remote_hostname;
         }
         if (port <= 0)
         {
-            port = settings->cloud.remote_port;
+            port = cloud_mode == WEB_REQUEST_CLOUD_TB2
+                       ? settings->cloud.remote_port_tb2
+                       : settings->cloud.remote_port;
         }
 
         stats_update("cloud_requests", 1);
@@ -186,8 +259,10 @@ error_t web_request(const char *server, int port, bool https, const char *uri, c
     if (https)
     {
         HttpClientTlsInitCallback callback = httpClientTlsInitCallbackNoCA;
-        if (isCloud)
+        if (cloud_mode == WEB_REQUEST_CLOUD_TB1)
             callback = httpClientTlsInitCallbackClientAuthBoxine;
+        else if (cloud_mode == WEB_REQUEST_CLOUD_TB2)
+            callback = httpClientTlsInitCallbackClientAuthTb2;
         error = httpClientRegisterTlsInitCallback(&httpClientContext, callback);
         if (error)
         {

@@ -783,7 +783,10 @@ error_t handleCloudContentExt(HttpConnection *connection, const char_t *uri, con
 
     uint8_t *token = connection->private.authentication_token;
 
-    bool can_use_cloud = !(!client_ctx->settings->cloud.enabled || (api == V2_CONTENT && !client_ctx->settings->cloud.enableV2Content) || (tonieInfo->json.nocloud && !tonieInfo->json.cloud_override));
+    const bool_t cloud_mode_enabled = api == V3_CHAPTER
+                                          ? client_ctx->settings->cloud.tb2_v3_enabled
+                                          : client_ctx->settings->cloud.enabled;
+    bool can_use_cloud = !(!cloud_mode_enabled || (api == V2_CONTENT && !client_ctx->settings->cloud.enableV2Content) || (tonieInfo->json.nocloud && !tonieInfo->json.cloud_override));
     if (tonieInfo->json._source_type == CT_SOURCE_STREAM)
     {
         char *streamFileRel = &tonieInfo->json._streamFile[osStrlen(client_ctx->settings->internal.datadirfull)];
@@ -1194,7 +1197,14 @@ error_t handleCloudContentExt(HttpConnection *connection, const char_t *uri, con
             cbr_ctx_t ctx;
             req_cbr_t cbr = getCloudCbr(connection, uri, queryString, api, &ctx, client_ctx);
             ctx.tonieInfo = tonieInfo;
-            cloud_request_get(NULL, 0, uri, queryString, token, &cbr);
+            if (api == V3_CHAPTER)
+            {
+                cloud_request_tb2_get(NULL, 0, uri, queryString, token, &cbr);
+            }
+            else
+            {
+                cloud_request_get(NULL, 0, uri, queryString, token, &cbr);
+            }
             error = NO_ERROR;
         }
     }
@@ -2544,7 +2554,7 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
 
     process_freshness_check(client_ctx, &freshReq, &freshResp, &freshReqCloud, &freshnessCacheLen);
     
-    if (client_ctx->settings->cloud.enabled && client_ctx->settings->cloud.enableV3FreshnessCheck)
+    if (client_ctx->settings->cloud.tb2_v3_enabled && client_ctx->settings->cloud.enableV3FreshnessCheck)
     {
         cJSON *cloudReqJson = cJSON_CreateObject();
         cJSON *cloudContentObj = cJSON_CreateObject();
@@ -2571,7 +2581,7 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
         ctx.customData = (void *)&freshResp;
         ctx.customDataLen = freshReq.n_tonie_infos + freshnessCacheLen;
         
-        if (!cloud_request_post(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, (const uint8_t *)cloud_req_str, cloud_req_len, NULL, &cbr))
+        if (!cloud_request_tb2_post(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, (const uint8_t *)cloud_req_str, cloud_req_len, NULL, &cbr))
         {
             free(cloud_req_str);
             cJSON_Delete(cloudReqJson);
@@ -2669,11 +2679,11 @@ error_t handleCloudCheckOtaV3(HttpConnection *connection, const char_t *uri, con
 
     TRACE_INFO("V3 Check OTA request (%" PRIuSIZE " of %" PRIuSIZE "): %s\n", size, connection->request.byteCount, data);
 
-    if (client_ctx->settings->cloud.enabled && client_ctx->settings->cloud.enableV3Ota)
+    if (client_ctx->settings->cloud.tb2_v3_enabled && client_ctx->settings->cloud.enableV3Ota)
     {
         cbr_ctx_t ctx;
         req_cbr_t cbr = getCloudCbr(connection, uri, queryString, V3_CHECK_OTA, &ctx, client_ctx);
-        if (!cloud_request_post(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, data, size, NULL, &cbr))
+        if (!cloud_request_tb2_post(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, data, size, NULL, &cbr))
         {
             return NO_ERROR;
         }
@@ -2717,11 +2727,11 @@ error_t handleCloudSetupStatusV3(HttpConnection *connection, const char_t *uri, 
 
     TRACE_INFO("V3 Setup Status request (%" PRIuSIZE " of %" PRIuSIZE "): %s\n", size, connection->request.byteCount, data);
 
-    if (client_ctx->settings->cloud.enabled && client_ctx->settings->cloud.enableV3SetupStatus)
+    if (client_ctx->settings->cloud.tb2_v3_enabled && client_ctx->settings->cloud.enableV3SetupStatus)
     {
         cbr_ctx_t ctx;
         req_cbr_t cbr = getCloudCbr(connection, uri, queryString, V3_SETUP_STATUS, &ctx, client_ctx);
-        if (!cloud_request_post(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, data, size, NULL, &cbr))
+        if (!cloud_request_tb2_post(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, data, size, NULL, &cbr))
         {
             return NO_ERROR;
         }
@@ -2982,7 +2992,7 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
         freeTonieInfo(tonieInfo);
         return error;
     }
-    if (client_ctx->settings->cloud.enabled && client_ctx->settings->cloud.enableV3ContentMeta)
+    if (client_ctx->settings->cloud.tb2_v3_enabled && client_ctx->settings->cloud.enableV3ContentMeta)
     {
         if (tonieInfo->json.cloud_override)
         {
@@ -2995,7 +3005,7 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
 
         cbr_ctx_t ctx;
         req_cbr_t cbr = getCloudCbr(connection, uri, queryString, V3_CONTENT_META, &ctx, client_ctx);
-        if (!cloud_request_get(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, token, &cbr))
+        if (!cloud_request_tb2_get(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, token, &cbr))
         {
             freeTonieInfo(tonieInfo);
             return NO_ERROR;
@@ -3037,13 +3047,13 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
         return handleCloudContentExt(connection, uri, queryString, client_ctx, false, 12 + 11 + 3, V3_CHAPTER);
     }
 
-    if (client_ctx->settings->cloud.enabled && client_ctx->settings->cloud.enableV3Chapter)
+    if (client_ctx->settings->cloud.tb2_v3_enabled && client_ctx->settings->cloud.enableV3Chapter)
     {
         cbr_ctx_t ctx;
         req_cbr_t cbr = getCloudCbr(connection, uri, queryString, V3_CHAPTER, &ctx, client_ctx);
         // Note: chapter uses a query parameter `auth=...` which is extracted in handler if we need it, but proxying it just passes URI+Query.
         // We will pass the authentication token if available, though for V3_CHAPTER it seems to use `?auth=XXX` anyway.
-        if (!cloud_request_get(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, NULL, &cbr))
+        if (!cloud_request_tb2_get(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, NULL, &cbr))
         {
             return NO_ERROR;
         }
@@ -3101,7 +3111,7 @@ error_t handleCloudOtaV3(HttpConnection *connection, const char_t *uri, const ch
     time_format_current(current_time);
     mqtt_sendBoxEvent("LastCloudOtaTime", current_time, client_ctx);
 
-    if (client_ctx->settings->cloud.enabled && client_ctx->settings->cloud.enableV3Ota)
+    if (client_ctx->settings->cloud.tb2_v3_enabled && client_ctx->settings->cloud.enableV3Ota)
     {
         ota_ctx_t ota_ctx;
         cbr_ctx_t ctx;
@@ -3117,7 +3127,7 @@ error_t handleCloudOtaV3(HttpConnection *connection, const char_t *uri, const ch
         }
         ota_ctx.fileId = fileId;
         ctx.customData = &ota_ctx;
-        cloud_request_get(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, NULL, &cbr);
+        cloud_request_tb2_get(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, NULL, &cbr);
 
         if (!client_ctx->settings->cloud.cacheOta)
         {

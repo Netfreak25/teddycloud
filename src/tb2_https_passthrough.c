@@ -32,7 +32,9 @@
 #include "server_helpers.h"
 #include "tls.h"
 #include "tls_adapter.h"
+#include "tb2_client_identity.h"
 #include "tb2_https_passthrough.h"
+#include "tb2_https_status.h"
 
 #define TB2_TUNNEL_BUFFER_SIZE 16384
 #define TB2_TUNNEL_POLL_MS 20
@@ -41,20 +43,7 @@
 
 typedef struct
 {
-    bool_t initialized;
-    OsMutex mutex;
-    uint32_t session_counter;
-    uint32_t active_sessions;
-    char state[16];
-    char error_code[32];
-    uint64_t bytes_box_to_upstream;
-    uint64_t bytes_upstream_to_box;
-    time_t last_attempt;
-    time_t last_success;
-} tb2_passthrough_status_t;
-
-typedef struct
-{
+    bool_t enabled;
     char session_id[48];
     char directory[512];
     char traffic_path[576];
@@ -66,7 +55,14 @@ typedef struct
     time_t started_at;
 } tb2_capture_t;
 
-static tb2_passthrough_status_t passthrough_status;
+typedef struct
+{
+    bool_t initialized;
+    OsMutex mutex;
+    uint32_t session_counter;
+} tb2_capture_runtime_t;
+
+static tb2_capture_runtime_t capture_runtime;
 
 static void tb2_set_private_permissions(const char *path, bool_t directory)
 {
@@ -168,44 +164,10 @@ static settings_t *tb2_settings_from_certificate(HttpConnection *connection)
     return settings;
 }
 
-static bool_t tb2_identity_is_complete(const settings_cert_t *identity)
-{
-    return identity != NULL && identity->ca != NULL && identity->crt != NULL &&
-           identity->key != NULL && identity->ca[0] != '\0' && identity->crt[0] != '\0' &&
-           identity->key[0] != '\0';
-}
-
-static const settings_cert_t *tb2_resolve_original_identity(settings_t *settings)
-{
-    if (settings == NULL)
-    {
-        return NULL;
-    }
-
-    const settings_cert_t *identity = &settings->internal.client_tb2;
-    if (tb2_identity_is_complete(identity))
-    {
-        return identity;
-    }
-
-    if (settings->internal.overlayNumber != 0)
-    {
-        identity = &get_settings()->internal.client_tb2;
-        if (tb2_identity_is_complete(identity))
-        {
-            TRACE_WARNING("Missing TB2 certificates for overlay %u; using the global TB2 certificate set\r\n",
-                          (unsigned int)settings->internal.overlayNumber);
-            return identity;
-        }
-    }
-
-    return NULL;
-}
-
 static error_t tb2_outbound_tls_init(HttpClientContext *context, TlsContext *tls_context)
 {
     settings_t *settings = (settings_t *)context->sourceCtx;
-    const settings_cert_t *identity = tb2_resolve_original_identity(settings);
+    const settings_cert_t *identity = tb2_client_identity_resolve(settings, NULL);
     if (identity == NULL)
     {
         return ERROR_FAILURE;
@@ -234,11 +196,10 @@ static error_t tb2_outbound_tls_init(HttpClientContext *context, TlsContext *tls
 
 static error_t tb2_connect_upstream(settings_t *box_settings, HttpClientContext *upstream)
 {
-    settings_t *global = get_settings();
     error_t error;
-    upstream->serverName = global->cloud.remote_hostname_tb2;
+    upstream->serverName = box_settings->cloud.remote_hostname_tb2;
     upstream->sourceCtx = box_settings;
-    error = httpClientSetTimeout(upstream, global->core.http_client_timeout);
+    error = httpClientSetTimeout(upstream, box_settings->core.http_client_timeout);
     if (!error)
     {
         error = httpClientRegisterTlsInitCallback(upstream, tb2_outbound_tls_init);
@@ -248,7 +209,7 @@ static error_t tb2_connect_upstream(settings_t *box_settings, HttpClientContext 
         return error;
     }
 
-    void *resolver = resolve_host(global->cloud.remote_hostname_tb2);
+    void *resolver = resolve_host(box_settings->cloud.remote_hostname_tb2);
     if (resolver == NULL)
     {
         return ERROR_ADDRESS_NOT_FOUND;
@@ -262,7 +223,8 @@ static error_t tb2_connect_upstream(settings_t *box_settings, HttpClientContext 
         {
             break;
         }
-        error = httpClientConnect(upstream, &address, (uint16_t)global->cloud.remote_port_tb2);
+        error = httpClientConnect(upstream, &address,
+                                  (uint16_t)box_settings->cloud.remote_port_tb2);
         if (!error)
         {
             break;
@@ -281,6 +243,12 @@ static error_t tb2_capture_open(tb2_capture_t *capture, settings_t *settings)
 {
     osMemset(capture, 0, sizeof(*capture));
     capture->started_at = time(NULL);
+    if (!settings->cloud.tb2_capture_enabled)
+    {
+        osStrcpy(capture->session_id, "uncaptured");
+        return NO_ERROR;
+    }
+    capture->enabled = TRUE;
 
     char *root = tb2_resolve_capture_root(settings);
     if (root == NULL)
@@ -307,9 +275,9 @@ static error_t tb2_capture_open(tb2_capture_t *capture, settings_t *settings)
     bool_t directory_created = FALSE;
     for (uint32_t attempt = 0; attempt < 1024 && !directory_created; attempt++)
     {
-        osAcquireMutex(&passthrough_status.mutex);
-        uint32_t counter = ++passthrough_status.session_counter;
-        osReleaseMutex(&passthrough_status.mutex);
+        osAcquireMutex(&capture_runtime.mutex);
+        uint32_t counter = ++capture_runtime.session_counter;
+        osReleaseMutex(&capture_runtime.mutex);
 
         osSnprintf(capture->session_id, sizeof(capture->session_id), "%s-%08u", compact_time,
                    (unsigned)counter);
@@ -353,6 +321,11 @@ static error_t tb2_capture_open(tb2_capture_t *capture, settings_t *settings)
 static error_t tb2_capture_chunk(tb2_capture_t *capture, const char *direction,
                                  const uint8_t *data, size_t length)
 {
+    if (!capture->enabled)
+    {
+        return NO_ERROR;
+    }
+
     size_t encoded_length = 0;
     base64Encode(data, length, NULL, &encoded_length);
     char *encoded = osAllocMem(encoded_length + 1);
@@ -398,6 +371,11 @@ static error_t tb2_capture_chunk(tb2_capture_t *capture, const char *direction,
 static error_t tb2_capture_finish(tb2_capture_t *capture, settings_t *settings,
                                   const char *result_code)
 {
+    if (!capture->enabled)
+    {
+        return NO_ERROR;
+    }
+
     error_t error = NO_ERROR;
     if (capture->traffic != NULL)
     {
@@ -581,64 +559,6 @@ static void tb2_rotate_completed_captures(settings_t *settings)
     osFreeMem(root);
 }
 
-static void tb2_status_start(const char *state)
-{
-    osAcquireMutex(&passthrough_status.mutex);
-    passthrough_status.active_sessions++;
-    passthrough_status.last_attempt = time(NULL);
-    osStrncpy(passthrough_status.state, state, sizeof(passthrough_status.state) - 1);
-    passthrough_status.error_code[0] = '\0';
-    osReleaseMutex(&passthrough_status.mutex);
-}
-
-static void tb2_status_set_state(const char *state)
-{
-    osAcquireMutex(&passthrough_status.mutex);
-    osStrncpy(passthrough_status.state, state, sizeof(passthrough_status.state) - 1);
-    osReleaseMutex(&passthrough_status.mutex);
-}
-
-static void tb2_status_add_bytes(bool_t box_to_upstream, size_t length)
-{
-    osAcquireMutex(&passthrough_status.mutex);
-    if (box_to_upstream)
-    {
-        passthrough_status.bytes_box_to_upstream += length;
-    }
-    else
-    {
-        passthrough_status.bytes_upstream_to_box += length;
-    }
-    osReleaseMutex(&passthrough_status.mutex);
-}
-
-static void tb2_status_finish(bool_t success, const char *error_code)
-{
-    osAcquireMutex(&passthrough_status.mutex);
-    if (passthrough_status.active_sessions > 0)
-    {
-        passthrough_status.active_sessions--;
-    }
-    if (success)
-    {
-        passthrough_status.last_success = time(NULL);
-        passthrough_status.error_code[0] = '\0';
-        osStrncpy(passthrough_status.state,
-                  passthrough_status.active_sessions > 0 ? "tunneling" : "online",
-                  sizeof(passthrough_status.state) - 1);
-    }
-    else
-    {
-        osStrncpy(passthrough_status.error_code, error_code,
-                  sizeof(passthrough_status.error_code) - 1);
-        if (passthrough_status.active_sessions == 0)
-        {
-            osStrncpy(passthrough_status.state, "error", sizeof(passthrough_status.state) - 1);
-        }
-    }
-    osReleaseMutex(&passthrough_status.mutex);
-}
-
 static error_t tb2_tls_write_all(TlsContext *destination, const uint8_t *data, size_t length)
 {
     size_t offset = 0;
@@ -702,37 +622,62 @@ static error_t tb2_forward_ready(TlsContext *source, Socket *source_socket,
     {
         capture->bytes_upstream_to_box += received;
     }
-    tb2_status_add_bytes(box_to_upstream, received);
+    tb2_https_status_tunnel_add_bytes(box_to_upstream, received);
     *progress = TRUE;
     return NO_ERROR;
 }
 
 error_t tb2_https_passthrough_init(void)
 {
-    osMemset(&passthrough_status, 0, sizeof(passthrough_status));
-    if (!osCreateMutex(&passthrough_status.mutex))
+    osMemset(&capture_runtime, 0, sizeof(capture_runtime));
+    if (!osCreateMutex(&capture_runtime.mutex))
     {
         return ERROR_OUT_OF_RESOURCES;
     }
-    passthrough_status.initialized = TRUE;
-    osStrcpy(passthrough_status.state, "disabled");
+    capture_runtime.initialized = TRUE;
+    error_t error = tb2_https_status_init();
+    if (error)
+    {
+        osDeleteMutex(&capture_runtime.mutex);
+        capture_runtime.initialized = FALSE;
+        return error;
+    }
     return NO_ERROR;
 }
 
 void tb2_https_passthrough_deinit(void)
 {
-    if (passthrough_status.initialized)
+    tb2_https_status_deinit();
+    if (capture_runtime.initialized)
     {
-        osDeleteMutex(&passthrough_status.mutex);
-        passthrough_status.initialized = FALSE;
+        osDeleteMutex(&capture_runtime.mutex);
+        capture_runtime.initialized = FALSE;
     }
+}
+
+static bool_t tb2_https_proxy_is_configured(void)
+{
+    if (get_settings()->cloud.tb2_enabled)
+    {
+        return TRUE;
+    }
+    for (uint8_t id = 1; id < MAX_OVERLAYS; id++)
+    {
+        settings_t *settings = get_settings_id(id);
+        if (settings->internal.config_used &&
+            settings->toniebox.boxGeneration == GENERATION_TB2 &&
+            settings->cloud.tb2_enabled)
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
 }
 
 error_t tb2_https_passthrough_post_tls(HttpConnection *connection, bool_t *handled)
 {
     *handled = FALSE;
-    settings_t *global = get_settings();
-    if (!global->cloud.tb2_enabled || !global->cloud.tb2_passthrough_enabled)
+    if (!tb2_https_proxy_is_configured())
     {
         TRACE_DEBUG("TB2 HTTPS passthrough skipped: forwarding is disabled\r\n");
         return NO_ERROR;
@@ -744,18 +689,24 @@ error_t tb2_https_passthrough_post_tls(HttpConnection *connection, bool_t *handl
         TRACE_DEBUG("TB2 HTTPS passthrough skipped: no eligible TB2 overlay resolved\r\n");
         return NO_ERROR;
     }
+    if (!box_settings->cloud.tb2_enabled)
+    {
+        TRACE_DEBUG("TB2 HTTPS passthrough skipped: transparent mode is disabled for overlay %u\r\n",
+                    (unsigned int)box_settings->internal.overlayNumber);
+        return NO_ERROR;
+    }
     *handled = TRUE;
 
     tb2_capture_t capture;
-    error_t error = tb2_capture_open(&capture, global);
+    error_t error = tb2_capture_open(&capture, box_settings);
     if (error)
     {
-        tb2_status_start("error");
-        tb2_status_finish(FALSE, "capture_open_failed");
+        tb2_https_status_tunnel_start();
+        tb2_https_status_tunnel_finish(FALSE, "capture_open_failed");
         return error;
     }
 
-    tb2_status_start("connecting");
+    tb2_https_status_tunnel_start();
     HttpClientContext upstream;
     osMemset(&upstream, 0, sizeof(upstream));
 
@@ -770,7 +721,7 @@ error_t tb2_https_passthrough_post_tls(HttpConnection *connection, bool_t *handl
     if (!error)
     {
         socketSetTimeout(connection->socket, TB2_TUNNEL_IO_TIMEOUT_MS);
-        tb2_status_set_state("tunneling");
+        tb2_https_status_tunnel_set_state("tunneling");
         result_code = "stream_failed";
 
         while (!error)
@@ -804,15 +755,18 @@ error_t tb2_https_passthrough_post_tls(HttpConnection *connection, bool_t *handl
     {
         httpClientDeinit(&upstream);
     }
-    error_t capture_finish_error = tb2_capture_finish(&capture, global, result_code);
+    error_t capture_finish_error = tb2_capture_finish(&capture, box_settings, result_code);
     if (capture_finish_error)
     {
         success = FALSE;
         error = capture_finish_error;
         result_code = "capture_finalize_failed";
     }
-    tb2_rotate_completed_captures(global);
-    tb2_status_finish(success, result_code);
+    if (capture.enabled)
+    {
+        tb2_rotate_completed_captures(box_settings);
+    }
+    tb2_https_status_tunnel_finish(success, result_code);
 
     TRACE_INFO("TB2 HTTPS passthrough session=%s status=%s up=%llu down=%llu\r\n",
                capture.session_id, result_code,
@@ -823,53 +777,5 @@ error_t tb2_https_passthrough_post_tls(HttpConnection *connection, bool_t *handl
 
 error_t tb2_https_passthrough_write_status(HttpConnection *connection)
 {
-    settings_t *settings = get_settings();
-    cJSON *json = cJSON_CreateObject();
-    if (json == NULL)
-    {
-        return ERROR_OUT_OF_MEMORY;
-    }
-
-    osAcquireMutex(&passthrough_status.mutex);
-    const char *state;
-    if (!settings->cloud.tb2_enabled)
-    {
-        state = "disabled";
-    }
-    else if (!settings->cloud.tb2_passthrough_enabled)
-    {
-        state = "standby";
-    }
-    else if (osStrcmp(passthrough_status.state, "disabled") == 0)
-    {
-        state = "armed";
-    }
-    else
-    {
-        state = passthrough_status.state;
-    }
-
-    cJSON_AddBoolToObject(json, "enabled", settings->cloud.tb2_enabled);
-    cJSON_AddBoolToObject(json, "passthrough_enabled", settings->cloud.tb2_passthrough_enabled);
-    cJSON_AddStringToObject(json, "state", state);
-    cJSON_AddStringToObject(json, "hostname", settings->cloud.remote_hostname_tb2);
-    cJSON_AddNumberToObject(json, "port", settings->cloud.remote_port_tb2);
-    cJSON_AddNumberToObject(json, "bytes_box_to_upstream",
-                           (double)passthrough_status.bytes_box_to_upstream);
-    cJSON_AddNumberToObject(json, "bytes_upstream_to_box",
-                           (double)passthrough_status.bytes_upstream_to_box);
-    cJSON_AddNumberToObject(json, "last_attempt", (double)passthrough_status.last_attempt);
-    cJSON_AddNumberToObject(json, "last_success", (double)passthrough_status.last_success);
-    cJSON_AddStringToObject(json, "error_code", passthrough_status.error_code);
-    osReleaseMutex(&passthrough_status.mutex);
-
-    char *body = cJSON_PrintUnformatted(json);
-    cJSON_Delete(json);
-    if (body == NULL)
-    {
-        return ERROR_OUT_OF_MEMORY;
-    }
-
-    httpPrepareHeader(connection, "application/json; charset=utf-8", osStrlen(body));
-    return httpWriteResponse(connection, body, connection->response.contentLength, true);
+    return tb2_https_status_write(connection);
 }

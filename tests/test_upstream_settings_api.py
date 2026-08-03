@@ -180,7 +180,11 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         payload = json.loads(body)
         self.assertTrue(payload["enabled"])
         self.assertTrue(payload["passthrough_enabled"])
-        self.assertIn(payload["state"], ("armed", "connecting", "tunneling", "online", "error"))
+        self.assertEqual(payload["mode"], "transparent")
+        self.assertIn(payload["state"], ("ready", "connecting", "tunneling", "success", "error"))
+        self.assertIn("v3", payload)
+        self.assertIn("transparent", payload)
+        self.assertIn("mode_counts", payload)
         self.assertEqual(payload["hostname"], self.get_setting("cloud.remote_hostname_tb2"))
 
         status, body = self.set_setting("cloud.tb2_passthrough_enabled", "false")
