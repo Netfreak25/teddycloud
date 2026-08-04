@@ -704,9 +704,7 @@
         "french": "FR",
         "german": "DE",
         "spanish": "ES",
-        "klingon": "TLH",
-        "sindarin": "SJN",
-        "quenya": "QYA"
+        "klingon": "TLH"
     },
     "languageUtil": {
         "af-af": "Afrikaans (Afrique du Sud)",

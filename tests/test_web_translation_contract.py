@@ -12,7 +12,7 @@ SETTINGS_PATH = ROOT / "src" / "settings.c"
 I18N_PATH = ROOT / "teddycloud_web" / "src" / "i18n.ts"
 
 FULL_LANGUAGES = ("en", "de", "fr", "es")
-PARTIAL_LANGUAGES = ("tlh", "sjn", "qya")
+PARTIAL_LANGUAGES = ("tlh",)
 ALL_LANGUAGES = FULL_LANGUAGES + PARTIAL_LANGUAGES
 
 PUBLIC_OPTION_PATTERN = re.compile(
@@ -113,6 +113,36 @@ class WebTranslationContractTests(unittest.TestCase):
             if str(value) != str(english[key])
         ]
         self.assertGreaterEqual(len(localized_values), 50)
+
+    def test_removed_elvish_locales_are_not_exposed(self) -> None:
+        removed_languages = ("sjn", "qya")
+        i18n_source = I18N_PATH.read_text(encoding="utf-8")
+        language_switcher = (
+            ROOT
+            / "teddycloud_web"
+            / "src"
+            / "components"
+            / "common"
+            / "header"
+            / "StyledLanguageSwitcher.tsx"
+        ).read_text(encoding="utf-8")
+        translation_utils = (
+            ROOT
+            / "teddycloud_web"
+            / "src"
+            / "components"
+            / "community"
+            / "translation"
+            / "utils"
+            / "TranslationUtils.ts"
+        ).read_text(encoding="utf-8")
+
+        for language in removed_languages:
+            self.assertNotIn(f'"{language}"', i18n_source)
+            self.assertNotIn(f'key: "{language}"', language_switcher)
+            self.assertNotIn(f'"{language}"', translation_utils)
+            self.assertFalse((TRANSLATION_DIR / f"{language}.json").exists())
+            self.assertFalse((BUNDLE_TRANSLATION_DIR / f"{language}.json").exists())
 
     def test_translations_preserve_placeholder_names(self) -> None:
         english = self.flattened["en"]
