@@ -1,0 +1,28 @@
+{
+    "language": {
+        "klingon": "TLH"
+    },
+    "community": {
+        "plugins": {
+            "helpButton": "QaH"
+        }
+    },
+    "fileBrowser": {
+        "help": {
+            "showHelp": "QaH",
+            "title": "QaH"
+        }
+    },
+    "tonieboxes": {
+        "boxSetup": {
+            "identifyVersion": {
+                "or": "qoj"
+            }
+        }
+    },
+    "tonies": {
+        "help": {
+            "title": "QaH"
+        }
+    }
+}

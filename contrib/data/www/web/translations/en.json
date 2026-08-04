@@ -703,7 +703,10 @@
         "english": "EN",
         "french": "FR",
         "german": "DE",
-        "spanish": "ES"
+        "spanish": "ES",
+        "klingon": "TLH",
+        "sindarin": "SJN",
+        "quenya": "QYA"
     },
     "languageUtil": {
         "af-af": "Afrikaans (South Africa)",
@@ -1083,7 +1086,15 @@
             "forward": "Forward",
             "global": "Use global",
             "searchSources": "Search log sources",
-            "title": "Bidirectional forwarding filters"
+            "title": "Bidirectional forwarding filters",
+            "groups": {
+                "logs": "Logs",
+                "metrics": "Metrics",
+                "appReply": "App Reply",
+                "settings": "Settings",
+                "playback": "Playback",
+                "appControl": "App Control"
+            }
         },
         "levelLabel": "Settings level",
         "navigationTitle": "Settings",
@@ -1137,7 +1148,897 @@
         "toniesJsonUpdateSuccessful": "Tonies(.custom).json reloaded successfully!",
         "tryToRestartTC": "Try to restart TeddyCloud",
         "warning": "Attention! Settings level",
-        "warningHint": "If you are missing settings, increase the 'Settings level'."
+        "warningHint": "If you are missing settings, increase the 'Settings level'.",
+        "optionText": {
+            "log__level": {
+                "label": "Loglevel",
+                "description": "0=off - 6=verbose"
+            },
+            "log__color": {
+                "label": "Colored log",
+                "description": "Colored log"
+            },
+            "log__logFullAuth": {
+                "label": "Log auth",
+                "description": "Log full authentication of tags"
+            },
+            "core__server__http_port": {
+                "label": "HTTP port",
+                "description": "HTTP port for the webinterface"
+            },
+            "core__server__https_web_port": {
+                "label": "HTTPS Web port",
+                "description": "HTTPS port for the webinterface"
+            },
+            "core__server__https_api_port": {
+                "label": "HTTPS API port",
+                "description": "HTTPS port for the Toniebox API"
+            },
+            "core__server__bind_ip": {
+                "label": "Bind IP",
+                "description": "ip for binding the http ports to"
+            },
+            "core__host_url": {
+                "label": "Host URL",
+                "description": "URL to teddyCloud server"
+            },
+            "core__certdir": {
+                "label": "Cert dir",
+                "description": "Directory to upload global TB1 or box-specific client certificates"
+            },
+            "core__certdir_tb2": {
+                "label": "Cert dir",
+                "description": "Directory to upload genuine TB2 client certificates"
+            },
+            "core__contentdir": {
+                "label": "Content dir",
+                "description": "Directory for placing cloud content"
+            },
+            "core__librarydir": {
+                "label": "Library dir",
+                "description": "Directory of the audio library"
+            },
+            "core__datadir": {
+                "label": "Data dir",
+                "description": "Base directory for 'contentdir', 'firmwaredir', 'cachedir' and 'wwwdir' when they are relative"
+            },
+            "core__wwwdir": {
+                "label": "WWW dir",
+                "description": "Directory for web UI assets (relative to datadir, or absolute)"
+            },
+            "core__pluginsdir": {
+                "label": "Plugins dir",
+                "description": "Directory for web plugins (relative to wwwdir, or absolute)"
+            },
+            "core__firmwaredir": {
+                "label": "Firmware dir",
+                "description": "Directory to upload original firmware"
+            },
+            "core__cachedir": {
+                "label": "Cache dir",
+                "description": "Directory where to cache files downloaded from internet"
+            },
+            "core__sslkeylogfile": {
+                "label": "SSL-key logfile",
+                "description": "SSL/TLS key log filename"
+            },
+            "core__server__http_client_timeout": {
+                "label": "Connection timeout",
+                "description": "HTTP client connection timeout (default: 500ms)"
+            },
+            "core__file_upload_timeout_ms": {
+                "label": "File upload timeout",
+                "description": "Client-side timeout for file uploads in ms (15s–5min). Default 120s for large audio files."
+            },
+            "core__new_webgui_as_default": {
+                "label": "New WebGUI",
+                "description": "Use new WebGUI as default"
+            },
+            "core__server_cert__file__ca": {
+                "label": "CA certificate",
+                "description": "CA certificate"
+            },
+            "core__server_cert__file__ca_der": {
+                "label": "CA certificate as DER",
+                "description": "CA certificate as DER"
+            },
+            "core__server_cert__file__ca_key": {
+                "label": "CA key",
+                "description": "CA key"
+            },
+            "core__server_cert__file__crt": {
+                "label": "Server certificate",
+                "description": "Server certificate"
+            },
+            "core__server_cert__file__key": {
+                "label": "Server key",
+                "description": "Server key"
+            },
+            "core__server_cert__data__ca": {
+                "label": "CA certificate data",
+                "description": "CA certificate data"
+            },
+            "core__server_cert_tb2__file__ca": {
+                "label": "CA certificate",
+                "description": "CA certificate"
+            },
+            "core__server_cert_tb2__file__ca_der": {
+                "label": "CA certificate as DER",
+                "description": "CA certificate as DER"
+            },
+            "core__server_cert_tb2__file__ca_key": {
+                "label": "CA key",
+                "description": "CA key"
+            },
+            "core__server_cert_tb2__file__crt": {
+                "label": "Server certificate",
+                "description": "Server certificate"
+            },
+            "core__server_cert_tb2__file__key": {
+                "label": "Server key",
+                "description": "Server key"
+            },
+            "core__server_cert_tb2__data__ca": {
+                "label": "CA certificate data",
+                "description": "CA certificate data"
+            },
+            "core__client_cert_tb1__file__ca": {
+                "label": "Client CA (TB1)",
+                "description": "Original TB1 upstream trust CA"
+            },
+            "core__client_cert_tb1__file__crt": {
+                "label": "Client certificate (TB1)",
+                "description": "Original TB1 upstream client certificate"
+            },
+            "core__client_cert_tb1__file__key": {
+                "label": "Client key (TB1)",
+                "description": "Original TB1 upstream private key"
+            },
+            "core__client_cert_tb2__file__ca": {
+                "label": "Client CA",
+                "description": "Original TB2 upstream trust CA"
+            },
+            "core__client_cert_tb2__file__crt": {
+                "label": "Client certificate",
+                "description": "Original TB2 upstream client certificate"
+            },
+            "core__client_cert_tb2__file__key": {
+                "label": "Client key",
+                "description": "Original TB2 upstream private key"
+            },
+            "core__client_cert_fake__file__ca": {
+                "label": "Fake Client CA",
+                "description": "Fake Client Certificate Authority"
+            },
+            "core__client_cert_fake__file__crt": {
+                "label": "Fake Client certificate",
+                "description": "Fake Client certificate"
+            },
+            "core__client_cert_fake__file__key": {
+                "label": "Fake Client key",
+                "description": "Fake Client key"
+            },
+            "core__allowOrigin": {
+                "label": "CORS Allow-Origin",
+                "description": "Set CORS Access-Control-Allow-Origin header"
+            },
+            "core__boxCertAuth": {
+                "label": "HTTPS box cert auth",
+                "description": "Client certificates are required for access to the HTTPS API for the boxes"
+            },
+            "core__allowNewBox": {
+                "label": "Allow new boxes",
+                "description": "Allow new boxes to be added, if they try to connect"
+            },
+            "core__flex_enabled": {
+                "label": "Enable Flex-Tonie",
+                "description": "When enabled this UID always gets assigned the audio selected from web interface"
+            },
+            "core__flex_uid": {
+                "label": "Flex-Tonie UID",
+                "description": "UID which shall get selected audio files assigned"
+            },
+            "core__settings_level": {
+                "label": "Settings level",
+                "description": "1: Basic, 2: Detail, 3: Expert"
+            },
+            "core__tonies_json_auto_update": {
+                "label": "Auto-Update tonies.json",
+                "description": "Auto-Update tonies.json for Tonies information and images."
+            },
+            "core__full_taf_validation": {
+                "label": "Full TAF validation",
+                "description": "Validate TAFs by checking the audio length and the SHA1 hash. (may be slow, as file needs to be fully read!)"
+            },
+            "core__tap_taf_validation": {
+                "label": "TAP TAF validation",
+                "description": "Validate TAFs of TAPs by checking the audio length and the SHA1 hash. (may be slow, as file needs to be fully read!)"
+            },
+            "core__track_pos_taf_validation": {
+                "label": "Track position error TAF validation",
+                "description": "Validate TAFs when track position error occurs by checking the audio length and the SHA1 hash. (may be slow, as file needs to be fully read!)"
+            },
+            "security_mit__warnAccess": {
+                "label": "Warning on unwanted access",
+                "description": "If teddyCloud detects unusal access, warn on frontend until restart. (See on*)"
+            },
+            "security_mit__lockAccess": {
+                "label": "Lock on unwanted access",
+                "description": "If teddyCloud detects a unusal access, lock frontend until restart. (See on*)"
+            },
+            "security_mit__httpsOnly": {
+                "label": "On HTTPS only",
+                "description": "Lock/Warn on HTTPS port only."
+            },
+            "security_mit__onBlacklistDomain": {
+                "label": "Detect blacklist domains",
+                "description": "Lock/Warn, if domain is known to be public."
+            },
+            "security_mit__onCrawler": {
+                "label": "Detect crawlers",
+                "description": "Lock/Warn, if crawler is detected (User-Agent)."
+            },
+            "security_mit__onRobotsTxt": {
+                "label": "Detect robots.txt",
+                "description": "Lock/Warn, if robots.txt is accessed."
+            },
+            "security_mit__hardLock": {
+                "label": "Disable teddyCloud",
+                "description": "Disable teddyCloud due to ignored security warnings."
+            },
+            "cloud__enabled": {
+                "label": "Enable TB1 HTTPS Upstream",
+                "description": "Enable HTTPS forwarding to Boxine/Toniecloud for TB1"
+            },
+            "cloud__tb2_enabled": {
+                "label": "Enable transparent TB2 HTTPS proxy",
+                "description": "Forward decrypted TB2 HTTPS traffic unchanged to the upstream server"
+            },
+            "cloud__tb2_v3_enabled": {
+                "label": "Enable TB2 v3 cloud path",
+                "description": "Handle and forward supported TB2 v3 HTTPS endpoints"
+            },
+            "cloud__tb2_capture_enabled": {
+                "label": "Capture transparent TB2 HTTPS traffic",
+                "description": "Write the complete unredacted transparent TB2 HTTPS traffic capture"
+            },
+            "cloud__remote_hostname": {
+                "label": "Cloud hostname",
+                "description": "Hostname of remote cloud server"
+            },
+            "cloud__remote_hostname_tb2": {
+                "label": "TB2 HTTPS server hostname",
+                "description": "Hostname of the TB2 HTTPS upstream server"
+            },
+            "cloud__remote_port": {
+                "label": "Cloud port",
+                "description": "Port of remote cloud server"
+            },
+            "cloud__remote_port_tb2": {
+                "label": "TB2 HTTPS server port",
+                "description": "Port of the TB2 HTTPS upstream server"
+            },
+            "cloud__tb2_capture_dir": {
+                "label": "TB2 HTTPS capture directory",
+                "description": "Local directory for sensitive unredacted passthrough captures"
+            },
+            "cloud__tb2_capture_max_mib": {
+                "label": "TB2 HTTPS capture limit",
+                "description": "Maximum completed capture storage in MiB"
+            },
+            "cloud__enableV1Claim": {
+                "label": "Forward 'claim'",
+                "description": "Forward 'claim' queries to claim tonies in the household in the tonies cloud"
+            },
+            "cloud__enableV1CloudReset": {
+                "label": "Forward 'cloudReset'",
+                "description": "Forward 'cloudReset' queries to tonies cloud"
+            },
+            "cloud__enableV1FreshnessCheck": {
+                "label": "Forward 'freshnessCheck'",
+                "description": "Forward 'freshnessCheck' queries to mark new content as updated to tonies cloud"
+            },
+            "cloud__enableV3FreshnessCheck": {
+                "label": "Forward 'freshnessCheck' v3",
+                "description": "Forward 'freshnessCheck' v3 queries to mark new content as updated to tonies cloud"
+            },
+            "cloud__enableV1Log": {
+                "label": "Forward 'log'",
+                "description": "Forward 'log' queries to tonies cloud"
+            },
+            "cloud__enableV1Time": {
+                "label": "Forward 'time'",
+                "description": "Forward 'time' queries to tonies cloud"
+            },
+            "cloud__enableV1Ota": {
+                "label": "Forward 'ota'",
+                "description": "Forward 'ota' queries to tonies cloud"
+            },
+            "cloud__enableV3Ota": {
+                "label": "Forward 'check-ota' v3",
+                "description": "Forward 'check-ota' v3 queries to tonies cloud"
+            },
+            "cloud__enableV2Content": {
+                "label": "Forward 'content'",
+                "description": "Forward 'content' queries to download content from the tonies cloud"
+            },
+            "cloud__enableV3SetupStatus": {
+                "label": "Forward 'setup-status' v3",
+                "description": "Forward 'setup-status' v3 queries to tonies cloud"
+            },
+            "cloud__enableV3ContentMeta": {
+                "label": "Forward 'content-meta' v3",
+                "description": "Forward 'content-meta' v3 queries to tonies cloud"
+            },
+            "cloud__enableV3Chapter": {
+                "label": "Forward 'chapter' v3",
+                "description": "Forward 'chapter' v3 queries to tonies cloud"
+            },
+            "cloud__cacheOta": {
+                "label": "Cache OTA",
+                "description": "Cache OTA files in firmware dir of local server (this still blocks OTA if local OTA delivery is disabled)"
+            },
+            "cloud__localOta": {
+                "label": "Local OTA delivery",
+                "description": "Send local OTA files in firmware dir"
+            },
+            "cloud__cacheContent": {
+                "label": "Cache content",
+                "description": "Cache cloud content on local server"
+            },
+            "cloud__cacheToLibrary": {
+                "label": "Cache to library",
+                "description": "Cache cloud content to library"
+            },
+            "cloud__markCustomTagByPass": {
+                "label": "Autodetect custom tags (password)",
+                "description": "Automatically mark custom tags by password"
+            },
+            "cloud__markCustomTagByUid": {
+                "label": "Autodetect custom tags (uid)",
+                "description": "Automatically mark custom tags by uid"
+            },
+            "cloud__prioCustomContent": {
+                "label": "Prioritize custom content",
+                "description": "Prioritize custom content over tonies content (force update, only if \"Update content on lower audio id\" is disabled)"
+            },
+            "cloud__updateOnLowerAudioId": {
+                "label": "Update content on lower audio id",
+                "description": "Update content on a lower audio id"
+            },
+            "cloud__dumpRuidAuthContentJson": {
+                "label": "Dump rUID/auth",
+                "description": "Dump the rUID and authentication into the content JSON."
+            },
+            "encode__bitrate": {
+                "label": "Opus bitrate",
+                "description": "Opus bitrate, tested 64, 96(default), 128, 192, 256 - be aware that this increases the TAF size!"
+            },
+            "encode__ffmpeg_stream_buffer_ms": {
+                "label": "Stream buffer ms",
+                "description": "Stream buffer for ffmpeg based streaming."
+            },
+            "encode__ffmpeg_stream_restart": {
+                "label": "Stream force restart",
+                "description": "If a stream is continued by the box, a new file is forced. This has the cost of a slower restart, but does not play the old buffered content and deletes the previous stream data on the box."
+            },
+            "encode__ffmpeg_sweep_startup_buffer": {
+                "label": "Sweep stream prebuffer",
+                "description": "Webradio streams often send several seconds as a buffer immediately. This may contain ads and will add up if you disalbe 'Stream force restart'."
+            },
+            "encode__ffmpeg_sweep_delay_ms": {
+                "label": "Sweep delay ms",
+                "description": "Wait x ms until sweeping is stopped and stream is started. Delays stream start, but may increase success."
+            },
+            "encode__stream_max_size": {
+                "label": "Max stream filesize",
+                "description": "The box may create an empty file this length for each stream. So if you have 10 streaming tonies you use, the box may block 10*240MB. The only downside is, that the box will stop after the file is full and you'll need to replace the tag onto the box. Must not be a multiply of 4096, Default: 251.658.239, so 240MB, which means around 6h."
+            },
+            "encode__use_frontend": {
+                "label": "Browser encoding",
+                "description": "Use browser-side encoding instead of server-side (requires modern browser with WebAssembly support)"
+            },
+            "frontend__split_model_content": {
+                "label": "Split content / model",
+                "description": "If enabled, the content of the TAF will be shown beside the model of the figurine"
+            },
+            "frontend__ignore_web_version_mismatch": {
+                "label": "Ignore web version mismatch",
+                "description": "Ignore web version mismatch and don't show the mismatch warning"
+            },
+            "frontend__confirm_audioplayer_close": {
+                "label": "Confirm audioplayer close",
+                "description": "Confirm dialog when closing the audioplayer during active playback"
+            },
+            "frontend__check_cc3200_cfw": {
+                "label": "Check for CFW on CC3200 box",
+                "description": "Enable detection of CFW on CC3200 boxes to link MAC addresses to IPs."
+            },
+            "toniebox__api_access": {
+                "label": "API access",
+                "description": "Grant access to the API (default value for new boxes)"
+            },
+            "toniebox__overrideCloud": {
+                "label": "Override cloud settings",
+                "description": "Override tonies cloud settings for the toniebox with those set here"
+            },
+            "toniebox__boxGeneration": {
+                "label": "Box Generation",
+                "description": "Generation of the box (TB1/TB2)"
+            },
+            "toniebox__max_vol_spk": {
+                "label": "Limit speaker volume",
+                "description": "0=25%, 1=50%, 2=75%, 3=100%"
+            },
+            "toniebox__max_vol_hdp": {
+                "label": "Limit headphone volume",
+                "description": "0=25%, 1=50%, 2=75%, 3=100%"
+            },
+            "toniebox__slap_enabled": {
+                "label": "Slap to skip",
+                "description": "Enable track skip via slapping gesture"
+            },
+            "toniebox__slap_back_left": {
+                "label": "Slap direction",
+                "description": "Determine slap direction for skipping track: False for left-backward, True for left-forward"
+            },
+            "toniebox__led": {
+                "label": "LED brightness",
+                "description": "0=on, 1=off, 2=dimmed"
+            },
+            "toniebox__overrideFields": {
+                "label": "Override unknown fields",
+                "description": "Override unknown fields 2 + 6"
+            },
+            "toniebox__field2": {
+                "label": "Field 2",
+                "description": "Unknown Toniebox setting, default 7"
+            },
+            "toniebox__field6": {
+                "label": "Field 6",
+                "description": "Unknown Toniebox setting, default 1"
+            },
+            "toniebox2__baby_mode": {
+                "label": "Baby mode",
+                "description": "Enable baby mode (1 year)."
+            },
+            "toniebox2__max_volume": {
+                "label": "Max speaker volume",
+                "description": "Maximum speaker volume in percent."
+            },
+            "toniebox2__bedtime_max_volume": {
+                "label": "Bedtime speaker volume",
+                "description": "Maximum bedtime speaker volume in percent."
+            },
+            "toniebox2__max_headphone_volume": {
+                "label": "Max headphone volume",
+                "description": "Maximum headphone volume in percent."
+            },
+            "toniebox2__bedtime_max_headphone_volume": {
+                "label": "Bedtime headphone volume",
+                "description": "Maximum bedtime headphone volume in percent."
+            },
+            "toniebox2__lightring_brightness": {
+                "label": "LED brightness",
+                "description": "Lightring brightness"
+            },
+            "toniebox2__bedtime_lightring_brightness": {
+                "label": "Bedtime LED brightness",
+                "description": "Bedtime lightring brightness in percent."
+            },
+            "toniebox2__scrubbing_enabled": {
+                "label": "Scrubbing",
+                "description": "Enable scrubbing."
+            },
+            "toniebox2__slap_enabled": {
+                "label": "Slap to skip",
+                "description": "Enable track skip via slapping gesture."
+            },
+            "toniebox2__slap_back_left": {
+                "label": "Slap direction",
+                "description": "Use the left slap direction for skipping."
+            },
+            "rtnl__logRaw": {
+                "label": "Log RTNL (bin)",
+                "description": "Enable logging for raw RTNL data"
+            },
+            "rtnl__logHuman": {
+                "label": "Log RTNL (csv)",
+                "description": "Enable logging for human-readable RTNL data"
+            },
+            "rtnl__logRawFile": {
+                "label": "RTNL bin file",
+                "description": "Specify the filepath for raw RTNL log"
+            },
+            "rtnl__logHumanFile": {
+                "label": "RTNL csv file",
+                "description": "Specify the filepath for human-readable RTNL log"
+            },
+            "pcap__enabled": {
+                "label": "Log HTTP(S) traffic",
+                "description": "Enable logging for HTTP(S) traffic into a .pcap file (needs restart)"
+            },
+            "pcap__filename": {
+                "label": "libpcap log file",
+                "description": "Specify the filepath for libpcap log"
+            },
+            "mqtt__enabled": {
+                "label": "Enable MQTT",
+                "description": "Enable MQTT Client"
+            },
+            "mqtt__hostname": {
+                "label": "MQTT hostname",
+                "description": "IP or Hostname of the MQTT server"
+            },
+            "mqtt__port": {
+                "label": "MQTT port",
+                "description": "Port of MQTT server"
+            },
+            "mqtt__username": {
+                "label": "Username",
+                "description": "MQTT Username"
+            },
+            "mqtt__password": {
+                "label": "Password",
+                "description": "MQTT Password"
+            },
+            "mqtt__identification": {
+                "label": "Client identification",
+                "description": "Client identification"
+            },
+            "mqtt__topic": {
+                "label": "Topic prefix",
+                "description": "Topic prefix"
+            },
+            "mqtt__qosLevel": {
+                "label": "QoS level",
+                "description": "QoS level"
+            },
+            "mqtt__retain_will": {
+                "label": "Retain last will",
+                "description": "Retain last will message"
+            },
+            "mqtt__disable_on_error": {
+                "label": "Disable MQTT on error",
+                "description": "Disable MQTT if there were to many errors"
+            },
+            "mqtt__tls_enabled": {
+                "label": "Enable TLS",
+                "description": "Enable TLS/SSL encryption for MQTT connection"
+            },
+            "mqtt__tls_ca_file": {
+                "label": "CA certificate",
+                "description": "Path to CA certificate file (PEM format)"
+            },
+            "mqtt__tls_insecure": {
+                "label": "Skip verification",
+                "description": "Skip TLS certificate verification (insecure!)"
+            },
+            "mqtt_client_upstream__enabled": {
+                "label": "Enable MQTT Client",
+                "description": "Enable the Tonies ICI upstream MQTT cloud path"
+            },
+            "mqtt_client_upstream__passthrough_enabled": {
+                "label": "Enable transparent capture forwarder",
+                "description": "Forward MQTT traffic unchanged while recording a full local capture"
+            },
+            "mqtt_client_upstream__port": {
+                "label": "MQTT Server port",
+                "description": "Port of the Tonies ICI upstream MQTT server"
+            },
+            "mqtt_client_upstream__hostname": {
+                "label": "MQTT Server hostname",
+                "description": "Hostname of the Tonies ICI upstream MQTT server"
+            },
+            "mqtt_client_upstream__capture_dir": {
+                "label": "Capture directory",
+                "description": "Directory for full MQTT passthrough captures"
+            },
+            "mqtt_client_upstream__capture_max_mib": {
+                "label": "Maximum capture size",
+                "description": "Maximum total size of completed MQTT passthrough captures in MiB"
+            },
+            "mqtt_client_upstream__forward__claim": {
+                "label": "Claim",
+                "description": "Forward claim publishes in both directions"
+            },
+            "mqtt_client_upstream__forward__volume": {
+                "label": "Volume",
+                "description": "Forward volume publishes in both directions"
+            },
+            "mqtt_client_upstream__forward__bi_events": {
+                "label": "BI events",
+                "description": "Forward bi-events publishes in both directions"
+            },
+            "mqtt_client_upstream__forward__fresh_tonies": {
+                "label": "Fresh Tonies",
+                "description": "Forward fresh-tonies publishes in both directions"
+            },
+            "mqtt_client_upstream__forward__logs__other": {
+                "label": "Other log sources",
+                "description": "Forward logs with a missing, invalid or unlisted source"
+            },
+            "mqtt_client_upstream__forward__metrics__fleet": {
+                "label": "Fleet",
+                "description": "Forward metrics/fleet publishes"
+            },
+            "mqtt_client_upstream__forward__metrics__events": {
+                "label": "Events",
+                "description": "Forward metrics/events publishes"
+            },
+            "mqtt_client_upstream__forward__metrics__headphones": {
+                "label": "headphones",
+                "description": "Forward metrics/headphones publishes"
+            },
+            "mqtt_client_upstream__forward__metrics__battery": {
+                "label": "Battery",
+                "description": "Forward metrics/battery publishes"
+            },
+            "mqtt_client_upstream__forward__metrics__other": {
+                "label": "Other metrics",
+                "description": "Forward unlisted metrics publishes"
+            },
+            "mqtt_client_upstream__forward__app_reply__bedtime_state": {
+                "label": "Bedtime state",
+                "description": "Forward app-reply/bedtime-state publishes"
+            },
+            "mqtt_client_upstream__forward__app_reply__other": {
+                "label": "Other app replies",
+                "description": "Forward unlisted app-reply publishes"
+            },
+            "mqtt_client_upstream__forward__settings__desired": {
+                "label": "Desired",
+                "description": "Forward settings/desired publishes"
+            },
+            "mqtt_client_upstream__forward__settings__confirm": {
+                "label": "Confirm",
+                "description": "Forward settings/confirm publishes"
+            },
+            "mqtt_client_upstream__forward__settings__request": {
+                "label": "Request",
+                "description": "Forward settings/request publishes"
+            },
+            "mqtt_client_upstream__forward__settings__other": {
+                "label": "Other settings",
+                "description": "Forward unlisted settings publishes"
+            },
+            "mqtt_client_upstream__forward__playback__state": {
+                "label": "State",
+                "description": "Forward playback/state publishes"
+            },
+            "mqtt_client_upstream__forward__playback__other": {
+                "label": "Other playback",
+                "description": "Forward unlisted playback publishes"
+            },
+            "mqtt_client_upstream__forward__app_control__ping": {
+                "label": "Ping",
+                "description": "Forward app-control/ping publishes"
+            },
+            "mqtt_client_upstream__forward__app_control__volume": {
+                "label": "Volume",
+                "description": "Forward app-control/volume publishes"
+            },
+            "mqtt_client_upstream__forward__app_control__stl": {
+                "label": "STL",
+                "description": "Forward app-control/stl publishes"
+            },
+            "mqtt_client_upstream__forward__app_control__alarm_preview": {
+                "label": "Alarm preview",
+                "description": "Forward app-control/alarm-preview publishes"
+            },
+            "mqtt_client_upstream__forward__app_control__playback": {
+                "label": "Playback",
+                "description": "Forward app-control/playback publishes"
+            },
+            "mqtt_client_upstream__forward__app_control__sleep": {
+                "label": "Sleep",
+                "description": "Forward app-control/sleep publishes"
+            },
+            "mqtt_client_upstream__forward__app_control__other": {
+                "label": "Other app controls",
+                "description": "Forward unlisted app-control publishes"
+            },
+            "mqtt_client_upstream__forward__logs__source__dev_i2s_mcux": {
+                "label": "dev_i2s_mcux",
+                "description": "Forward logs from dev_i2s_mcux"
+            },
+            "mqtt_client_upstream__forward__logs__source__power_domain_gpio": {
+                "label": "power_domain_gpio",
+                "description": "Forward logs from power_domain_gpio"
+            },
+            "mqtt_client_upstream__forward__logs__source__usdhc": {
+                "label": "usdhc",
+                "description": "Forward logs from usdhc"
+            },
+            "mqtt_client_upstream__forward__logs__source__iw416_wifi": {
+                "label": "iw416_wifi",
+                "description": "Forward logs from iw416_wifi"
+            },
+            "mqtt_client_upstream__forward__logs__source__led_ring": {
+                "label": "led_ring",
+                "description": "Forward logs from led_ring"
+            },
+            "mqtt_client_upstream__forward__logs__source__sd": {
+                "label": "sd",
+                "description": "Forward logs from sd"
+            },
+            "mqtt_client_upstream__forward__logs__source__usb_msc": {
+                "label": "usb_msc",
+                "description": "Forward logs from usb_msc"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_error_handler": {
+                "label": "tns_error_handler",
+                "description": "Forward logs from tns_error_handler"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_dfu": {
+                "label": "tns_dfu",
+                "description": "Forward logs from tns_dfu"
+            },
+            "mqtt_client_upstream__forward__logs__source__littlefs": {
+                "label": "littlefs",
+                "description": "Forward logs from littlefs"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_fs_storage": {
+                "label": "tns_fs_storage",
+                "description": "Forward logs from tns_fs_storage"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_signal_broker": {
+                "label": "tns_signal_broker",
+                "description": "Forward logs from tns_signal_broker"
+            },
+            "mqtt_client_upstream__forward__logs__source__production": {
+                "label": "production",
+                "description": "Forward logs from production"
+            },
+            "mqtt_client_upstream__forward__logs__source__LIS2DW12": {
+                "label": "LIS2DW12",
+                "description": "Forward logs from LIS2DW12"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_usb_audio": {
+                "label": "tns_usb_audio",
+                "description": "Forward logs from tns_usb_audio"
+            },
+            "mqtt_client_upstream__forward__logs__source__app": {
+                "label": "app",
+                "description": "Forward logs from app"
+            },
+            "mqtt_client_upstream__forward__logs__source__iw416": {
+                "label": "iw416",
+                "description": "Forward logs from iw416"
+            },
+            "mqtt_client_upstream__forward__logs__source__main_sm": {
+                "label": "main_sm",
+                "description": "Forward logs from main_sm"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_pman": {
+                "label": "tns_pman",
+                "description": "Forward logs from tns_pman"
+            },
+            "mqtt_client_upstream__forward__logs__source__idle_timer_log": {
+                "label": "idle_timer_log",
+                "description": "Forward logs from idle_timer_log"
+            },
+            "mqtt_client_upstream__forward__logs__source__app_volume_manager": {
+                "label": "app_volume_manager",
+                "description": "Forward logs from app_volume_manager"
+            },
+            "mqtt_client_upstream__forward__logs__source__ocotp": {
+                "label": "ocotp",
+                "description": "Forward logs from ocotp"
+            },
+            "mqtt_client_upstream__forward__logs__source__wifi_nxp": {
+                "label": "wifi_nxp",
+                "description": "Forward logs from wifi_nxp"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_cloud": {
+                "label": "tns_cloud",
+                "description": "Forward logs from tns_cloud"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_storage": {
+                "label": "tns_storage",
+                "description": "Forward logs from tns_storage"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_wifi_conn": {
+                "label": "tns_wifi_conn",
+                "description": "Forward logs from tns_wifi_conn"
+            },
+            "mqtt_client_upstream__forward__logs__source__headphones": {
+                "label": "headphones",
+                "description": "Forward logs from headphones"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_metrics": {
+                "label": "tns_metrics",
+                "description": "Forward logs from tns_metrics"
+            },
+            "mqtt_client_upstream__forward__logs__source__bt_nxp_ctlr": {
+                "label": "bt_nxp_ctlr",
+                "description": "Forward logs from bt_nxp_ctlr"
+            },
+            "mqtt_client_upstream__forward__logs__source__bt_hci_core": {
+                "label": "bt_hci_core",
+                "description": "Forward logs from bt_hci_core"
+            },
+            "mqtt_client_upstream__forward__logs__source__bt_classic": {
+                "label": "bt_classic",
+                "description": "Forward logs from bt_classic"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_wifi_settings": {
+                "label": "tns_wifi_settings",
+                "description": "Forward logs from tns_wifi_settings"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_time": {
+                "label": "tns_time",
+                "description": "Forward logs from tns_time"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_ota": {
+                "label": "tns_ota",
+                "description": "Forward logs from tns_ota"
+            },
+            "mqtt_client_upstream__forward__logs__source__cloud_settings": {
+                "label": "cloud_settings",
+                "description": "Forward logs from cloud_settings"
+            },
+            "mqtt_client_upstream__forward__logs__source__cloud_freshness": {
+                "label": "cloud_freshness",
+                "description": "Forward logs from cloud_freshness"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_download_manager": {
+                "label": "tns_download_manager",
+                "description": "Forward logs from tns_download_manager"
+            },
+            "mqtt_client_upstream__forward__logs__source__linear_playback": {
+                "label": "linear_playback",
+                "description": "Forward logs from linear_playback"
+            },
+            "mqtt_server__enabled": {
+                "label": "Enable MQTT Server",
+                "description": "Enable internal MQTT server"
+            },
+            "mqtt_server__port": {
+                "label": "MQTT Server port",
+                "description": "Port for internal MQTT server"
+            },
+            "mqtt_server__cert__crt": {
+                "label": "Server certificate",
+                "description": "Path to server certificate file (PEM format)"
+            },
+            "mqtt_server__cert__key": {
+                "label": "Server key",
+                "description": "Path to server key file (PEM format)"
+            },
+            "mqtt_server__log_full_payloads": {
+                "label": "Log full MQTT payloads",
+                "description": "Log large MQTT server payloads as base64 for reverse-engineering exports."
+            },
+            "mqtt_server__log_connect_details": {
+                "label": "Log MQTT CONNECT details",
+                "description": "Log MQTT CONNECT structure and plain client ID at debug level 5. Username, password and Will fields remain masked."
+            },
+            "hass__name": {
+                "label": "Home Assistant name",
+                "description": "Home Assistant name"
+            },
+            "hass__id": {
+                "label": "Unique ID",
+                "description": "Unique ID to identify this device"
+            },
+            "tonie_json__cache_images": {
+                "label": "Cache images",
+                "description": "Cache figurine images locally"
+            },
+            "tonie_json__cache_preload": {
+                "label": "Preload all images",
+                "description": "Download all figurine images on startup. This will take several minutes the first time you start TeddyCloud."
+            },
+            "tonie_json__custom_backup_keep": {
+                "label": "Custom JSON backups",
+                "description": "How many timestamped backups of tonies.custom.json to keep (0 disables retention)."
+            },
+            "debug__web__pcm_encode_console_url": {
+                "label": "PCM Console URL",
+                "description": "Caches the PCM of the browser-side encoding and prints a download link to the browser console."
+            }
+        }
     },
     "teddycloud": {
         "newVersionAvailable": "There is a new version available!",

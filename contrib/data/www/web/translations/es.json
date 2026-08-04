@@ -703,7 +703,10 @@
         "english": "EN",
         "french": "FR",
         "german": "DE",
-        "spanish": "ES"
+        "spanish": "ES",
+        "klingon": "TLH",
+        "sindarin": "SJN",
+        "quenya": "QYA"
     },
     "languageUtil": {
         "af-af": "Afrikáans (Sudáfrica)",
@@ -979,6 +982,31 @@
         "boxineStatusOnline": "Conectado a Boxine/Toniecloud",
         "tb2CloudStatusOffline": "Sin conexión HTTPS al destino de la nube TB2 {{hostname}}",
         "tb2CloudUnavailable": "La conexión con la nube TB2 aún no está disponible. No hay conexión HTTPS con {{hostname}}.",
+        "tb2HttpsMode": {
+            "active": "Modo activo: {{mode}}",
+            "disabled": "Desactivado",
+            "mixed": "Mixto por caja",
+            "transparent": "Proxy transparente",
+            "v3": "Ruta de nube v3"
+        },
+        "tb2HttpsStatus": {
+            "disabled": "El reenvío HTTPS de TB2 está desactivado.",
+            "ready": "El reenvío HTTPS de TB2 está listo para {{hostname}}:{{port}}.",
+            "request_active": "Hay una solicitud TB2 v3 activa a {{hostname}}:{{port}}.",
+            "connecting": "Conectando con {{hostname}}:{{port}}.",
+            "httpStatus": "Último estado HTTP v3: {{httpStatus}}.",
+            "tunneling": "El túnel HTTPS de TB2 a {{hostname}}:{{port}} está activo.",
+            "success": "La última operación HTTPS de TB2 finalizó correctamente.",
+            "error": "El reenvío HTTPS de TB2 falló ({{errorCode}})."
+        },
+        "mqttUpstreamStatus": {
+            "disabled": "El upstream ICI está desactivado.",
+            "standby": "El upstream ICI está activado; el reenvío transparente está desactivado.",
+            "armed": "El reenvío ICI está preparado y espera una conexión TB2.",
+            "connecting": "Conectando con {{hostname}}:{{port}}.",
+            "tunneling": "El túnel ICI transparente a {{hostname}}:{{port}} está activo.",
+            "error": "El reenvío ICI falló ({{errorCode}})."
+        },
         "teddycloudStatusOffline": "Servidor de Teddycloud desconectado",
         "teddycloudStatusOnline": "Servidor de Teddycloud funcionando correctamente"
     },
@@ -1025,13 +1053,48 @@
         "information": "Información",
         "keepScrolling": "Sigue desplazándote para ver más opciones.",
         "legacyGui": "Interfaz de administración heredada",
+        "scopeTabs": {
+            "global": "Global"
+        },
+        "scopeSections": {
+            "logging": "Registro",
+            "server": "Servidor",
+            "storage": "Almacenamiento",
+            "content": "Contenido",
+            "security": "Seguridad",
+            "encoding": "Codificación",
+            "webui": "WebUI",
+            "cloudContent": "Opciones de nube y contenido entre generaciones",
+            "mqtt": "MQTT y Home Assistant",
+            "diagnostics": "Diagnóstico",
+            "tonieJson": "Datos de Tonie",
+            "boxGeneral": "Configuración general de las cajas",
+            "certificates": "Certificados",
+            "cloud": "Nube",
+            "boxBehavior": "Comportamiento de la caja",
+            "rtnl": "RTNL",
+            "tools": "Herramientas",
+            "httpsCloud": "Nube HTTPS",
+            "iciUpstream": "Upstream MQTT ICI",
+            "iciServer": "Servidor MQTT ICI",
+            "v3Endpoints": "Reenvío de endpoints TB2 v3",
+            "unclassified": "Sin clasificar"
+        },
         "mqttForwarding": {
             "suppress": "Suprimir",
             "description": "Los interruptores activados reenvían el tema correspondiente en ambas direcciones.",
             "forward": "Reenviar",
             "global": "Usar global",
             "searchSources": "Buscar fuentes de registro",
-            "title": "Filtros de reenvío bidireccional"
+            "title": "Filtros de reenvío bidireccional",
+            "groups": {
+                "logs": "Registros",
+                "metrics": "Métricas",
+                "appReply": "Respuesta de la aplicación",
+                "settings": "Ajustes",
+                "playback": "Reproducción",
+                "appControl": "Control de la aplicación"
+            }
         },
         "levelLabel": "Nivel de configuración",
         "navigationTitle": "Configuración",
@@ -1085,7 +1148,897 @@
         "toniesJsonUpdateSuccessful": "¡Tonies(.custom).json recargado con éxito!",
         "tryToRestartTC": "Intentando reiniciar TeddyCloud",
         "warning": "¡Atención! Nivel de configuración",
-        "warningHint": "Actualmente, los campos de texto deben guardarse explícitamente hasta que se implemente una mejor solución. Para hacerlo, haz clic en el símbolo de guardar al final del campo. Si faltan configuraciones, aumenta el 'Nivel de configuración'."
+        "warningHint": "Actualmente, los campos de texto deben guardarse explícitamente hasta que se implemente una mejor solución. Para hacerlo, haz clic en el símbolo de guardar al final del campo. Si faltan configuraciones, aumenta el 'Nivel de configuración'.",
+        "optionText": {
+            "log__level": {
+                "label": "Nivel de registro",
+                "description": "0=apagado - 6=detallado"
+            },
+            "log__color": {
+                "label": "Registro coloreado",
+                "description": "Registro coloreado"
+            },
+            "log__logFullAuth": {
+                "label": "Registrar autenticación",
+                "description": "Registrar autenticación completa de etiquetas"
+            },
+            "core__server__http_port": {
+                "label": "Puerto HTTP",
+                "description": "Puerto HTTP para la interfaz web"
+            },
+            "core__server__https_web_port": {
+                "label": "Puerto web HTTPS",
+                "description": "Puerto HTTPS para la interfaz web"
+            },
+            "core__server__https_api_port": {
+                "label": "Puerto HTTPS de la API",
+                "description": "Puerto HTTPS para la API de Toniebox"
+            },
+            "core__server__bind_ip": {
+                "label": "Vincular IP",
+                "description": "IP para enlazar los puertos http a"
+            },
+            "core__host_url": {
+                "label": "URL del host",
+                "description": "URL al servidor teddyCloud"
+            },
+            "core__certdir": {
+                "label": "Directorio de certificados",
+                "description": "Directorio para subir certificados del cliente global TB1 o específicos de la caja"
+            },
+            "core__certdir_tb2": {
+                "label": "Directorio de certificados",
+                "description": "Directorio para subir certificados genuinos del cliente TB2"
+            },
+            "core__contentdir": {
+                "label": "Directorio de contenido",
+                "description": "Directorio para colocar contenido de la nube"
+            },
+            "core__librarydir": {
+                "label": "Directorio de la biblioteca",
+                "description": "Directorio de la biblioteca de audio"
+            },
+            "core__datadir": {
+                "label": "Directorio de datos",
+                "description": "Directorio base para 'contentdir', 'firmwaredir', 'cachedir' y 'wwwdir' cuando son relativos"
+            },
+            "core__wwwdir": {
+                "label": "Directorio WWW",
+                "description": "Directorio para los recursos de la interfaz web (relativo a datadir, o absoluto)"
+            },
+            "core__pluginsdir": {
+                "label": "Directorio de plugins",
+                "description": "Directorio para los complementos web (relativo a wwwdir, o absoluto)"
+            },
+            "core__firmwaredir": {
+                "label": "Directorio de firmware",
+                "description": "Directorio para subir firmware original"
+            },
+            "core__cachedir": {
+                "label": "Directorio de caché",
+                "description": "Directorio donde almacenar en caché archivos descargados de internet"
+            },
+            "core__sslkeylogfile": {
+                "label": "Archivo de registro de clave SSL",
+                "description": "Nombre de archivo del registro de clave SSL/TLS"
+            },
+            "core__server__http_client_timeout": {
+                "label": "Tiempo de espera de conexión",
+                "description": "Tiempo de espera de conexión del cliente HTTP (predeterminado: 500ms)"
+            },
+            "core__file_upload_timeout_ms": {
+                "label": "Tiempo de espera para carga de archivos",
+                "description": "Tiempo de espera del lado del cliente para cargas de archivos en ms (15s–5min). Por defecto 120s para archivos de audio grandes."
+            },
+            "core__new_webgui_as_default": {
+                "label": "Nuevo WebGUI",
+                "description": "Usar la nueva WebGUI como predeterminada"
+            },
+            "core__server_cert__file__ca": {
+                "label": "Certificado CA",
+                "description": "Certificado CA"
+            },
+            "core__server_cert__file__ca_der": {
+                "label": "Certificado CA en DER",
+                "description": "Certificado CA en DER"
+            },
+            "core__server_cert__file__ca_key": {
+                "label": "Clave CA",
+                "description": "Clave CA"
+            },
+            "core__server_cert__file__crt": {
+                "label": "Certificado del servidor",
+                "description": "Certificado del servidor"
+            },
+            "core__server_cert__file__key": {
+                "label": "Clave del servidor",
+                "description": "Clave del servidor"
+            },
+            "core__server_cert__data__ca": {
+                "label": "Datos del certificado CA",
+                "description": "Datos del certificado CA"
+            },
+            "core__server_cert_tb2__file__ca": {
+                "label": "Certificado CA",
+                "description": "Certificado CA"
+            },
+            "core__server_cert_tb2__file__ca_der": {
+                "label": "Certificado CA en DER",
+                "description": "Certificado CA en DER"
+            },
+            "core__server_cert_tb2__file__ca_key": {
+                "label": "Clave CA",
+                "description": "Clave CA"
+            },
+            "core__server_cert_tb2__file__crt": {
+                "label": "Certificado del servidor",
+                "description": "Certificado del servidor"
+            },
+            "core__server_cert_tb2__file__key": {
+                "label": "Clave del servidor",
+                "description": "Clave del servidor"
+            },
+            "core__server_cert_tb2__data__ca": {
+                "label": "Datos del certificado CA",
+                "description": "Datos del certificado CA"
+            },
+            "core__client_cert_tb1__file__ca": {
+                "label": "CA del cliente (TB1)",
+                "description": "CA de confianza upstream original de TB1"
+            },
+            "core__client_cert_tb1__file__crt": {
+                "label": "Certificado del cliente (TB1)",
+                "description": "Certificado de cliente upstream original de TB1"
+            },
+            "core__client_cert_tb1__file__key": {
+                "label": "Clave del cliente (TB1)",
+                "description": "Clave privada upstream original de TB1"
+            },
+            "core__client_cert_tb2__file__ca": {
+                "label": "CA del cliente",
+                "description": "CA de confianza upstream original de TB2"
+            },
+            "core__client_cert_tb2__file__crt": {
+                "label": "Certificado del cliente",
+                "description": "Certificado de cliente upstream original de TB2"
+            },
+            "core__client_cert_tb2__file__key": {
+                "label": "Clave del cliente",
+                "description": "Clave privada upstream original de TB2"
+            },
+            "core__client_cert_fake__file__ca": {
+                "label": "CA de cliente falso",
+                "description": "Autoridad certificadora de cliente falso"
+            },
+            "core__client_cert_fake__file__crt": {
+                "label": "Certificado de cliente falso",
+                "description": "Certificado de cliente falso"
+            },
+            "core__client_cert_fake__file__key": {
+                "label": "Clave de cliente falso",
+                "description": "Clave de cliente falso"
+            },
+            "core__allowOrigin": {
+                "label": "CORS Permitir-Origen",
+                "description": "Establecer encabezado CORS Access-Control-Allow-Origin"
+            },
+            "core__boxCertAuth": {
+                "label": "Autenticación de certificado HTTPS de la caja",
+                "description": "Se requieren certificados de cliente para acceder a la API HTTPS de las cajas"
+            },
+            "core__allowNewBox": {
+                "label": "Permitir nuevas cajas",
+                "description": "Permitir que se agreguen nuevas cajas si intentan conectarse"
+            },
+            "core__flex_enabled": {
+                "label": "Habilitar Flex-Tonie",
+                "description": "Cuando está habilitado, este UID siempre recibe el audio seleccionado desde la interfaz web"
+            },
+            "core__flex_uid": {
+                "label": "UID de Flex-Tonie",
+                "description": "UID que recibirá los archivos de audio seleccionados"
+            },
+            "core__settings_level": {
+                "label": "Nivel de configuración",
+                "description": "1: Básico, 2: Detalle, 3: Experto"
+            },
+            "core__tonies_json_auto_update": {
+                "label": "Actualización automática de tonies.json",
+                "description": "Actualización automática de tonies.json para información e imágenes de Tonies."
+            },
+            "core__full_taf_validation": {
+                "label": "Validación completa de TAF",
+                "description": "Validar TAFs comprobando la duración del audio y el hash SHA1. (puede ser lento, ya que el archivo debe leerse completamente!)"
+            },
+            "core__tap_taf_validation": {
+                "label": "Validación TAP TAF",
+                "description": "Valide los TAF de los TAP verificando la duración del audio y el hash SHA1. (puede ser lento, ¡ya que el archivo debe leerse completamente!)"
+            },
+            "core__track_pos_taf_validation": {
+                "label": "Error de posición de pista Validación TAF",
+                "description": "Valide los TAF cuando ocurre un error de posición de pista verificando la duración del audio y el hash SHA1. (puede ser lento, ¡ya que el archivo debe leerse completamente!)"
+            },
+            "security_mit__warnAccess": {
+                "label": "Advertencia sobre acceso no deseado",
+                "description": "Si teddyCloud detecta un acceso inusual, advertir en la interfaz hasta reiniciar. (Ver on*)"
+            },
+            "security_mit__lockAccess": {
+                "label": "Bloquear acceso no deseado",
+                "description": "Si teddyCloud detecta un acceso inusual, bloquear la interfaz hasta reiniciar. (Ver on*)"
+            },
+            "security_mit__httpsOnly": {
+                "label": "Solo en HTTPS",
+                "description": "Bloquear/Advertir solo en el puerto HTTPS."
+            },
+            "security_mit__onBlacklistDomain": {
+                "label": "Detectar dominios en la lista negra",
+                "description": "Bloquear/Advertir si el dominio se conoce como público."
+            },
+            "security_mit__onCrawler": {
+                "label": "Detectar rastreadores",
+                "description": "Bloquear/Advertir si se detecta un rastreador (User-Agent)."
+            },
+            "security_mit__onRobotsTxt": {
+                "label": "Detectar robots.txt",
+                "description": "Bloquear/Advertir si se accede a robots.txt."
+            },
+            "security_mit__hardLock": {
+                "label": "Desactivar teddyCloud",
+                "description": "Desactivar teddyCloud debido a advertencias de seguridad ignoradas."
+            },
+            "cloud__enabled": {
+                "label": "Habilitar TB1 HTTPS Upstream",
+                "description": "Habilitar reenvío HTTPS a Boxine/Toniecloud para TB1"
+            },
+            "cloud__tb2_enabled": {
+                "label": "Habilitar proxy HTTPS TB2 transparente",
+                "description": "Reenviar el tráfico HTTPS TB2 descifrado sin cambios al servidor ascendente"
+            },
+            "cloud__tb2_v3_enabled": {
+                "label": "Habilitar ruta cloud v3 de TB2",
+                "description": "Manejar y reenviar los endpoints HTTPS TB2 v3 compatibles"
+            },
+            "cloud__tb2_capture_enabled": {
+                "label": "Capturar tráfico HTTPS transparente TB2",
+                "description": "Escribir la captura completa de tráfico HTTPS transparente TB2 sin redactar"
+            },
+            "cloud__remote_hostname": {
+                "label": "Nombre de host de la nube",
+                "description": "Nombre del host del servidor remoto en la nube"
+            },
+            "cloud__remote_hostname_tb2": {
+                "label": "Nombre de host del servidor HTTPS TB2",
+                "description": "Nombre del host del servidor ascendente HTTPS de TB2"
+            },
+            "cloud__remote_port": {
+                "label": "Puerto de la nube",
+                "description": "Puerto del servidor remoto en la nube"
+            },
+            "cloud__remote_port_tb2": {
+                "label": "Puerto del servidor HTTPS TB2",
+                "description": "Puerto del servidor HTTPS ascendente TB2"
+            },
+            "cloud__tb2_capture_dir": {
+                "label": "Directorio de captura HTTPS TB2",
+                "description": "Directorio local para capturas de paso sin redactar sensibles"
+            },
+            "cloud__tb2_capture_max_mib": {
+                "label": "Límite de captura HTTPS TB2",
+                "description": "Almacenamiento máximo de capturas completadas en MiB"
+            },
+            "cloud__enableV1Claim": {
+                "label": "Reenviar 'claim'",
+                "description": "Reenviar consultas de 'claim' a claim de tonies en el hogar en la nube de tonies"
+            },
+            "cloud__enableV1CloudReset": {
+                "label": "Reenviar 'cloudReset'",
+                "description": "Reenviar consultas de 'cloudReset' a la nube de tonies"
+            },
+            "cloud__enableV1FreshnessCheck": {
+                "label": "Reenviar 'freshnessCheck'",
+                "description": "Reenviar consultas 'freshnessCheck' para marcar el contenido nuevo como actualizado en la nube de Tonies"
+            },
+            "cloud__enableV3FreshnessCheck": {
+                "label": "Reenviar 'freshnessCheck' v3",
+                "description": "Reenviar consultas 'freshnessCheck' v3 para marcar el contenido nuevo como actualizado en la nube de Tonies"
+            },
+            "cloud__enableV1Log": {
+                "label": "Reenviar 'log'",
+                "description": "Reenviar consultas 'log' a la nube de Tonies"
+            },
+            "cloud__enableV1Time": {
+                "label": "Reenviar 'time'",
+                "description": "Reenviar las solicitudes 'time' a la nube de Tonies"
+            },
+            "cloud__enableV1Ota": {
+                "label": "Reenviar 'ota'",
+                "description": "Reenviar consultas 'ota' a la nube de Tonies"
+            },
+            "cloud__enableV3Ota": {
+                "label": "Reenviar 'check-ota' v3",
+                "description": "Reenviar consultas de 'check-ota' v3 a la nube de tonies"
+            },
+            "cloud__enableV2Content": {
+                "label": "Reenviar 'content'",
+                "description": "Reenviar consultas de 'content' para descargar contenido desde la nube de tonies"
+            },
+            "cloud__enableV3SetupStatus": {
+                "label": "Reenviar 'setup-status' v3",
+                "description": "Reenviar las solicitudes 'setup-status' v3 a la nube de Tonies"
+            },
+            "cloud__enableV3ContentMeta": {
+                "label": "Reenviar 'content-meta' v3",
+                "description": "Reenviar consultas de 'content-meta' v3 a la nube de tonies"
+            },
+            "cloud__enableV3Chapter": {
+                "label": "Reenviar 'chapter' v3",
+                "description": "Reenviar consultas de 'chapter' v3 a la nube de tonies"
+            },
+            "cloud__cacheOta": {
+                "label": "Almacenar OTA",
+                "description": "Almacenar en caché archivos OTA en el directorio de firmware del servidor local (esto aún bloquea OTA si la entrega OTA local está deshabilitada)"
+            },
+            "cloud__localOta": {
+                "label": "Entrega OTA local",
+                "description": "Enviar archivos OTA locales en el directorio de firmware"
+            },
+            "cloud__cacheContent": {
+                "label": "Almacenar contenido",
+                "description": "Almacenar contenido en la nube en el servidor local"
+            },
+            "cloud__cacheToLibrary": {
+                "label": "Almacenar en la biblioteca",
+                "description": "Almacenar contenido en la nube en la biblioteca"
+            },
+            "cloud__markCustomTagByPass": {
+                "label": "Autodetectar etiquetas personalizadas (contraseña)",
+                "description": "Marcar automáticamente etiquetas personalizadas por contraseña"
+            },
+            "cloud__markCustomTagByUid": {
+                "label": "Autodetectar etiquetas personalizadas (uid)",
+                "description": "Marcar automáticamente etiquetas personalizadas por uid"
+            },
+            "cloud__prioCustomContent": {
+                "label": "Priorizar contenido personalizado",
+                "description": "Priorizar el contenido personalizado sobre el contenido de tonies (forzar actualización, solo si \"Actualizar contenido en ID de audio inferior\" está deshabilitado)"
+            },
+            "cloud__updateOnLowerAudioId": {
+                "label": "Actualizar contenido en un ID de audio inferior",
+                "description": "Actualizar contenido en un ID de audio inferior"
+            },
+            "cloud__dumpRuidAuthContentJson": {
+                "label": "Volcar rUID/auth",
+                "description": "Volcar el rUID y la autenticación en el JSON de contenido."
+            },
+            "encode__bitrate": {
+                "label": "Tasa de bits de Opus",
+                "description": "Tasa de bits de Opus, probada 64, 96 (predeterminado), 128, 192, 256 - ¡ten en cuenta que esto aumenta el tamaño de TAF!"
+            },
+            "encode__ffmpeg_stream_buffer_ms": {
+                "label": "Buffer de transmisión ms",
+                "description": "Buffer de transmisión para streaming basado en ffmpeg."
+            },
+            "encode__ffmpeg_stream_restart": {
+                "label": "Forzar reinicio de transmisión",
+                "description": "Si un flujo es continuado por la caja, se fuerza un nuevo archivo. Esto tiene el costo de un reinicio más lento, pero no reproduce el contenido antiguo en búfer y elimina los datos del flujo anterior en la caja."
+            },
+            "encode__ffmpeg_sweep_startup_buffer": {
+                "label": "Prebuffer de transmisión de barrido",
+                "description": "Las transmisiones de webradio a menudo envían varios segundos como búfer de inmediato. Esto puede contener anuncios y se acumulará si desactiva 'Reinicio forzado de transmisión'."
+            },
+            "encode__ffmpeg_sweep_delay_ms": {
+                "label": "Retardo de barrido ms",
+                "description": "Espere x ms hasta que el barrido se detenga y la transmisión se inicie. Retrasa el inicio de la transmisión, pero puede aumentar el éxito."
+            },
+            "encode__stream_max_size": {
+                "label": "Tamaño máximo de archivo de transmisión",
+                "description": "La caja puede crear un archivo vacío de esta longitud para cada flujo. Así que si usas 10 tonies en streaming, la caja puede bloquear 10*240MB. La única desventaja es que la caja se detendrá cuando el archivo esté lleno y necesitarás reemplazar la etiqueta en la caja. No debe ser un múltiplo de 4096, Predeterminado: 251.658.239, es decir, 240MB, lo que significa alrededor de 6 horas."
+            },
+            "encode__use_frontend": {
+                "label": "Codificación del navegador",
+                "description": "Usar codificación del lado del navegador en lugar del lado del servidor (requiere un navegador moderno con soporte para WebAssembly)"
+            },
+            "frontend__split_model_content": {
+                "label": "Dividir contenido / modelo",
+                "description": "Si está habilitado, el contenido del TAF se mostrará al lado del modelo de la figurita"
+            },
+            "frontend__ignore_web_version_mismatch": {
+                "label": "Ignorar la discrepancia de la versión web",
+                "description": "Ignorar la discrepancia de la versión web y no mostrar la advertencia de discrepancia"
+            },
+            "frontend__confirm_audioplayer_close": {
+                "label": "Confirmar cierre del reproductor de audio",
+                "description": "Confirmar diálogo al cerrar el reproductor de audio durante la reproducción activa"
+            },
+            "frontend__check_cc3200_cfw": {
+                "label": "Comprobar si hay CFW en la caja CC3200",
+                "description": "Habilitar la detección de CFW en cajas CC3200 para vincular direcciones MAC a IPs."
+            },
+            "toniebox__api_access": {
+                "label": "Acceso a API",
+                "description": "Conceder acceso a la API (valor predeterminado para nuevas cajas)"
+            },
+            "toniebox__overrideCloud": {
+                "label": "Anular configuraciones de la nube",
+                "description": "Anular la configuración de Tonies Cloud para el Toniebox con la establecida aquí"
+            },
+            "toniebox__boxGeneration": {
+                "label": "Generación de la caja",
+                "description": "Generación de la caja (TB1/TB2)"
+            },
+            "toniebox__max_vol_spk": {
+                "label": "Limitar volumen del altavoz",
+                "description": "0=25%, 1=50%, 2=75%, 3=100%"
+            },
+            "toniebox__max_vol_hdp": {
+                "label": "Limitar volumen de auriculares",
+                "description": "0=25%, 1=50%, 2=75%, 3=100%"
+            },
+            "toniebox__slap_enabled": {
+                "label": "Golpe para saltar",
+                "description": "Habilitar salto de pista mediante gesto de palmada"
+            },
+            "toniebox__slap_back_left": {
+                "label": "Dirección del golpe",
+                "description": "Determinar dirección de golpe para saltar pista: Falso para izquierda-hacia atrás, Verdadero para izquierda-hacia adelante"
+            },
+            "toniebox__led": {
+                "label": "Brillo del LED",
+                "description": "0=encendido, 1=apagado, 2=atenuado"
+            },
+            "toniebox__overrideFields": {
+                "label": "Anular campos desconocidos",
+                "description": "Anular campos desconocidos 2 + 6"
+            },
+            "toniebox__field2": {
+                "label": "Campo 2",
+                "description": "Configuración desconocida de Toniebox, valor predeterminado 7"
+            },
+            "toniebox__field6": {
+                "label": "Campo 6",
+                "description": "Configuración desconocida de Toniebox, valor predeterminado 1"
+            },
+            "toniebox2__baby_mode": {
+                "label": "Modo bebé",
+                "description": "Habilitar modo bebé (1 año)."
+            },
+            "toniebox2__max_volume": {
+                "label": "Volumen máximo de altavoces",
+                "description": "Volumen máximo de altavoces en porcentaje."
+            },
+            "toniebox2__bedtime_max_volume": {
+                "label": "Volumen del altavoz para dormir",
+                "description": "Volumen máximo de altavoces a la hora de dormir en porcentaje."
+            },
+            "toniebox2__max_headphone_volume": {
+                "label": "Volumen máximo de auriculares",
+                "description": "Volumen máximo de auriculares en porcentaje."
+            },
+            "toniebox2__bedtime_max_headphone_volume": {
+                "label": "Volumen de los auriculares para dormir",
+                "description": "Volumen máximo de auriculares a la hora de dormir en porcentaje."
+            },
+            "toniebox2__lightring_brightness": {
+                "label": "Brillo del LED",
+                "description": "Brillo del anillo de luz"
+            },
+            "toniebox2__bedtime_lightring_brightness": {
+                "label": "Brillo del LED para dormir",
+                "description": "Brillo del anillo de luz para dormir en porcentaje."
+            },
+            "toniebox2__scrubbing_enabled": {
+                "label": "Limpieza",
+                "description": "Habilitar limpieza."
+            },
+            "toniebox2__slap_enabled": {
+                "label": "Golpe para saltar",
+                "description": "Habilitar salto de pista mediante gesto de palmada."
+            },
+            "toniebox2__slap_back_left": {
+                "label": "Dirección del golpe",
+                "description": "Usar la dirección de golpe izquierda para saltar."
+            },
+            "rtnl__logRaw": {
+                "label": "Registrar RTNL (binario)",
+                "description": "Habilitar registro de datos RTNL en bruto"
+            },
+            "rtnl__logHuman": {
+                "label": "Registrar RTNL (csv)",
+                "description": "Habilitar registro de datos RTNL legibles por humanos"
+            },
+            "rtnl__logRawFile": {
+                "label": "Archivo binario RTNL",
+                "description": "Especifique la ruta del archivo para el registro bruto RTNL"
+            },
+            "rtnl__logHumanFile": {
+                "label": "Archivo CSV RTNL",
+                "description": "Especificar la ruta del archivo para el registro RTNL legible por humanos"
+            },
+            "pcap__enabled": {
+                "label": "Registrar tráfico HTTP(S)",
+                "description": "Habilitar registro de tráfico HTTP(S) en un archivo .pcap (requiere reinicio)"
+            },
+            "pcap__filename": {
+                "label": "Archivo de registro de libpcap",
+                "description": "Especificar la ruta del archivo para el registro libpcap"
+            },
+            "mqtt__enabled": {
+                "label": "Habilitar MQTT",
+                "description": "Habilitar Cliente MQTT"
+            },
+            "mqtt__hostname": {
+                "label": "Nombre de host MQTT",
+                "description": "IP o nombre de host del servidor MQTT"
+            },
+            "mqtt__port": {
+                "label": "Puerto MQTT",
+                "description": "Puerto del servidor MQTT"
+            },
+            "mqtt__username": {
+                "label": "Nombre de usuario",
+                "description": "Nombre de usuario de MQTT"
+            },
+            "mqtt__password": {
+                "label": "Contraseña",
+                "description": "Contraseña MQTT"
+            },
+            "mqtt__identification": {
+                "label": "Identificación del cliente",
+                "description": "Identificación del cliente"
+            },
+            "mqtt__topic": {
+                "label": "Prefijo de tema",
+                "description": "Prefijo de tema"
+            },
+            "mqtt__qosLevel": {
+                "label": "Nivel de QoS",
+                "description": "Nivel de QoS"
+            },
+            "mqtt__retain_will": {
+                "label": "Conservar testamento final",
+                "description": "Conservar mensaje de testamento final"
+            },
+            "mqtt__disable_on_error": {
+                "label": "Desactivar MQTT en caso de error",
+                "description": "Desactivar MQTT si hubo demasiados errores"
+            },
+            "mqtt__tls_enabled": {
+                "label": "Habilitar TLS",
+                "description": "Habilitar cifrado TLS/SSL para la conexión MQTT"
+            },
+            "mqtt__tls_ca_file": {
+                "label": "Certificado CA",
+                "description": "Ruta al archivo de certificado CA (formato PEM)"
+            },
+            "mqtt__tls_insecure": {
+                "label": "Omitir verificación",
+                "description": "Omitir verificación de certificado TLS (¡inseguro!)"
+            },
+            "mqtt_client_upstream__enabled": {
+                "label": "Habilitar Cliente MQTT",
+                "description": "Habilitar la ruta cloud MQTT upstream de los Tonies ICI"
+            },
+            "mqtt_client_upstream__passthrough_enabled": {
+                "label": "Habilitar reenviador de captura transparente",
+                "description": "Reenviar tráfico MQTT sin cambios durante la grabación de una captura local completa"
+            },
+            "mqtt_client_upstream__port": {
+                "label": "Puerto del servidor MQTT",
+                "description": "Puerto del servidor MQTT ascendente Tonies ICI"
+            },
+            "mqtt_client_upstream__hostname": {
+                "label": "Nombre del host del servidor MQTT",
+                "description": "Nombre del host del servidor ascendente MQTT de Tonies ICI"
+            },
+            "mqtt_client_upstream__capture_dir": {
+                "label": "Directorio de captura",
+                "description": "Directorio para capturas completas de paso de MQTT"
+            },
+            "mqtt_client_upstream__capture_max_mib": {
+                "label": "Tamaño máximo de captura",
+                "description": "Tamaño total máximo de capturas de paso MQTT completadas en MiB"
+            },
+            "mqtt_client_upstream__forward__claim": {
+                "label": "Reclamar",
+                "description": "Reenviar publicaciones de claim en ambas direcciones"
+            },
+            "mqtt_client_upstream__forward__volume": {
+                "label": "Volumen",
+                "description": "Reenviar publicaciones de volumen en ambas direcciones"
+            },
+            "mqtt_client_upstream__forward__bi_events": {
+                "label": "Eventos BI",
+                "description": "Reenviar publicaciones de bi-events en ambas direcciones"
+            },
+            "mqtt_client_upstream__forward__fresh_tonies": {
+                "label": "Tonies frescos",
+                "description": "Reenviar publicaciones fresh-tonies en ambas direcciones"
+            },
+            "mqtt_client_upstream__forward__logs__other": {
+                "label": "Otras fuentes de registro",
+                "description": "Reenviar registros con una fuente faltante, inválida o no listada"
+            },
+            "mqtt_client_upstream__forward__metrics__fleet": {
+                "label": "Flota",
+                "description": "Reenviar publicaciones de métricas/flota"
+            },
+            "mqtt_client_upstream__forward__metrics__events": {
+                "label": "Eventos",
+                "description": "Reenviar publicaciones de métricas/eventos"
+            },
+            "mqtt_client_upstream__forward__metrics__headphones": {
+                "label": "auriculares",
+                "description": "Reenviar publicaciones de métricas/auriculares"
+            },
+            "mqtt_client_upstream__forward__metrics__battery": {
+                "label": "Batería",
+                "description": "Reenviar publicaciones de métricas/batería"
+            },
+            "mqtt_client_upstream__forward__metrics__other": {
+                "label": "Otras métricas",
+                "description": "Reenviar publicaciones de métricas no listadas"
+            },
+            "mqtt_client_upstream__forward__app_reply__bedtime_state": {
+                "label": "Estado para dormir",
+                "description": "Reenviar publicaciones de app-reply/estado-de-hora-de-dormir"
+            },
+            "mqtt_client_upstream__forward__app_reply__other": {
+                "label": "Respuestas de otras aplicaciones",
+                "description": "Reenviar publicaciones de respuesta de aplicación no listadas"
+            },
+            "mqtt_client_upstream__forward__settings__desired": {
+                "label": "Deseado",
+                "description": "Reenviar publicaciones de configuración/deseado"
+            },
+            "mqtt_client_upstream__forward__settings__confirm": {
+                "label": "Confirmar",
+                "description": "Reenviar publicaciones de configuración/confirmar"
+            },
+            "mqtt_client_upstream__forward__settings__request": {
+                "label": "Solicitud",
+                "description": "Reenviar publicaciones de configuración/solicitud"
+            },
+            "mqtt_client_upstream__forward__settings__other": {
+                "label": "Otros ajustes",
+                "description": "Reenviar publicaciones de configuración no listadas"
+            },
+            "mqtt_client_upstream__forward__playback__state": {
+                "label": "Estado",
+                "description": "Reenviar publicaciones de reproducción/estado"
+            },
+            "mqtt_client_upstream__forward__playback__other": {
+                "label": "Otra reproducción",
+                "description": "Reenviar publicaciones de reproducción no listadas"
+            },
+            "mqtt_client_upstream__forward__app_control__ping": {
+                "label": "Ping",
+                "description": "Reenviar publicaciones de app-control/ping"
+            },
+            "mqtt_client_upstream__forward__app_control__volume": {
+                "label": "Volumen",
+                "description": "Reenviar publicaciones de app-control/volumen"
+            },
+            "mqtt_client_upstream__forward__app_control__stl": {
+                "label": "STL",
+                "description": "Reenviar publicaciones de app-control/stl"
+            },
+            "mqtt_client_upstream__forward__app_control__alarm_preview": {
+                "label": "Vista previa de alarma",
+                "description": "Reenviar publicaciones de app-control/alarma-previa"
+            },
+            "mqtt_client_upstream__forward__app_control__playback": {
+                "label": "Reproducción",
+                "description": "Reenviar publicaciones de app-control/reproducción"
+            },
+            "mqtt_client_upstream__forward__app_control__sleep": {
+                "label": "Dormir",
+                "description": "Reenviar publicaciones de app-control/sueño"
+            },
+            "mqtt_client_upstream__forward__app_control__other": {
+                "label": "Controles de otras aplicaciones",
+                "description": "Reenviar publicaciones de control de aplicación no listadas"
+            },
+            "mqtt_client_upstream__forward__logs__source__dev_i2s_mcux": {
+                "label": "dev_i2s_mcux",
+                "description": "Reenviar los registros de la fuente 'dev_i2s_mcux'"
+            },
+            "mqtt_client_upstream__forward__logs__source__power_domain_gpio": {
+                "label": "power_domain_gpio",
+                "description": "Reenviar los registros de la fuente 'power_domain_gpio'"
+            },
+            "mqtt_client_upstream__forward__logs__source__usdhc": {
+                "label": "usdhc",
+                "description": "Reenviar los registros de la fuente 'usdhc'"
+            },
+            "mqtt_client_upstream__forward__logs__source__iw416_wifi": {
+                "label": "iw416_wifi",
+                "description": "Reenviar los registros de la fuente 'iw416_wifi'"
+            },
+            "mqtt_client_upstream__forward__logs__source__led_ring": {
+                "label": "led_ring",
+                "description": "Reenviar los registros de la fuente 'led_ring'"
+            },
+            "mqtt_client_upstream__forward__logs__source__sd": {
+                "label": "sd",
+                "description": "Reenviar los registros de la fuente 'sd'"
+            },
+            "mqtt_client_upstream__forward__logs__source__usb_msc": {
+                "label": "usb_msc",
+                "description": "Reenviar los registros de la fuente 'usb_msc'"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_error_handler": {
+                "label": "tns_error_handler",
+                "description": "Reenviar los registros de la fuente 'tns_error_handler'"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_dfu": {
+                "label": "tns_dfu",
+                "description": "Reenviar los registros de la fuente 'tns_dfu'"
+            },
+            "mqtt_client_upstream__forward__logs__source__littlefs": {
+                "label": "littlefs",
+                "description": "Reenviar los registros de la fuente 'littlefs'"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_fs_storage": {
+                "label": "tns_fs_storage",
+                "description": "Reenviar los registros de la fuente 'tns_fs_storage'"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_signal_broker": {
+                "label": "tns_signal_broker",
+                "description": "Reenviar los registros de la fuente 'tns_signal_broker'"
+            },
+            "mqtt_client_upstream__forward__logs__source__production": {
+                "label": "production",
+                "description": "Reenviar los registros de la fuente 'production'"
+            },
+            "mqtt_client_upstream__forward__logs__source__LIS2DW12": {
+                "label": "LIS2DW12",
+                "description": "Reenviar los registros de la fuente 'LIS2DW12'"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_usb_audio": {
+                "label": "tns_usb_audio",
+                "description": "Reenviar los registros de la fuente 'tns_usb_audio'"
+            },
+            "mqtt_client_upstream__forward__logs__source__app": {
+                "label": "app",
+                "description": "Reenviar los registros de la fuente 'app'"
+            },
+            "mqtt_client_upstream__forward__logs__source__iw416": {
+                "label": "iw416",
+                "description": "Reenviar los registros de la fuente 'iw416'"
+            },
+            "mqtt_client_upstream__forward__logs__source__main_sm": {
+                "label": "main_sm",
+                "description": "Reenviar los registros de la fuente 'main_sm'"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_pman": {
+                "label": "tns_pman",
+                "description": "Reenviar los registros de la fuente 'tns_pman'"
+            },
+            "mqtt_client_upstream__forward__logs__source__idle_timer_log": {
+                "label": "idle_timer_log",
+                "description": "Reenviar los registros de la fuente 'idle_timer_log'"
+            },
+            "mqtt_client_upstream__forward__logs__source__app_volume_manager": {
+                "label": "app_volume_manager",
+                "description": "Reenviar los registros de la fuente 'app_volume_manager'"
+            },
+            "mqtt_client_upstream__forward__logs__source__ocotp": {
+                "label": "ocotp",
+                "description": "Reenviar los registros de la fuente 'ocotp'"
+            },
+            "mqtt_client_upstream__forward__logs__source__wifi_nxp": {
+                "label": "wifi_nxp",
+                "description": "Reenviar los registros de la fuente 'wifi_nxp'"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_cloud": {
+                "label": "tns_cloud",
+                "description": "Reenviar los registros de la fuente 'tns_cloud'"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_storage": {
+                "label": "tns_storage",
+                "description": "Reenviar los registros de la fuente 'tns_storage'"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_wifi_conn": {
+                "label": "tns_wifi_conn",
+                "description": "Reenviar los registros de la fuente 'tns_wifi_conn'"
+            },
+            "mqtt_client_upstream__forward__logs__source__headphones": {
+                "label": "headphones",
+                "description": "Reenviar los registros de la fuente 'headphones'"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_metrics": {
+                "label": "tns_metrics",
+                "description": "Reenviar los registros de la fuente 'tns_metrics'"
+            },
+            "mqtt_client_upstream__forward__logs__source__bt_nxp_ctlr": {
+                "label": "bt_nxp_ctlr",
+                "description": "Reenviar los registros de la fuente 'bt_nxp_ctlr'"
+            },
+            "mqtt_client_upstream__forward__logs__source__bt_hci_core": {
+                "label": "bt_hci_core",
+                "description": "Reenviar los registros de la fuente 'bt_hci_core'"
+            },
+            "mqtt_client_upstream__forward__logs__source__bt_classic": {
+                "label": "bt_classic",
+                "description": "Reenviar los registros de la fuente 'bt_classic'"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_wifi_settings": {
+                "label": "tns_wifi_settings",
+                "description": "Reenviar los registros de la fuente 'tns_wifi_settings'"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_time": {
+                "label": "tns_time",
+                "description": "Reenviar los registros de la fuente 'tns_time'"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_ota": {
+                "label": "tns_ota",
+                "description": "Reenviar los registros de la fuente 'tns_ota'"
+            },
+            "mqtt_client_upstream__forward__logs__source__cloud_settings": {
+                "label": "cloud_settings",
+                "description": "Reenviar los registros de la fuente 'cloud_settings'"
+            },
+            "mqtt_client_upstream__forward__logs__source__cloud_freshness": {
+                "label": "cloud_freshness",
+                "description": "Reenviar los registros de la fuente 'cloud_freshness'"
+            },
+            "mqtt_client_upstream__forward__logs__source__tns_download_manager": {
+                "label": "tns_download_manager",
+                "description": "Reenviar los registros de la fuente 'tns_download_manager'"
+            },
+            "mqtt_client_upstream__forward__logs__source__linear_playback": {
+                "label": "linear_playback",
+                "description": "Reenviar los registros de la fuente 'linear_playback'"
+            },
+            "mqtt_server__enabled": {
+                "label": "Habilitar Servidor MQTT",
+                "description": "Habilitar servidor MQTT interno"
+            },
+            "mqtt_server__port": {
+                "label": "Puerto del servidor MQTT",
+                "description": "Puerto para el servidor MQTT interno"
+            },
+            "mqtt_server__cert__crt": {
+                "label": "Certificado del servidor",
+                "description": "Ruta al archivo de certificado del servidor (formato PEM)"
+            },
+            "mqtt_server__cert__key": {
+                "label": "Clave del servidor",
+                "description": "Ruta al archivo de clave del servidor (formato PEM)"
+            },
+            "mqtt_server__log_full_payloads": {
+                "label": "Registrar cargas completas de MQTT",
+                "description": "Registrar grandes cargas del servidor MQTT como base64 para exportaciones de ingeniería inversa."
+            },
+            "mqtt_server__log_connect_details": {
+                "label": "Registrar detalles de CONEXIÓN MQTT",
+                "description": "Registrar estructura de CONEXIÓN MQTT e ID de cliente en texto plano a nivel de depuración 5. Los campos de nombre de usuario, contraseña y Will permanecen enmascarados."
+            },
+            "hass__name": {
+                "label": "Nombre de Home Assistant",
+                "description": "Nombre de Home Assistant"
+            },
+            "hass__id": {
+                "label": "ID único",
+                "description": "ID único para identificar este dispositivo"
+            },
+            "tonie_json__cache_images": {
+                "label": "Almacenar imágenes",
+                "description": "Almacenar imágenes de figuras localmente"
+            },
+            "tonie_json__cache_preload": {
+                "label": "Precargar todas las imágenes",
+                "description": "Descargar todas las imágenes de figuras al iniciar. Esto tomará varios minutos la primera vez que inicie TeddyCloud."
+            },
+            "tonie_json__custom_backup_keep": {
+                "label": "Copias de seguridad JSON personalizadas",
+                "description": "Cuántas copias de seguridad con marca de tiempo de tonies.custom.json mantener (0 desactiva la retención)."
+            },
+            "debug__web__pcm_encode_console_url": {
+                "label": "URL de la consola PCM",
+                "description": "Almacena en caché el PCM de la codificación del lado del navegador e imprime un enlace de descarga en la consola del navegador."
+            }
+        }
     },
     "teddycloud": {
         "newVersionAvailable": "¡Hay una nueva versión disponible!",
