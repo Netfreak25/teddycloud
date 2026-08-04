@@ -1,28 +1,234 @@
 {
-    "language": {
-        "klingon": "TLH"
+    "audio": {
+        "errorConfirm": "SoQmoH"
+    },
+    "common": {
+        "cancel": "qIl"
     },
     "community": {
+        "navigationTitle": "ghom",
         "plugins": {
+            "cancel": "qIl",
+            "delete": "Qaw'",
+            "deletion": {
+                "delete": "Qaw'"
+            },
             "helpButton": "QaH"
+        },
+        "translations": {
+            "language": "Hol"
         }
     },
     "fileBrowser": {
+        "cancel": "qIl",
+        "createDirectory": {
+            "cancel": "qIl"
+        },
+        "delete": "Qaw'",
+        "encodeFiles": {
+            "cancel": "qIl"
+        },
         "help": {
+            "closeButton": "SoQmoH",
             "showHelp": "QaH",
             "title": "QaH"
+        },
+        "moveFile": {
+            "cancel": "qIl"
+        },
+        "renameFile": {
+            "cancel": "qIl"
+        },
+        "upload": {
+            "cancel": "qIl",
+            "upload": "ngeH"
+        }
+    },
+    "home": {
+        "errorConfirm": "SoQmoH",
+        "navigationTitle": "juH"
+    },
+    "language": {
+        "change": "Hol choH",
+        "klingon": "tlhIngan Hol"
+    },
+    "server": {
+        "tb2HttpsMode": {
+            "active": "Dotlh: {{mode}}",
+            "disabled": "Qotlh",
+            "mixed": "Tonieboxmey pIm",
+            "transparent": "proxy leghlu'be'",
+            "v3": "v3 He"
+        },
+        "tb2HttpsStatus": {
+            "disabled": "TB2 HTTPS Qotlh.",
+            "ready": "SuH — {{hostname}}:{{port}}",
+            "request_active": "v3 tlhobtaH — {{hostname}}:{{port}}",
+            "connecting": "rarlI' — {{hostname}}:{{port}}",
+            "httpStatus": "v3 HTTP Dotlh: {{httpStatus}}.",
+            "tunneling": "TB2 HTTPS proxy vangtaH — {{hostname}}:{{port}}",
+            "success": "Qapla'.",
+            "error": "Qagh: {{errorCode}}."
+        },
+        "mqttUpstreamStatus": {
+            "disabled": "ICI Qotlh.",
+            "standby": "ICI SuH; proxy Qotlh.",
+            "armed": "ICI SuH; TB2 loS.",
+            "connecting": "rarlI' — {{hostname}}:{{port}}",
+            "tunneling": "ICI proxy vangtaH — {{hostname}}:{{port}}",
+            "error": "ICI Qagh: {{errorCode}}."
+        }
+    },
+    "settings": {
+        "certificates": {
+            "information": "De'",
+            "navigationTitle": "Certificates",
+            "title": "Certificates"
+        },
+        "close": "SoQmoH",
+        "discard": "polHa'",
+        "general": {
+            "navigationTitle": "Hoch",
+            "title": "Hoch DuHmey"
+        },
+        "information": "De'",
+        "scopeTabs": {
+            "global": "Hoch"
+        },
+        "scopeSections": {
+            "logging": "QonoSmey",
+            "server": "TeddyCloud De'wI'",
+            "storage": "qawHaq",
+            "content": "De'",
+            "security": "Hung",
+            "encoding": "Encoding",
+            "webui": "WebUI",
+            "cloudContent": "Cloud De'",
+            "mqtt": "MQTT / Home Assistant",
+            "diagnostics": "Qagh nej",
+            "tonieJson": "Tonie De'",
+            "boxGeneral": "Toniebox DuHmey",
+            "certificates": "Certificates",
+            "cloud": "Cloud",
+            "boxBehavior": "Toniebox vang",
+            "rtnl": "RTNL",
+            "tools": "janmey",
+            "httpsCloud": "HTTPS Cloud",
+            "iciUpstream": "ICI MQTT lab",
+            "iciServer": "ICI MQTT De'wI'",
+            "v3Endpoints": "TB2 v3 HeHmey",
+            "unclassified": "Segh Hutlh"
+        },
+        "mqttForwarding": {
+            "suppress": "bot",
+            "forward": "lI'",
+            "global": "Hoch DuH lo'",
+            "searchSources": "QonoS mung nej",
+            "title": "cha' lurghmey jabbI'ID DuHmey",
+            "groups": {
+                "logs": "QonoSmey",
+                "metrics": "juvta'mey",
+                "appReply": "App jang",
+                "settings": "DuHmey",
+                "playback": "wab much",
+                "appControl": "App SeH"
+            }
+        },
+        "navigationTitle": "DuHmey",
+        "notifications": {
+            "colStatus": "Dotlh",
+            "error": "Qagh",
+            "info": "De'",
+            "navigationTitle": "QInmey",
+            "title": "QInmey",
+            "warning": "yIqIm"
+        },
+        "rtnl": {
+            "clear": "RTNL QonoS Qaw'",
+            "navigationTitle": "RTNL QonoS",
+            "title": "RTNL QonoS"
+        },
+        "save": "pol",
+        "title": "DuHmey",
+        "optionText": {
+            "log__level": {
+                "label": "QonoS patlh"
+            },
+            "log__color": {
+                "label": "QonoS nguv"
+            },
+            "core__certdir_tb2": {
+                "label": "TB2 certificate Daq"
+            },
+            "cloud__tb2_enabled": {
+                "label": "TB2 HTTPS proxy QotlhHa'"
+            },
+            "cloud__tb2_v3_enabled": {
+                "label": "TB2 v3 He QotlhHa'"
+            },
+            "cloud__tb2_capture_enabled": {
+                "label": "TB2 HTTPS jabbI'ID pol"
+            },
+            "mqtt_client_upstream__enabled": {
+                "label": "ICI MQTT He QotlhHa'"
+            },
+            "mqtt_client_upstream__passthrough_enabled": {
+                "label": "ICI proxy QotlhHa'"
+            },
+            "mqtt_server__enabled": {
+                "label": "MQTT De'wI' QotlhHa'"
+            }
         }
     },
     "tonieboxes": {
+        "availableBoxModal": {
+            "cancel": "qIl",
+            "status": "Dotlh"
+        },
         "boxSetup": {
             "identifyVersion": {
                 "or": "qoj"
             }
+        },
+        "cancel": "qIl",
+        "delete": "Qaw'",
+        "editTonieboxSettingsModal": {
+            "editTonieboxSettingsLabel": "DuHmey"
         }
     },
     "tonies": {
+        "addNewCustomTonieModal": {
+            "language": "Hol",
+            "save": "pol"
+        },
+        "cancel": "qIl",
+        "content": {
+            "navigationTitle": "De'",
+            "title": "De'"
+        },
+        "editModal": {
+            "modelInfoLanguage": "Hol",
+            "save": "pol"
+        },
         "help": {
+            "closeButton": "SoQmoH",
             "title": "QaH"
+        },
+        "selectFileModal": {
+            "cancel": "qIl"
+        },
+        "selectMode": {
+            "cancel": "qIl"
+        },
+        "tapEditor": {
+            "cancel": "qIl",
+            "save": "pol"
+        },
+        "teddystudio": {
+            "cancel": "qIl",
+            "close": "SoQmoH",
+            "save": "pol",
+            "settings": "DuHmey"
         }
     }
 }

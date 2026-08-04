@@ -91,6 +91,29 @@ class WebTranslationContractTests(unittest.TestCase):
         for language in ALL_LANGUAGES:
             self.assertIn(f'"{language}"', i18n_source)
 
+    def test_klingon_has_visible_curated_ui_vocabulary(self) -> None:
+        klingon = self.flattened["tlh"]
+        expected = {
+            "home.navigationTitle": "juH",
+            "language.change": "Hol choH",
+            "settings.navigationTitle": "DuHmey",
+            "settings.save": "pol",
+            "settings.discard": "polHa'",
+            "settings.scopeSections.logging": "QonoSmey",
+            "settings.scopeSections.security": "Hung",
+            "settings.notifications.colStatus": "Dotlh",
+        }
+        for key, value in expected.items():
+            self.assertEqual(value, klingon.get(key), key)
+
+        english = self.flattened["en"]
+        localized_values = [
+            value
+            for key, value in klingon.items()
+            if str(value) != str(english[key])
+        ]
+        self.assertGreaterEqual(len(localized_values), 50)
+
     def test_translations_preserve_placeholder_names(self) -> None:
         english = self.flattened["en"]
         for language in ALL_LANGUAGES:
