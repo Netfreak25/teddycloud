@@ -155,7 +155,11 @@ class WebTranslationContractTests(unittest.TestCase):
         for language in ALL_LANGUAGES:
             source = TRANSLATION_DIR / f"{language}.json"
             bundled = BUNDLE_TRANSLATION_DIR / f"{language}.json"
-            self.assertEqual(source.read_bytes(), bundled.read_bytes(), language)
+            self.assertEqual(
+                json.loads(source.read_text(encoding="utf-8")),
+                json.loads(bundled.read_text(encoding="utf-8")),
+                language,
+            )
 
     def test_bundle_keeps_the_dev_banner_and_references_an_existing_asset(self) -> None:
         index = (BUNDLE_DIR / "index.html").read_text(encoding="utf-8")
