@@ -1318,6 +1318,14 @@
                 "label": "CA-Zertifikatdaten",
                 "description": "CA-Zertifikatdaten"
             },
+            "core__server_cert_tb2__hostname": {
+                "label": "TB2-HTTPS-Hostname",
+                "description": "DNS-Hostname für das TB2-HTTPS-Serverzertifikat. Ein passendes Leaf-Zertifikat wird nur bei Bedarf neu erstellt."
+            },
+            "core__server_cert_tb2__rotation_status": {
+                "label": "Status des TB2-HTTPS-Zertifikats",
+                "description": "Ergebnis der letzten Prüfung oder Neuerstellung des TB2-HTTPS-Zertifikats."
+            },
             "core__server_cert_tb2__file__ca": {
                 "label": "CA-Zertifikat",
                 "description": "CA-Zertifikat"
@@ -2058,6 +2066,10 @@
                 "label": "MQTT-Server aktivieren",
                 "description": "Internen MQTT-Server aktivieren"
             },
+            "mqtt_server__hostname": {
+                "label": "ICI-MQTT-Hostname",
+                "description": "DNS-Hostname für das ICI-MQTT-Serverzertifikat. Ein passendes Leaf-Zertifikat wird nur bei Bedarf neu erstellt."
+            },
             "mqtt_server__port": {
                 "label": "MQTT-Server-Port",
                 "description": "Port für internen MQTT-Server"
@@ -2069,6 +2081,10 @@
             "mqtt_server__cert__key": {
                 "label": "Server-Schlüssel",
                 "description": "Pfad zur Server-Schlüsseldatei (PEM-Format)"
+            },
+            "mqtt_server__cert__rotation_status": {
+                "label": "Status des ICI-MQTT-Zertifikats",
+                "description": "Ergebnis der letzten Prüfung oder Neuerstellung des ICI-MQTT-Zertifikats."
             },
             "mqtt_server__log_full_payloads": {
                 "label": "Vollständige MQTT-Nutzlasten protokollieren",

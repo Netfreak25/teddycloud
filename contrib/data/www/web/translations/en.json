@@ -1318,6 +1318,14 @@
                 "label": "CA certificate data",
                 "description": "CA certificate data"
             },
+            "core__server_cert_tb2__hostname": {
+                "label": "TB2 HTTPS hostname",
+                "description": "DNS hostname used for the TB2 HTTPS server certificate. A matching leaf certificate is rebuilt only when required."
+            },
+            "core__server_cert_tb2__rotation_status": {
+                "label": "TB2 HTTPS certificate status",
+                "description": "Result of the last TB2 HTTPS certificate check or rebuild."
+            },
             "core__server_cert_tb2__file__ca": {
                 "label": "CA certificate",
                 "description": "CA certificate"
@@ -2058,6 +2066,10 @@
                 "label": "Enable MQTT Server",
                 "description": "Enable internal MQTT server"
             },
+            "mqtt_server__hostname": {
+                "label": "ICI MQTT hostname",
+                "description": "DNS hostname used for the ICI MQTT server certificate. A matching leaf certificate is rebuilt only when required."
+            },
             "mqtt_server__port": {
                 "label": "MQTT Server port",
                 "description": "Port for internal MQTT server"
@@ -2069,6 +2081,10 @@
             "mqtt_server__cert__key": {
                 "label": "Server key",
                 "description": "Path to server key file (PEM format)"
+            },
+            "mqtt_server__cert__rotation_status": {
+                "label": "ICI MQTT certificate status",
+                "description": "Result of the last ICI MQTT certificate check or rebuild."
             },
             "mqtt_server__log_full_payloads": {
                 "label": "Log full MQTT payloads",

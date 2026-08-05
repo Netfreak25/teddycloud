@@ -4,6 +4,21 @@
 #include "rsa.h"
 #include "x509_key_format.h"
 
+typedef enum
+{
+    CERT_TB2_SERVICE_HTTPS = 0,
+    CERT_TB2_SERVICE_MQTT = 1,
+} cert_tb2_service_t;
+
+typedef struct
+{
+    bool_t rotated;
+    bool_t archived;
+    bool_t tls_reloaded;
+    bool_t restart_required;
+    char message[192];
+} cert_tb2_reconcile_result_t;
+
 /**
  * @brief Generate an RSA key pair
  *
@@ -76,6 +91,14 @@ error_t cert_generate_signed(const char *subject, const uint8_t *serial_number, 
  */
 error_t cert_generate_default();
 error_t cert_generate_default_tb2();
+bool_t cert_tb2_hostname_is_valid(const char *hostname, char *message, size_t message_size);
+error_t cert_tb2_reconcile_service(cert_tb2_service_t service,
+                                   const char *reason,
+                                   const char *old_hostname,
+                                   cert_tb2_reconcile_result_t *result);
+error_t cert_tb2_reconcile_all(const char *reason);
+void cert_tb2_rotation_lock(void);
+void cert_tb2_rotation_unlock(void);
 error_t cert_generate_mac_tb2(const char *mac, const char *dest, bool add_to_settings);
 error_t cert_generate_signed_ec(const char *subject, const uint8_t *serial_number, int serial_number_size, bool self_sign, bool cert_der_format, const char *cert_file, const char *priv_file, const char *ca_cert_setting, const char *ca_key_setting, const char *dns_names[], size_t dns_names_count);
 

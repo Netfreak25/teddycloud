@@ -21,7 +21,7 @@ FORM_COMPONENTS_PATH = (
 SETTINGS_HANDLER_PATH = ROOT / "teddycloud_web" / "src" / "data" / "SettingsDataHandler.ts"
 
 PUBLIC_OPTION_PATTERN = re.compile(
-    r"\bOPTION_(?:BOOL|STRING|UNSIGNED|SIGNED|FLOAT|READONLY_BOOL)"
+    r"\bOPTION_(?:BOOL|STRING|UNSIGNED|SIGNED|FLOAT|READONLY_BOOL|READONLY_STRING)"
     r"\(\s*(?:\"([^\"]+)\"|([A-Z][A-Z0-9_]+))"
 )
 DEFINE_PATTERN = re.compile(
@@ -107,9 +107,13 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
             "core.certdir_tb2": "tb2",
             "core.client_cert_tb2.file.crt": "tb2",
             "core.server_cert_tb2.file.crt": "tb2",
+            "core.server_cert_tb2.hostname": "tb2",
+            "core.server_cert_tb2.rotation_status": "tb2",
             "cloud.tb2_enabled": "tb2",
             "cloud.tb2_v3_enabled": "tb2",
             "mqtt_server.enabled": "tb2",
+            "mqtt_server.hostname": "tb2",
+            "mqtt_server.cert.rotation_status": "tb2",
             "mqtt_client_upstream.enabled": "tb2",
             "mqtt_client_upstream.local_control_enabled": "tb2",
             "mqtt_client_upstream.forward.logs.other": "tb2",

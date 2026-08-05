@@ -50,11 +50,6 @@ static tap_target_lock_t tap_target_locks[TAP_TARGET_LOCK_COUNT];
 static bool_t tap_is_stable_cached_playlist(tonie_info_t *tonieInfo);
 static void freshness_clear_cache_after_content_request(client_ctx_t *client_ctx, cloudapi_t api, const char *ruid);
 static bool_t freshness_source_changed_contains_ruid(settings_t *settings, const char *ruid);
-static bool_t freshness_confirm_source_change_after_chapter(client_ctx_t *client_ctx,
-                                                            const char *ruid,
-                                                            uint32_t version,
-                                                            bool_t private_source,
-                                                            const char *chapter_name);
 static bool_t v3_source_is_tap(const tonie_info_t *tonieInfo);
 
 typedef struct
@@ -2086,7 +2081,7 @@ static void freshness_clear_cache_after_content_request(client_ctx_t *client_ctx
     }
     if (freshness_source_changed_contains_ruid(client_ctx->settings, ruid))
     {
-        TRACE_DEBUG("Keeping V3 freshness source-change entry for rUID %s until successful content generation completion\r\n", ruid);
+        TRACE_DEBUG("Keeping V3 freshness source-change entry for rUID %s until matching playback confirmation\r\n", ruid);
         return;
     }
 
@@ -2532,63 +2527,91 @@ static uint32_t freshness_v3_content_meta_version(settings_t *settings, tonie_in
     return available ? effectiveAudioId : fallbackAudioId;
 }
 
-static bool_t freshness_confirm_source_change_after_chapter(client_ctx_t *client_ctx,
-                                                            const char *ruid,
-                                                            uint32_t version,
-                                                            bool_t private_source,
-                                                            const char *chapter_name)
+bool_t freshness_confirm_v3_content_version(settings_t *settings,
+                                            const char *ruid,
+                                            uint64_t content_version)
 {
-    if (client_ctx == NULL || client_ctx->settings == NULL ||
-        !freshness_source_changed_contains_ruid(client_ctx->settings, ruid))
+    if (settings == NULL || settings->toniebox.boxGeneration != GENERATION_TB2 ||
+        tb2_ruid_classify(ruid) != TB2_RUID_CONTENT || content_version == 0 ||
+        content_version > UINT32_MAX)
     {
+        TRACE_DEBUG("Keeping V3 source-change marker: invalid playback confirmation overlay=%u rUID=%s version=%" PRIu64 "\r\n",
+                    settings != NULL ? (unsigned)settings->internal.overlayNumber : 0U,
+                    ruid != NULL ? ruid : "(null)", content_version);
         return FALSE;
     }
 
     char canonical_ruid[TB2_RUID_SIZE];
     uint64_t uid = 0;
     if (!tb2_ruid_canonicalize(ruid, canonical_ruid) ||
-        !tb2_ruid_to_uid(canonical_ruid, &uid))
+        !tb2_ruid_to_uid(canonical_ruid, &uid) ||
+        !freshness_source_changed_contains_ruid(settings, canonical_ruid))
     {
+        TRACE_DEBUG("Ignoring V3 playback confirmation without matching source-change marker overlay=%u rUID=%s\r\n",
+                    (unsigned)settings->internal.overlayNumber,
+                    ruid != NULL ? ruid : "(null)");
         return FALSE;
     }
 
     tonie_info_t *current = getTonieInfoFromRuid(canonical_ruid, false,
-                                                  client_ctx->settings);
+                                                  settings);
     if (current == NULL)
     {
+        TRACE_DEBUG("Keeping V3 source-change marker for rUID %s: current content mapping is unavailable\r\n",
+                    canonical_ruid);
         return FALSE;
     }
+
+    if (v3_source_is_tap(current))
+    {
+        TRACE_DEBUG("Keeping general V3 source-change marker for TAP rUID %s: TAP observer owns playback confirmation\r\n",
+                    canonical_ruid);
+        freeTonieInfo(current);
+        return FALSE;
+    }
+
     bool_t source_configured = current->json.source != NULL &&
                                current->json.source[0] != '\0';
-    bool_t matches = source_configured == private_source;
-    if (matches && private_source)
+    uint32_t expected_version = 0;
+    bool_t expected_version_valid = FALSE;
+    if (source_configured)
     {
         uint32_t natural_version = 0;
         freshness_get_natural_server_audio_id(current, &natural_version, NULL);
-        matches = freshness_v3_content_meta_version(client_ctx->settings,
-                                                     current,
-                                                     canonical_ruid,
-                                                     natural_version) == version;
+        expected_version = freshness_v3_content_meta_version(settings, current,
+                                                             canonical_ruid,
+                                                             natural_version);
+        expected_version_valid = expected_version != 0;
+    }
+    else
+    {
+        expected_version_valid = v3_native_cache_route_version(
+            settings->internal.overlayNumber, canonical_ruid, &expected_version);
     }
     freeTonieInfo(current);
 
-    if (!matches)
+    if (!expected_version_valid)
     {
-        TRACE_DEBUG("Keeping V3 source-change marker for rUID %s: chapter %s version=%" PRIu32 " no longer matches current source\r\n",
-                    canonical_ruid, chapter_name != NULL ? chapter_name : "(unknown)",
-                    version);
+        TRACE_DEBUG("Keeping V3 source-change marker for rUID %s: no validated %s version is available\r\n",
+                    canonical_ruid, source_configured ? "private" : "TONIES route");
         return FALSE;
     }
 
-    if (!freshness_cache_remove_uid(client_ctx->settings, uid))
+    if (expected_version != (uint32_t)content_version)
+    {
+        TRACE_DEBUG("Keeping V3 source-change marker for rUID %s: playback version=%" PRIu64 " expected=%" PRIu32 "\r\n",
+                    canonical_ruid, content_version, expected_version);
+        return FALSE;
+    }
+
+    if (!freshness_cache_remove_uid(settings, uid))
     {
         return FALSE;
     }
-    TRACE_INFO("Completed V3 source change overlay=%u rUID=%s version=%" PRIu32 " chapter=%s source=%s\r\n",
-               (unsigned)client_ctx->settings->internal.overlayNumber,
-               canonical_ruid, version,
-               chapter_name != NULL ? chapter_name : "(unknown)",
-               private_source ? "private" : "original");
+    TRACE_INFO("Confirmed V3 content version via MQTT playback overlay=%u rUID=%s version=%" PRIu32 " source=%s\r\n",
+               (unsigned)settings->internal.overlayNumber,
+               canonical_ruid, expected_version,
+               source_configured ? "private" : "original");
     return TRUE;
 }
 
@@ -5493,12 +5516,7 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
             (connection->response.statusCode == 200 ||
              connection->response.statusCode == 206))
         {
-            if (generation.source_kind != V3_LOCAL_CONTENT_SOURCE_TAP &&
-                !freshness_confirm_source_change_after_chapter(client_ctx,
-                                                               request.ruid,
-                                                               servedVersion,
-                                                               TRUE,
-                                                               chapter->name))
+            if (generation.source_kind != V3_LOCAL_CONTENT_SOURCE_TAP)
             {
                 freshness_clear_cache_after_content_request(client_ctx,
                                                             V3_CHAPTER,
@@ -5577,17 +5595,6 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
             error_t cache_error = httpSendResponseStreamUnsafe(connection,
                                                                V3_LOCAL_CHAPTER_MIME_URI,
                                                                native_path, false);
-            if (cache_error == NO_ERROR &&
-                (connection->response.statusCode == 200 ||
-                 connection->response.statusCode == 206) &&
-                v3_native_cache_route_matches(
-                    client_ctx->settings->internal.overlayNumber,
-                    native_capture.ruid, native_capture.version, native_name))
-            {
-                freshness_confirm_source_change_after_chapter(
-                    client_ctx, native_capture.ruid, native_capture.version,
-                    FALSE, native_name);
-            }
             osFreeMem(native_path);
             return cache_error;
         }
@@ -5665,17 +5672,6 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
         if (native_action == V3_NATIVE_CHAPTER_CAPTURE ||
             native_action == V3_NATIVE_CHAPTER_FORWARD)
         {
-            if (!request_error && cache_ctx.finished && cache_ctx.successful &&
-                v3_native_cache_route_matches(
-                    client_ctx->settings->internal.overlayNumber,
-                    cache_ctx.cache.ruid, cache_ctx.cache.version,
-                    cache_ctx.cache.name))
-            {
-                freshness_confirm_source_change_after_chapter(
-                    client_ctx, cache_ctx.cache.ruid,
-                    cache_ctx.cache.version, FALSE,
-                    cache_ctx.cache.name);
-            }
             v3_native_cache_chapter_abort(&cache_ctx.cache);
         }
         if (!request_error)

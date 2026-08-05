@@ -14,6 +14,7 @@
 #include "tls.h"
 #include "rand.h"
 #include "tls_adapter.h"
+#include "cert.h"
 #include "encoding/base64.h"
 #include "cJSON.h"
 #include "handler.h"
@@ -387,6 +388,40 @@ static void mqtt_connection_close(MqttClientConnection *conn, const char *reason
     }
 }
 
+static void mqtt_connection_replace_existing_box_sessions(MqttClientConnection *current)
+{
+    char current_box_id[13];
+    if (current == NULL || !current->active || !current->box_connection ||
+        current->box_overlay_id == 0 ||
+        !settings_canonicalize_box_id(current->box_common_name, current_box_id,
+                                      sizeof(current_box_id)))
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
+    {
+        MqttClientConnection *candidate = &connections[i];
+        char candidate_box_id[13];
+        if (candidate == current || !candidate->active ||
+            !candidate->box_connection ||
+            candidate->box_overlay_id != current->box_overlay_id ||
+            !settings_canonicalize_box_id(candidate->box_common_name,
+                                          candidate_box_id,
+                                          sizeof(candidate_box_id)) ||
+            osStrcmp(candidate_box_id, current_box_id) != 0)
+        {
+            continue;
+        }
+
+        TRACE_INFO("MQTT reconnect replacing stale session box=%s overlay=%u oldSlot=%d newSlot=%d\r\n",
+                   current_box_id, (unsigned)current->box_overlay_id,
+                   mqtt_connection_slot(candidate),
+                   mqtt_connection_slot(current));
+        mqtt_connection_close(candidate, "superseded by reconnect");
+    }
+}
+
 static bool mqtt_topic_match(const char *filter, const char *topic)
 {
     while (*filter && *topic)
@@ -461,12 +496,17 @@ static void mqtt_connection_update_context(MqttClientConnection *conn, const cha
                 {
                     if (conn->box_connection || mqtt_connection_has_trusted_client_cert(conn))
                     {
+                        bool_t was_box_connection = conn->box_connection;
                         if (mqtt_promote_connection_to_box(conn, box_settings, canonical_mac,
                                                            conn->box_connection ? "topic" : "trusted-topic"))
                         {
                             osStrncpy(conn->box_topic_id, mac,
                                       sizeof(conn->box_topic_id) - 1);
                             conn->box_topic_id[sizeof(conn->box_topic_id) - 1] = '\0';
+                            if (!was_box_connection)
+                            {
+                                mqtt_connection_replace_existing_box_sessions(conn);
+                            }
                         }
                     }
                     else
@@ -522,6 +562,40 @@ static char_t *mqtt_server_read_file(const char_t *filename, size_t *length)
     return buffer;
 }
 
+error_t mqtt_server_reload_certificate()
+{
+    settings_t *settings = get_settings();
+    char cert_path[256];
+    char key_path[256];
+    char *cert_path_ptr = cert_path;
+    char *key_path_ptr = key_path;
+    settings_resolve_dir(&cert_path_ptr, settings->mqtt_server.cert_crt,
+                         settings->internal.basedirfull);
+    settings_resolve_dir(&key_path_ptr, settings->mqtt_server.cert_key,
+                         settings->internal.basedirfull);
+
+    size_t new_cert_len = 0;
+    size_t new_key_len = 0;
+    char_t *new_cert = mqtt_server_read_file(cert_path, &new_cert_len);
+    char_t *new_key = mqtt_server_read_file(key_path, &new_key_len);
+    if (new_cert == NULL || new_cert_len == 0 || new_key == NULL || new_key_len == 0)
+    {
+        osFreeMem(new_cert);
+        osFreeMem(new_key);
+        return ERROR_READ_FAILED;
+    }
+
+    char_t *old_cert = mqtt_server_cert;
+    char_t *old_key = mqtt_server_key;
+    mqtt_server_cert = new_cert;
+    mqtt_server_cert_len = new_cert_len;
+    mqtt_server_key = new_key;
+    mqtt_server_key_len = new_key_len;
+    osFreeMem(old_cert);
+    osFreeMem(old_key);
+    return NO_ERROR;
+}
+
 error_t mqtt_server_tls_init(TlsContext *tlsContext)
 {
     error_t error;
@@ -551,6 +625,7 @@ error_t mqtt_server_tls_init(TlsContext *tlsContext)
         return error;
     TRACE_DEBUG("MQTT TLS CertificateRequest mode=optional requested=true\r\n");
 
+    cert_tb2_rotation_lock();
     if (mqtt_server_cert && mqtt_server_key)
     {
         error = tlsLoadCertificate(tlsContext, 0, mqtt_server_cert, mqtt_server_cert_len, mqtt_server_key, mqtt_server_key_len, NULL);
@@ -560,6 +635,7 @@ error_t mqtt_server_tls_init(TlsContext *tlsContext)
         TRACE_ERROR("MQTT TLS setup refused: server certificate or key is not loaded\r\n");
         error = ERROR_FAILURE;
     }
+    cert_tb2_rotation_unlock();
 
     return error;
 }
@@ -568,41 +644,23 @@ void mqtt_server_init() {
     settings_t *settings = get_settings();
     if (!settings->mqtt_server.enabled) return;
 
-    // Load certificates once
-    char *cert_path = osAllocMem(256);
-    char *key_path = osAllocMem(256);
-    if (cert_path == NULL || key_path == NULL)
+    cert_tb2_rotation_lock();
+    error_t certificate_error = mqtt_server_reload_certificate();
+    cert_tb2_rotation_unlock();
+    if (certificate_error != NO_ERROR)
     {
-        TRACE_ERROR("MQTT TLS listener disabled: failed to allocate certificate paths\r\n");
-        osFreeMem(cert_path);
-        osFreeMem(key_path);
-        return;
-    }
-
-    settings_resolve_dir(&cert_path, settings->mqtt_server.cert_crt, settings->internal.basedirfull);
-    settings_resolve_dir(&key_path, settings->mqtt_server.cert_key, settings->internal.basedirfull);
-
-    mqtt_server_cert = mqtt_server_read_file(cert_path, &mqtt_server_cert_len);
-    mqtt_server_key = mqtt_server_read_file(key_path, &mqtt_server_key_len);
-
-    if (mqtt_server_cert == NULL || mqtt_server_cert_len == 0 ||
-        mqtt_server_key == NULL || mqtt_server_key_len == 0)
-    {
+        char cert_path[256] = {0};
+        char key_path[256] = {0};
+        char *cert_path_ptr = cert_path;
+        char *key_path_ptr = key_path;
+        settings_resolve_dir(&cert_path_ptr, settings->mqtt_server.cert_crt,
+                             settings->internal.basedirfull);
+        settings_resolve_dir(&key_path_ptr, settings->mqtt_server.cert_key,
+                             settings->internal.basedirfull);
         TRACE_ERROR("MQTT TLS listener disabled: certificate or key missing/unreadable cert='%s' key='%s'\r\n",
                     cert_path, key_path);
-        osFreeMem(mqtt_server_cert);
-        osFreeMem(mqtt_server_key);
-        mqtt_server_cert = NULL;
-        mqtt_server_key = NULL;
-        mqtt_server_cert_len = 0;
-        mqtt_server_key_len = 0;
-        osFreeMem(cert_path);
-        osFreeMem(key_path);
         return;
     }
-
-    osFreeMem(cert_path);
-    osFreeMem(key_path);
 
     TRACE_INFO("Initializing MQTT TLS listener on port %u\r\n", settings->mqtt_server.port);
     serverSocket = socketOpen(SOCKET_TYPE_STREAM, SOCKET_IP_PROTO_TCP);
@@ -2124,6 +2182,8 @@ static error_t handle_mqtt_connect(MqttClientConnection *conn, MqttMessageType t
         return error != NO_ERROR ? error : ERROR_FAILURE;
     }
 
+    mqtt_connection_replace_existing_box_sessions(conn);
+
     return NO_ERROR;
 }
 
@@ -2998,6 +3058,12 @@ static error_t handle_mqtt_publish_playback_state(MqttClientConnection *conn, Mq
                             tonie->valuestring,
                             content_version_valid && content_version <= UINT32_MAX,
                             (uint32_t)content_version);
+    if (content_version_valid)
+    {
+        freshness_confirm_v3_content_version(settings,
+                                             tonie->valuestring,
+                                             content_version);
+    }
 
     tbs_toniebox2_playback_state(&conn->client_ctx,
                                  tonie->valuestring,
@@ -3281,6 +3347,10 @@ void mqtt_server_task()
                                 error = tb2_mqtt_passthrough_forward_initial(conn->passthrough,
                                                                              conn->buffer,
                                                                              conn->buffer_len);
+                                if (!error)
+                                {
+                                    mqtt_connection_replace_existing_box_sessions(conn);
+                                }
                             }
                             if (handled)
                             {
@@ -3488,7 +3558,7 @@ void mqtt_server_task()
                 {
                     TRACE_ERROR("MQTT TLS connection rejected: failed to allocate TLS context\r\n");
                     mqtt_connection_close(conn, "TLS context allocation failed");
-                    continue;
+                    return;
                 }
 
                 error_t tlsError = mqtt_server_tls_init(conn->tlsContext);

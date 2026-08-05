@@ -183,6 +183,11 @@ bool_t v3_native_cache_route_matches(uint8_t overlay_id,
                                      uint32_t version,
                                      const char *name);
 
+/** Return the version of the currently validated route for an overlay/rUID. */
+bool_t v3_native_cache_route_version(uint8_t overlay_id,
+                                     const char *ruid,
+                                     uint32_t *version);
+
 void v3_native_cache_chapter_append(v3_native_cache_chapter_capture_t *capture,
                                     const void *data,
                                     size_t length);

@@ -39,6 +39,15 @@ static void settings_migrate_legacy_mqtt_server_files(void);
 #define MQTT_SERVER_CERT_PATH "certs/server_tb2/ici.pem"
 #define MQTT_SERVER_KEY_PATH "certs/server_tb2/ici.key"
 #define MQTT_SERVER_CERT_DIR "certs/server_tb2"
+#define CORE_SERVER_CERT_TB2_HOSTNAME_SETTING "core.server_cert_tb2.hostname"
+#define MQTT_SERVER_HOSTNAME_SETTING "mqtt_server.hostname"
+
+static bool settings_is_tb2_hostname(const char *item)
+{
+    return item != NULL &&
+           (!osStrcmp(item, CORE_SERVER_CERT_TB2_HOSTNAME_SETTING) ||
+            !osStrcmp(item, MQTT_SERVER_HOSTNAME_SETTING));
+}
 
 /* macros */
 #define ERR_RETURN(command)    \
@@ -118,6 +127,8 @@ static void option_map_init(uint8_t settingsId)
     OPTION_INTERNAL_STRING("core.server_cert.data.key", &settings->core.server_cert.data.key, "", "Server key data", LEVEL_EXPERT)
 
     OPTION_TREE_DESC("core.server_cert_tb2", "HTTPS server certificates (TB2)", LEVEL_EXPERT)
+    OPTION_STRING("core.server_cert_tb2.hostname", &settings->core.server_cert_tb2_hostname, "tbs2.tonie.cloud", "HTTPS hostname (TB2)", "DNS hostname used by the TB2 ota/host setting and HTTPS server certificate", LEVEL_EXPERT)
+    OPTION_READONLY_STRING("core.server_cert_tb2.rotation_status", &settings->core.server_cert_tb2_status, "Not checked", "HTTPS certificate status (TB2)", "Last TB2 HTTPS certificate reconciliation result", LEVEL_EXPERT)
     OPTION_TREE_DESC("core.server_cert_tb2.file", "File certificates (TB2)", LEVEL_EXPERT)
     OPTION_STRING("core.server_cert_tb2.file.ca", &settings->core.server_cert_tb2.file.ca, "certs/server_tb2/ca-root.pem", "CA certificate (TB2)", "CA certificate (TB2)", LEVEL_EXPERT)
     OPTION_STRING("core.server_cert_tb2.file.ca_der", &settings->core.server_cert_tb2.file.ca_der, "certs/server_tb2/ca.der", "CA certificate as DER (TB2)", "CA certificate as DER (TB2)", LEVEL_EXPERT)
@@ -486,9 +497,11 @@ static void option_map_init(uint8_t settingsId)
     
     OPTION_TREE_DESC("mqtt_server", "MQTT Server", LEVEL_DETAIL)
     OPTION_BOOL("mqtt_server.enabled", &settings->mqtt_server.enabled, FALSE, "Enable MQTT Server", "Enable internal MQTT server", LEVEL_DETAIL)
+    OPTION_STRING("mqtt_server.hostname", &settings->mqtt_server.hostname, "ici.tonie.cloud", "ICI hostname", "DNS hostname used by the TB2 ici/host setting and MQTT server certificate", LEVEL_EXPERT)
     OPTION_UNSIGNED("mqtt_server.port", &settings->mqtt_server.port, 8883, 1, 65535, "MQTT Server port", "Port for internal MQTT server", LEVEL_DETAIL)
     OPTION_STRING("mqtt_server.cert.crt", &settings->mqtt_server.cert_crt, MQTT_SERVER_CERT_PATH, "Server certificate", "Path to server certificate file (PEM format)", LEVEL_DETAIL)
     OPTION_STRING("mqtt_server.cert.key", &settings->mqtt_server.cert_key, MQTT_SERVER_KEY_PATH, "Server key", "Path to server key file (PEM format)", LEVEL_DETAIL)
+    OPTION_READONLY_STRING("mqtt_server.cert.rotation_status", &settings->mqtt_server.cert_status, "Not checked", "ICI certificate status", "Last TB2 ICI certificate reconciliation result", LEVEL_EXPERT)
     OPTION_BOOL("mqtt_server.log_full_payloads", &settings->mqtt_server.log_full_payloads, FALSE, "Log full MQTT payloads", "Log large MQTT server payloads as base64 for reverse-engineering exports.", LEVEL_EXPERT)
     OPTION_BOOL("mqtt_server.log_connect_details", &settings->mqtt_server.log_connect_details, FALSE, "Log MQTT CONNECT details", "Log MQTT CONNECT structure and plain client ID at debug level 5. Username, password and Will fields remain masked.", LEVEL_EXPERT)
 
@@ -879,11 +892,11 @@ static bool settings_migrate_id(uint8_t settingsId)
     {
         settings_migrate_tb2_https_modes(settingsId);
     }
-
     if (settings->configVersion < 21)
     {
         settings_migrate_legacy_mqtt_server_paths(settingsId);
     }
+
     return true;
 }
 
@@ -994,6 +1007,56 @@ void settings_resolve_dir(char **resolvedPath, char *path, char *basePath)
     fsFixPath(*resolvedPath);
 }
 
+static void settings_generate_internal_dirs(settings_t *settings)
+{
+    osFreeMem(settings->internal.basedirfull);
+    osFreeMem(settings->internal.certdirfull);
+    osFreeMem(settings->internal.certdirfull_tb2);
+    osFreeMem(settings->internal.configdirfull);
+    osFreeMem(settings->internal.contentdirrel);
+    osFreeMem(settings->internal.contentdirfull);
+    osFreeMem(settings->internal.librarydirfull);
+    osFreeMem(settings->internal.datadirfull);
+    osFreeMem(settings->internal.wwwdirfull);
+    osFreeMem(settings->internal.pluginsdirfull);
+    osFreeMem(settings->internal.firmwaredirfull);
+    osFreeMem(settings->internal.cachedirfull);
+
+    settings->internal.basedirfull = osAllocMem(256);
+    settings->internal.certdirfull = osAllocMem(256);
+    settings->internal.certdirfull_tb2 = osAllocMem(256);
+    settings->internal.configdirfull = osAllocMem(256);
+    settings->internal.contentdirrel = osAllocMem(256);
+    settings->internal.contentdirfull = osAllocMem(256);
+    settings->internal.librarydirfull = osAllocMem(256);
+    settings->internal.datadirfull = osAllocMem(256);
+    settings->internal.wwwdirfull = osAllocMem(256);
+    settings->internal.pluginsdirfull = osAllocMem(256);
+    settings->internal.firmwaredirfull = osAllocMem(256);
+    settings->internal.cachedirfull = osAllocMem(256);
+
+    char *tmpPath = osAllocMem(256);
+    settings_resolve_dir(&settings->internal.basedirfull, settings->internal.basedir, settings->internal.cwd);
+
+    settings_resolve_dir(&settings->internal.certdirfull, settings->core.certdir, settings->internal.basedirfull);
+    settings_resolve_dir(&settings->internal.certdirfull_tb2, settings->core.certdir_tb2, settings->internal.basedirfull);
+    settings_resolve_dir(&settings->internal.datadirfull, settings->core.datadir, settings->internal.basedirfull);
+    settings_resolve_dir(&settings->internal.configdirfull, settings->core.configdir, settings->internal.basedirfull);
+
+    settings_resolve_dir(&settings->internal.wwwdirfull, settings->core.wwwdir, settings->internal.datadirfull);
+    settings_resolve_dir(&settings->internal.pluginsdirfull, settings->core.pluginsdir, settings->internal.wwwdirfull);
+    settings_resolve_dir(&settings->internal.firmwaredirfull, settings->core.firmwaredir, settings->internal.datadirfull);
+    settings_resolve_dir(&settings->internal.cachedirfull, settings->core.cachedir, settings->internal.datadirfull);
+
+    settings_resolve_dir(&tmpPath, settings->core.contentdir, "content");
+    settings_resolve_dir(&settings->internal.contentdirrel, tmpPath, settings->core.datadir);
+    settings_resolve_dir(&settings->internal.contentdirfull, tmpPath, settings->internal.datadirfull);
+    fsCreateDir(settings->internal.contentdirfull);
+
+    settings_resolve_dir(&settings->internal.librarydirfull, settings->core.librarydir, settings->internal.datadirfull);
+
+    osFreeMem(tmpPath);
+}
 
 static char *settings_resolve_mqtt_server_path(settings_t *settings, const char *path)
 {
@@ -1098,56 +1161,6 @@ cleanup:
     osFreeMem(targetCert);
     osFreeMem(targetKey);
     osFreeMem(targetDir);
-}
-static void settings_generate_internal_dirs(settings_t *settings)
-{
-    osFreeMem(settings->internal.basedirfull);
-    osFreeMem(settings->internal.certdirfull);
-    osFreeMem(settings->internal.certdirfull_tb2);
-    osFreeMem(settings->internal.configdirfull);
-    osFreeMem(settings->internal.contentdirrel);
-    osFreeMem(settings->internal.contentdirfull);
-    osFreeMem(settings->internal.librarydirfull);
-    osFreeMem(settings->internal.datadirfull);
-    osFreeMem(settings->internal.wwwdirfull);
-    osFreeMem(settings->internal.pluginsdirfull);
-    osFreeMem(settings->internal.firmwaredirfull);
-    osFreeMem(settings->internal.cachedirfull);
-
-    settings->internal.basedirfull = osAllocMem(256);
-    settings->internal.certdirfull = osAllocMem(256);
-    settings->internal.certdirfull_tb2 = osAllocMem(256);
-    settings->internal.configdirfull = osAllocMem(256);
-    settings->internal.contentdirrel = osAllocMem(256);
-    settings->internal.contentdirfull = osAllocMem(256);
-    settings->internal.librarydirfull = osAllocMem(256);
-    settings->internal.datadirfull = osAllocMem(256);
-    settings->internal.wwwdirfull = osAllocMem(256);
-    settings->internal.pluginsdirfull = osAllocMem(256);
-    settings->internal.firmwaredirfull = osAllocMem(256);
-    settings->internal.cachedirfull = osAllocMem(256);
-
-    char *tmpPath = osAllocMem(256);
-    settings_resolve_dir(&settings->internal.basedirfull, settings->internal.basedir, settings->internal.cwd);
-
-    settings_resolve_dir(&settings->internal.certdirfull, settings->core.certdir, settings->internal.basedirfull);
-    settings_resolve_dir(&settings->internal.certdirfull_tb2, settings->core.certdir_tb2, settings->internal.basedirfull);
-    settings_resolve_dir(&settings->internal.datadirfull, settings->core.datadir, settings->internal.basedirfull);
-    settings_resolve_dir(&settings->internal.configdirfull, settings->core.configdir, settings->internal.basedirfull);
-
-    settings_resolve_dir(&settings->internal.wwwdirfull, settings->core.wwwdir, settings->internal.datadirfull);
-    settings_resolve_dir(&settings->internal.pluginsdirfull, settings->core.pluginsdir, settings->internal.wwwdirfull);
-    settings_resolve_dir(&settings->internal.firmwaredirfull, settings->core.firmwaredir, settings->internal.datadirfull);
-    settings_resolve_dir(&settings->internal.cachedirfull, settings->core.cachedir, settings->internal.datadirfull);
-
-    settings_resolve_dir(&tmpPath, settings->core.contentdir, "content");
-    settings_resolve_dir(&settings->internal.contentdirrel, tmpPath, settings->core.datadir);
-    settings_resolve_dir(&settings->internal.contentdirfull, tmpPath, settings->internal.datadirfull);
-    fsCreateDir(settings->internal.contentdirfull);
-
-    settings_resolve_dir(&settings->internal.librarydirfull, settings->core.librarydir, settings->internal.datadirfull);
-
-    osFreeMem(tmpPath);
 }
 
 static void settings_changed()
@@ -1331,12 +1344,7 @@ error_t settings_init(const char *cwd, const char *base_dir)
 
     settings_changed();
 
-    error_t error = settings_load();
-    if (error == NO_ERROR)
-    {
-        settings_migrate_legacy_mqtt_server_files();
-    }
-    return error;
+    return settings_load();
 }
 
 error_t settings_save()
@@ -1389,7 +1397,7 @@ static error_t settings_save_ovl(bool overlay)
         while (option_map[pos].type != TYPE_END)
         {
             setting_item_t *opt = &option_map[pos];
-            if (!opt->internal || !osStrcmp(opt->option_name, "configVersion") || (overlay && (!osStrcmp(opt->option_name, "commonName") || !osStrcmp(opt->option_name, "boxName") || !osStrcmp(opt->option_name, "boxModel"))))
+            if ((!opt->internal && !opt->read_only) || !osStrcmp(opt->option_name, "configVersion") || (overlay && (!osStrcmp(opt->option_name, "commonName") || !osStrcmp(opt->option_name, "boxName") || !osStrcmp(opt->option_name, "boxModel"))))
             {
                 char *overlayPrefix;
                 if (overlay)
@@ -1548,7 +1556,11 @@ static error_t settings_load_ovl(bool overlay)
                 {
                     // Find the corresponding setting item
                     setting_item_t *opt = settings_get_by_name_ovl(option_name, overlay_unique_id);
-                    if (opt != NULL)
+                    if (opt != NULL && opt->read_only)
+                    {
+                        TRACE_WARNING("Ignoring persisted read-only setting '%s'\r\n", option_name);
+                    }
+                    else if (opt != NULL)
                     {
                         // temporaries for the bounds-checked numeric cases below
                         int32_t signedVal;
@@ -1611,9 +1623,27 @@ static error_t settings_load_ovl(bool overlay)
                             TRACE_DEBUG("%s=%f\r\n", opt->option_name, *((float *)opt->ptr));
                             break;
                         case TYPE_STRING:
-                            osFreeMem(*((char **)opt->ptr));
-                            *((char **)opt->ptr) = strdup(value_str);
-                            TRACE_DEBUG("%s=%s\r\n", opt->option_name, *((char **)opt->ptr));
+                            if (settings_is_tb2_hostname(option_name) && overlay)
+                            {
+                                TRACE_WARNING("Ignoring overlay-only value for global hostname setting '%s'\r\n", option_name);
+                                opt->overlayed = false;
+                            }
+                            else
+                            {
+                                char validation_message[128];
+                                if (settings_is_tb2_hostname(option_name) &&
+                                    !cert_tb2_hostname_is_valid(value_str, validation_message, sizeof(validation_message)))
+                                {
+                                    TRACE_WARNING("Invalid hostname for '%s': %s; keeping '%s'\r\n",
+                                                  option_name, validation_message, *((char **)opt->ptr));
+                                }
+                                else
+                                {
+                                    osFreeMem(*((char **)opt->ptr));
+                                    *((char **)opt->ptr) = strdup(value_str);
+                                }
+                                TRACE_DEBUG("%s=%s\r\n", opt->option_name, *((char **)opt->ptr));
+                            }
                             break;
 
                         default:
@@ -1697,6 +1727,7 @@ static error_t settings_load_ovl(bool overlay)
         bool migrated = settings_migrate_id(0);
         settings_normalize_tb2_https_modes(0);
         settings_generate_internal_dirs(get_settings());
+        settings_migrate_legacy_mqtt_server_files();
         settings_load_certs_id(0);
         if (migrated)
         {
@@ -2132,6 +2163,65 @@ bool settings_set_string_id(const char *item, const char *value, uint8_t setting
         return false;
     }
 
+    if (opt->read_only)
+    {
+        TRACE_WARNING("Setting '%s' is read-only\r\n", item);
+        return false;
+    }
+
+    if (settings_is_tb2_hostname(item))
+    {
+        if (settingsId != 0)
+        {
+            TRACE_WARNING("Setting '%s' is global and cannot be overlaid\r\n", item);
+            return false;
+        }
+
+        char validation_message[128];
+        if (!cert_tb2_hostname_is_valid(value, validation_message, sizeof(validation_message)))
+        {
+            TRACE_WARNING("Invalid hostname for '%s': %s\r\n", item, validation_message);
+            return false;
+        }
+
+        const char *current_value = *((char **)opt->ptr);
+        if (current_value != NULL && !osStrcmp(current_value, value))
+        {
+            TRACE_INFO("Setting '%s' is unchanged; certificate reconciliation skipped\r\n", item);
+            return true;
+        }
+
+        char *old_value = current_value != NULL ? strdup(current_value) : strdup("");
+        char *new_value = strdup(value);
+        if (old_value == NULL || new_value == NULL)
+        {
+            osFreeMem(old_value);
+            osFreeMem(new_value);
+            return false;
+        }
+
+        *((char **)opt->ptr) = new_value;
+        cert_tb2_reconcile_result_t result;
+        cert_tb2_service_t service = !osStrcmp(item, CORE_SERVER_CERT_TB2_HOSTNAME_SETTING)
+                                             ? CERT_TB2_SERVICE_HTTPS
+                                             : CERT_TB2_SERVICE_MQTT;
+        error_t reconcile_error = cert_tb2_reconcile_service(service,
+                                                              "hostname changed",
+                                                              old_value,
+                                                              &result);
+        if (reconcile_error != NO_ERROR)
+        {
+            *((char **)opt->ptr) = old_value;
+            osFreeMem(new_value);
+            TRACE_ERROR("Certificate reconciliation for '%s' failed; setting rolled back\r\n", item);
+            return false;
+        }
+
+        osFreeMem(old_value);
+        settings_changed_id(settingsId);
+        return true;
+    }
+
     char **ptr = (char **)opt->ptr;
     char *old_ptr = *ptr;
 
@@ -2452,6 +2542,41 @@ error_t settings_try_load_certs_id(uint8_t settingsId)
     return tb1_error;
 }
 
+error_t settings_reload_tb2_server_certificate(void)
+{
+    error_t error = load_cert("internal.server_tb2.ca", "core.server_cert_tb2.file.ca",
+                              "core.server_cert_tb2.data.ca", 0);
+    if (error != NO_ERROR)
+        return error;
+
+    error = load_cert("internal.server_tb2.ca_key", "core.server_cert_tb2.file.ca_key",
+                      "core.server_cert_tb2.data.ca_key", 0);
+    if (error != NO_ERROR)
+        return error;
+
+    error = load_cert("internal.server_tb2.crt", "core.server_cert_tb2.file.crt",
+                      "core.server_cert_tb2.data.crt", 0);
+    if (error != NO_ERROR)
+        return error;
+
+    error = load_cert("internal.server_tb2.key", "core.server_cert_tb2.file.key",
+                      "core.server_cert_tb2.data.key", 0);
+    if (error != NO_ERROR)
+        return error;
+
+    const char *server_crt = settings_get_string("internal.server_tb2.crt");
+    const char *server_ca = settings_get_string("internal.server_tb2.ca");
+    if (server_crt == NULL || server_ca == NULL)
+        return ERROR_FAILURE;
+
+    char *chain = custom_asprintf("%s%s", server_crt, server_ca);
+    if (chain == NULL)
+        return ERROR_OUT_OF_MEMORY;
+    bool stored = settings_set_string("internal.server_tb2.cert_chain", chain);
+    osFreeMem(chain);
+    return stored ? NO_ERROR : ERROR_FAILURE;
+}
+
 error_t settings_load_certs_id(uint8_t settingsId)
 {
     if (!get_settings_id(settingsId)->internal.config_used)
@@ -2480,13 +2605,9 @@ error_t settings_load_certs_id(uint8_t settingsId)
 
         const char *ca_tb2 = settings_get_string_id("internal.server_tb2.ca", settingsId);
         const char *ca_key_tb2 = settings_get_string_id("internal.server_tb2.ca_key", settingsId);
-        const char *crt_tb2 = settings_get_string_id("internal.server_tb2.crt", settingsId);
-        const char *key_tb2 = settings_get_string_id("internal.server_tb2.key", settingsId);
-
-        if (!ca_tb2 || osStrlen(ca_tb2) == 0 ||
-            !ca_key_tb2 || osStrlen(ca_key_tb2) == 0 ||
-            !crt_tb2 || osStrlen(crt_tb2) == 0 ||
-            !key_tb2 || osStrlen(key_tb2) == 0)
+        if (settingsId == 0 &&
+            (!ca_tb2 || osStrlen(ca_tb2) == 0 ||
+             !ca_key_tb2 || osStrlen(ca_key_tb2) == 0))
         {
             TRACE_INFO("********************************************\r\n");
             TRACE_INFO("   No TB2 certificates found. Generating.\r\n");
@@ -2500,6 +2621,16 @@ error_t settings_load_certs_id(uint8_t settingsId)
             TRACE_INFO("********************************************\r\n");
             TRACE_INFO("   FINISHED TB2 GENERATION\r\n");
             TRACE_INFO("********************************************\r\n");
+        }
+        else if (settingsId == 0)
+        {
+            error_t reconcile_error = cert_tb2_reconcile_all("startup validation");
+            if (reconcile_error != NO_ERROR)
+            {
+                TRACE_ERROR("TB2 server certificate reconciliation failed (error %d)\r\n",
+                            reconcile_error);
+                return reconcile_error;
+            }
         }
     }
 

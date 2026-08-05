@@ -16,11 +16,42 @@
 #include "ecc/ec_curves.h"
 #include "ecc/ecdsa.h"
 #include "pkcs8_key_format.h"
+#include "x509_key_parse.h"
 #include "server_helpers.h"
+#include "x509_cert_validate.h"
+#include "hash/sha256.h"
+#include "date_time.h"
 
 #include "tls_adapter.h"
 #include "settings.h"
 #include "cert.h"
+#include "mqtt_server.h"
+
+#define TB2_CERT_PATH_SIZE 512
+#define TB2_CERT_NEAR_EXPIRY_SECONDS (24 * 60 * 60)
+
+static OsMutex tb2_cert_rotation_mutex;
+static bool_t tb2_cert_rotation_mutex_ready = FALSE;
+
+void cert_tb2_rotation_lock(void)
+{
+    if (!tb2_cert_rotation_mutex_ready)
+    {
+        tb2_cert_rotation_mutex_ready = osCreateMutex(&tb2_cert_rotation_mutex);
+    }
+    if (tb2_cert_rotation_mutex_ready)
+    {
+        osAcquireMutex(&tb2_cert_rotation_mutex);
+    }
+}
+
+void cert_tb2_rotation_unlock(void)
+{
+    if (tb2_cert_rotation_mutex_ready)
+    {
+        osReleaseMutex(&tb2_cert_rotation_mutex);
+    }
+}
 
 static int hex2int(char ch)
 {
@@ -804,7 +835,7 @@ error_t cert_generate_signed_ec(
     cert_req.subject.name.value = subject;
     cert_req.subject.name.length = osStrlen(subject);
 
-    cert_req.subject.commonName.value = self_sign ? "TeddyCloud Root CA" : (osStrstr(subject, "ici.tonie.cloud") ? "ici.tonie.cloud" : (osStrstr(subject, "tbs2.tonie.cloud") ? "tbs2.tonie.cloud" : subject));
+    cert_req.subject.commonName.value = self_sign ? "TeddyCloud Root CA" : subject;
     cert_req.subject.commonName.length = osStrlen(cert_req.subject.commonName.value);
     cert_req.subject.organizationName.value = "Team RevvoX"; //"tonies GmbH";
     cert_req.subject.organizationName.length = 11;
@@ -1036,6 +1067,608 @@ error_t cert_generate_signed_ec(
     return NO_ERROR;
 }
 
+typedef struct
+{
+    char *pem;
+    size_t pem_size;
+    uint8_t *der;
+    size_t der_size;
+    X509CertInfo info;
+} cert_loaded_x509_t;
+
+static void cert_loaded_x509_free(cert_loaded_x509_t *cert)
+{
+    if (cert == NULL)
+        return;
+    osFreeMem(cert->pem);
+    osFreeMem(cert->der);
+    osMemset(cert, 0, sizeof(*cert));
+}
+
+static error_t cert_load_x509_file(const char *path, cert_loaded_x509_t *cert)
+{
+    osMemset(cert, 0, sizeof(*cert));
+    error_t error = read_certificate(path, &cert->pem, &cert->pem_size);
+    if (error != NO_ERROR)
+        return error;
+
+    error = pemImportCertificate(cert->pem, cert->pem_size, NULL,
+                                 &cert->der_size, NULL);
+    if (error != NO_ERROR)
+        goto cleanup;
+
+    cert->der = osAllocMem(cert->der_size);
+    if (cert->der == NULL)
+    {
+        error = ERROR_OUT_OF_MEMORY;
+        goto cleanup;
+    }
+
+    error = pemImportCertificate(cert->pem, cert->pem_size, cert->der,
+                                 &cert->der_size, NULL);
+    if (error == NO_ERROR)
+    {
+        error = x509ParseCertificateEx(cert->der, cert->der_size,
+                                       &cert->info, TRUE);
+    }
+    if (error == NO_ERROR)
+        return NO_ERROR;
+
+cleanup:
+    cert_loaded_x509_free(cert);
+    return error;
+}
+
+static bool_t cert_key_matches(const X509CertInfo *cert, const char *key_path)
+{
+    char *key_pem = NULL;
+    size_t key_size = 0;
+    EcPrivateKey private_key;
+    EcPublicKey certificate_key;
+    EcPublicKey derived_key;
+    EcDomainParameters params;
+    ecInitPrivateKey(&private_key);
+    ecInitPublicKey(&certificate_key);
+    ecInitPublicKey(&derived_key);
+    ecInitDomainParameters(&params);
+
+    bool_t matches = FALSE;
+    if (read_certificate(key_path, &key_pem, &key_size) == NO_ERROR &&
+        pemImportEcPrivateKey(key_pem, key_size, NULL, &private_key) == NO_ERROR &&
+        x509ImportEcParameters(&cert->tbsCert.subjectPublicKeyInfo.ecParams,
+                               &params) == NO_ERROR &&
+        x509ImportEcPublicKey(&cert->tbsCert.subjectPublicKeyInfo,
+                              &certificate_key) == NO_ERROR &&
+        ecGeneratePublicKey(&params, &private_key, &derived_key) == NO_ERROR)
+    {
+        matches = mpiComp(&certificate_key.q.x, &derived_key.q.x) == 0 &&
+                  mpiComp(&certificate_key.q.y, &derived_key.q.y) == 0;
+    }
+
+    osFreeMem(key_pem);
+    ecFreePrivateKey(&private_key);
+    ecFreePublicKey(&certificate_key);
+    ecFreePublicKey(&derived_key);
+    ecFreeDomainParameters(&params);
+    return matches;
+}
+
+static bool_t cert_dns_name_matches(const X509GeneralName *name,
+                                    const char *expected)
+{
+    size_t expected_size = osStrlen(expected);
+    return name->type == X509_GENERAL_NAME_TYPE_DNS &&
+           name->length == expected_size &&
+           !osStrncasecmp(name->value, expected, expected_size);
+}
+
+static bool_t cert_has_exact_dns_names(const X509CertInfo *cert,
+                                       const char *dns_names[],
+                                       size_t dns_names_count)
+{
+    const X509SubjectAltName *san = &cert->tbsCert.extensions.subjectAltName;
+    if (san->numGeneralNames != dns_names_count)
+        return FALSE;
+
+    for (size_t expected = 0; expected < dns_names_count; expected++)
+    {
+        bool_t found = FALSE;
+        for (size_t actual = 0; actual < san->numGeneralNames; actual++)
+        {
+            if (cert_dns_name_matches(&san->generalNames[actual], dns_names[expected]))
+            {
+                found = TRUE;
+                break;
+            }
+        }
+        if (!found)
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static void cert_sha256_hex(const uint8_t *data, size_t size, char output[65])
+{
+    static const char hex[] = "0123456789abcdef";
+    uint8_t digest[SHA256_DIGEST_SIZE];
+    sha256Compute(data, size, digest);
+    for (size_t i = 0; i < sizeof(digest); i++)
+    {
+        output[i * 2] = hex[digest[i] >> 4];
+        output[i * 2 + 1] = hex[digest[i] & 0x0F];
+    }
+    output[64] = '\0';
+}
+
+static void cert_tb2_set_status(cert_tb2_service_t service, const char *status)
+{
+    settings_t *settings = get_settings();
+    char **target = service == CERT_TB2_SERVICE_HTTPS
+                        ? &settings->core.server_cert_tb2_status
+                        : &settings->mqtt_server.cert_status;
+    char *replacement = strdup(status != NULL ? status : "Unknown");
+    if (replacement != NULL)
+    {
+        osFreeMem(*target);
+        *target = replacement;
+    }
+}
+
+bool_t cert_tb2_hostname_is_valid(const char *hostname, char *message,
+                                  size_t message_size)
+{
+    const char *error = NULL;
+    size_t length = hostname != NULL ? osStrlen(hostname) : 0;
+    if (length == 0 || length > 253)
+        error = "hostname must contain 1 to 253 characters";
+    else if (osStrchr(hostname, '.') == NULL)
+        error = "hostname must be a fully qualified DNS name";
+    else
+    {
+        size_t label_length = 0;
+        bool_t only_digits_and_dots = TRUE;
+        for (size_t i = 0; i < length && error == NULL; i++)
+        {
+            unsigned char c = (unsigned char)hostname[i];
+            bool_t alnum = (c >= 'A' && c <= 'Z') ||
+                           (c >= 'a' && c <= 'z') ||
+                           (c >= '0' && c <= '9');
+            if (c != '.' && (c < '0' || c > '9'))
+                only_digits_and_dots = FALSE;
+            if (c == '.')
+            {
+                if (label_length == 0 || hostname[i - 1] == '-')
+                    error = "hostname contains an empty or invalid label";
+                label_length = 0;
+            }
+            else if (!alnum && c != '-')
+                error = "hostname contains a non-DNS character";
+            else
+            {
+                if (label_length == 0 && c == '-')
+                    error = "hostname label starts with a hyphen";
+                label_length++;
+                if (label_length > 63)
+                    error = "hostname label exceeds 63 characters";
+            }
+        }
+        if (error == NULL && (label_length == 0 || hostname[length - 1] == '-'))
+            error = "hostname contains an empty or invalid label";
+        if (error == NULL && only_digits_and_dots)
+            error = "IP literals are not accepted";
+    }
+
+    if (message != NULL && message_size > 0)
+        osSnprintf(message, message_size, "%s", error != NULL ? error : "valid");
+    return error == NULL;
+}
+
+static size_t cert_tb2_dns_names(cert_tb2_service_t service, const char *hostname,
+                                 const char *dns_names[], size_t capacity)
+{
+    static const char *https_defaults[] = {"tbs2.tonie.cloud"};
+    static const char *mqtt_defaults[] = {
+        "ici.tonie.cloud", "ici.dev.tonie.cloud", "ici.stage.tonie.cloud"};
+    const char **defaults = service == CERT_TB2_SERVICE_HTTPS
+                                ? https_defaults
+                                : mqtt_defaults;
+    size_t defaults_count = service == CERT_TB2_SERVICE_HTTPS ? 1 : 3;
+    size_t count = 0;
+    dns_names[count++] = hostname;
+    for (size_t i = 0; i < defaults_count && count < capacity; i++)
+    {
+        bool_t duplicate = FALSE;
+        for (size_t j = 0; j < count; j++)
+        {
+            if (!osStrcasecmp(dns_names[j], defaults[i]))
+                duplicate = TRUE;
+        }
+        if (!duplicate)
+            dns_names[count++] = defaults[i];
+    }
+    return count;
+}
+
+static void cert_tb2_resolve_path(const char *setting, char path[TB2_CERT_PATH_SIZE])
+{
+    char *path_ptr = path;
+    path[0] = '\0';
+    settings_resolve_dir(&path_ptr, (char *)settings_get_string(setting),
+                         get_settings()->internal.basedirfull);
+}
+
+static error_t cert_tb2_append(char *output, size_t output_size,
+                               const char *base, const char *suffix)
+{
+    size_t base_size = osStrlen(base);
+    size_t suffix_size = osStrlen(suffix);
+    if (base_size + suffix_size >= output_size)
+        return ERROR_INVALID_LENGTH;
+    osMemcpy(output, base, base_size);
+    osMemcpy(output + base_size, suffix, suffix_size + 1);
+    return NO_ERROR;
+}
+
+static error_t cert_tb2_join(char *output, size_t output_size,
+                             const char *directory, const char *filename)
+{
+    size_t directory_size = osStrlen(directory);
+    size_t filename_size = osStrlen(filename);
+    if (directory_size + 1 + filename_size >= output_size)
+        return ERROR_INVALID_LENGTH;
+    osMemcpy(output, directory, directory_size);
+    output[directory_size] = PATH_SEPARATOR;
+    osMemcpy(output + directory_size + 1, filename, filename_size + 1);
+    return NO_ERROR;
+}
+
+static error_t cert_tb2_validate_pair(const char *cert_path, const char *key_path,
+                                      const char *ca_cert_path, const char *ca_key_path,
+                                      const char *dns_names[], size_t dns_names_count,
+                                      char fingerprint[65], char *message,
+                                      size_t message_size)
+{
+    cert_loaded_x509_t leaf;
+    cert_loaded_x509_t ca;
+    error_t error = cert_load_x509_file(cert_path, &leaf);
+    if (error != NO_ERROR)
+    {
+        osSnprintf(message, message_size, "certificate is missing or unreadable");
+        return error;
+    }
+    error = cert_load_x509_file(ca_cert_path, &ca);
+    if (error != NO_ERROR)
+    {
+        osSnprintf(message, message_size, "TB2 CA certificate is unreadable");
+        cert_loaded_x509_free(&leaf);
+        return error;
+    }
+
+    cert_sha256_hex(leaf.der, leaf.der_size, fingerprint);
+
+    if (!cert_key_matches(&ca.info, ca_key_path))
+    {
+        osSnprintf(message, message_size, "TB2 CA certificate and key do not match");
+        error = ERROR_FAILURE;
+    }
+    else if (!cert_key_matches(&leaf.info, key_path))
+    {
+        osSnprintf(message, message_size, "server certificate and key do not match");
+        error = ERROR_FAILURE;
+    }
+    else if (x509ValidateCertificate(&leaf.info, &ca.info, 0) != NO_ERROR)
+    {
+        osSnprintf(message, message_size, "server certificate is not valid under the current TB2 CA");
+        error = ERROR_FAILURE;
+    }
+    else if (leaf.info.tbsCert.extensions.basicConstraints.cA)
+    {
+        osSnprintf(message, message_size, "server certificate is marked as a CA");
+        error = ERROR_FAILURE;
+    }
+    else if ((leaf.info.tbsCert.extensions.extKeyUsage.bitmap &
+              X509_EXT_KEY_USAGE_SERVER_AUTH) == 0)
+    {
+        osSnprintf(message, message_size, "server certificate lacks serverAuth");
+        error = ERROR_FAILURE;
+    }
+    else if (!cert_has_exact_dns_names(&leaf.info, dns_names, dns_names_count))
+    {
+        osSnprintf(message, message_size, "server certificate SANs do not match the configured hostname");
+        error = ERROR_FAILURE;
+    }
+    else
+    {
+        time_t now = getCurrentUnixTime();
+        time_t not_after = convertDateToUnixTime(&leaf.info.tbsCert.validity.notAfter);
+        if (now != 0 && not_after <= now + TB2_CERT_NEAR_EXPIRY_SECONDS)
+        {
+            osSnprintf(message, message_size, "server certificate is expired or near expiry");
+            error = ERROR_FAILURE;
+        }
+        else
+        {
+            osSnprintf(message, message_size, "certificate matches");
+            error = NO_ERROR;
+        }
+    }
+
+    cert_loaded_x509_free(&leaf);
+    cert_loaded_x509_free(&ca);
+    return error;
+}
+
+static error_t cert_tb2_write_archive(cert_tb2_service_t service,
+                                      const char *cert_path, const char *key_path,
+                                      const char *reason, const char *old_hostname,
+                                      const char *new_hostname,
+                                      const char *old_fingerprint,
+                                      const char *new_fingerprint,
+                                      const char *ca_fingerprint)
+{
+    if (!fsFileExists(cert_path) && !fsFileExists(key_path))
+        return NO_ERROR;
+
+    DateTime now;
+    getCurrentDate(&now);
+    char archive_path[TB2_CERT_PATH_SIZE];
+    const char *service_name = service == CERT_TB2_SERVICE_HTTPS ? "https" : "mqtt";
+    for (unsigned int suffix = 0; suffix < 100; suffix++)
+    {
+        char suffix_text[8] = "";
+        if (suffix > 0)
+            osSnprintf(suffix_text, sizeof(suffix_text), "-%u", suffix);
+        osSnprintf(archive_path, sizeof(archive_path),
+                   "%s%ccerts%carchive%ctb2%c%04u%02u%02uT%02u%02u%02uZ%s%c%s",
+                   get_settings()->internal.basedirfull, PATH_SEPARATOR,
+                   PATH_SEPARATOR, PATH_SEPARATOR, PATH_SEPARATOR,
+                   now.year, now.month, now.day, now.hours, now.minutes, now.seconds,
+                   suffix_text, PATH_SEPARATOR, service_name);
+        if (!fsDirExists(archive_path))
+            break;
+    }
+
+    error_t error = fsCreateDirEx(archive_path, TRUE);
+    if (error != NO_ERROR && !fsDirExists(archive_path))
+        return error;
+
+    char target[TB2_CERT_PATH_SIZE];
+    if (fsFileExists(cert_path))
+    {
+        error = cert_tb2_join(target, sizeof(target), archive_path, "server.pem");
+        if (error == NO_ERROR)
+            error = fsCopyFile(cert_path, target, FALSE);
+        if (error != NO_ERROR)
+            return error;
+    }
+    if (fsFileExists(key_path))
+    {
+        error = cert_tb2_join(target, sizeof(target), archive_path, "server.key");
+        if (error == NO_ERROR)
+            error = fsCopyFile(key_path, target, FALSE);
+        if (error != NO_ERROR)
+            return error;
+    }
+
+    error = cert_tb2_join(target, sizeof(target), archive_path, "metadata.json");
+    if (error != NO_ERROR)
+        return error;
+    char *metadata = custom_asprintf(
+        "{\"service\":\"%s\",\"reason\":\"%s\",\"oldHostname\":\"%s\","
+        "\"newHostname\":\"%s\",\"oldFingerprint\":\"%s\","
+        "\"newFingerprint\":\"%s\",\"caFingerprint\":\"%s\","
+        "\"verification\":\"passed\"}\n",
+        service_name, reason, old_hostname, new_hostname,
+        old_fingerprint, new_fingerprint, ca_fingerprint);
+    if (metadata == NULL)
+        return ERROR_OUT_OF_MEMORY;
+    FsFile *file = fsOpenFile(target, FS_FILE_MODE_WRITE | FS_FILE_MODE_CREATE | FS_FILE_MODE_TRUNC);
+    if (file == NULL)
+    {
+        osFreeMem(metadata);
+        return ERROR_OPEN_FAILED;
+    }
+    error = fsWriteFile(file, metadata, osStrlen(metadata));
+    fsCloseFile(file);
+    osFreeMem(metadata);
+    return error;
+}
+
+static error_t cert_tb2_reload(cert_tb2_service_t service)
+{
+    return service == CERT_TB2_SERVICE_HTTPS
+               ? settings_reload_tb2_server_certificate()
+               : mqtt_server_reload_certificate();
+}
+
+error_t cert_tb2_reconcile_service(cert_tb2_service_t service,
+                                   const char *reason,
+                                   const char *old_hostname,
+                                   cert_tb2_reconcile_result_t *result)
+{
+    cert_tb2_reconcile_result_t local_result;
+    if (result == NULL)
+        result = &local_result;
+    osMemset(result, 0, sizeof(*result));
+
+    settings_t *settings = get_settings();
+    const char *hostname = service == CERT_TB2_SERVICE_HTTPS
+                               ? settings->core.server_cert_tb2_hostname
+                               : settings->mqtt_server.hostname;
+    char validation[192];
+    if (!cert_tb2_hostname_is_valid(hostname, validation, sizeof(validation)))
+    {
+        cert_tb2_set_status(service, validation);
+        osSnprintf(result->message, sizeof(result->message), "%s", validation);
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    const char *dns_names[X509_MAX_SUBJECT_ALT_NAMES];
+    size_t dns_names_count = cert_tb2_dns_names(service, hostname, dns_names,
+                                                X509_MAX_SUBJECT_ALT_NAMES);
+    const char *cert_setting = service == CERT_TB2_SERVICE_HTTPS
+                                   ? "core.server_cert_tb2.file.crt"
+                                   : "mqtt_server.cert.crt";
+    const char *key_setting = service == CERT_TB2_SERVICE_HTTPS
+                                  ? "core.server_cert_tb2.file.key"
+                                  : "mqtt_server.cert.key";
+    char cert_path[TB2_CERT_PATH_SIZE];
+    char key_path[TB2_CERT_PATH_SIZE];
+    char ca_cert_path[TB2_CERT_PATH_SIZE];
+    char ca_key_path[TB2_CERT_PATH_SIZE];
+    cert_tb2_resolve_path(cert_setting, cert_path);
+    cert_tb2_resolve_path(key_setting, key_path);
+    cert_tb2_resolve_path("core.server_cert_tb2.file.ca", ca_cert_path);
+    cert_tb2_resolve_path("core.server_cert_tb2.file.ca_key", ca_key_path);
+
+    cert_tb2_rotation_lock();
+    char old_fingerprint[65] = "unavailable";
+    error_t error = cert_tb2_validate_pair(cert_path, key_path, ca_cert_path,
+                                            ca_key_path, dns_names, dns_names_count,
+                                            old_fingerprint, validation,
+                                            sizeof(validation));
+    if (error == NO_ERROR)
+    {
+        osSnprintf(result->message, sizeof(result->message),
+                   "Certificate already matches; no files changed");
+        cert_tb2_set_status(service, result->message);
+        cert_tb2_rotation_unlock();
+        return NO_ERROR;
+    }
+
+    char temp_cert[TB2_CERT_PATH_SIZE] = {0};
+    char temp_key[TB2_CERT_PATH_SIZE] = {0};
+    char rollback_cert[TB2_CERT_PATH_SIZE] = {0};
+    char rollback_key[TB2_CERT_PATH_SIZE] = {0};
+    error = cert_tb2_append(temp_cert, sizeof(temp_cert), cert_path, ".new");
+    if (error == NO_ERROR)
+        error = cert_tb2_append(temp_key, sizeof(temp_key), key_path, ".new");
+    if (error == NO_ERROR)
+        error = cert_tb2_append(rollback_cert, sizeof(rollback_cert), cert_path, ".rollback");
+    if (error == NO_ERROR)
+        error = cert_tb2_append(rollback_key, sizeof(rollback_key), key_path, ".rollback");
+    if (error != NO_ERROR)
+        goto failed;
+    fsDeleteFile(temp_cert);
+    fsDeleteFile(temp_key);
+    fsDeleteFile(rollback_cert);
+    fsDeleteFile(rollback_key);
+
+    char parent[TB2_CERT_PATH_SIZE];
+    osSnprintf(parent, sizeof(parent), "%s", cert_path);
+    fsRemoveFilename(parent);
+    error = fsCreateDirEx(parent, TRUE);
+    if (error != NO_ERROR && !fsDirExists(parent))
+        goto failed;
+    osSnprintf(parent, sizeof(parent), "%s", key_path);
+    fsRemoveFilename(parent);
+    error = fsCreateDirEx(parent, TRUE);
+    if (error != NO_ERROR && !fsDirExists(parent))
+        goto failed;
+
+    uint8_t serial[14];
+    size_t serial_length = sizeof(serial);
+    cert_generate_serial(serial, &serial_length);
+    error = cert_generate_signed_ec(hostname, serial, serial_length, FALSE, FALSE,
+                                    temp_cert, temp_key,
+                                    "internal.server_tb2.ca",
+                                    "internal.server_tb2.ca_key",
+                                    dns_names, dns_names_count);
+    if (error != NO_ERROR)
+        goto failed;
+
+    char new_fingerprint[65] = "unavailable";
+    error = cert_tb2_validate_pair(temp_cert, temp_key, ca_cert_path, ca_key_path,
+                                   dns_names, dns_names_count, new_fingerprint,
+                                   validation, sizeof(validation));
+    if (error != NO_ERROR)
+        goto failed;
+
+    cert_loaded_x509_t ca;
+    char ca_fingerprint[65] = "unavailable";
+    if (cert_load_x509_file(ca_cert_path, &ca) == NO_ERROR)
+    {
+        cert_sha256_hex(ca.der, ca.der_size, ca_fingerprint);
+        cert_loaded_x509_free(&ca);
+    }
+    error = cert_tb2_write_archive(service, cert_path, key_path,
+                                   reason != NULL ? reason : "certificate mismatch",
+                                   old_hostname != NULL ? old_hostname : hostname,
+                                   hostname, old_fingerprint, new_fingerprint,
+                                   ca_fingerprint);
+    if (error != NO_ERROR)
+        goto failed;
+    result->archived = fsFileExists(cert_path) || fsFileExists(key_path);
+
+    bool_t had_cert = fsFileExists(cert_path);
+    bool_t had_key = fsFileExists(key_path);
+    if (had_cert && fsCopyFile(cert_path, rollback_cert, TRUE) != NO_ERROR)
+    {
+        error = ERROR_WRITE_FAILED;
+        goto failed;
+    }
+    if (had_key && fsCopyFile(key_path, rollback_key, TRUE) != NO_ERROR)
+    {
+        error = ERROR_WRITE_FAILED;
+        goto failed;
+    }
+    error = fsMoveFile(temp_cert, cert_path, TRUE);
+    if (error == NO_ERROR)
+        error = fsMoveFile(temp_key, key_path, TRUE);
+    if (error == NO_ERROR)
+        error = cert_tb2_reload(service);
+    if (error != NO_ERROR)
+    {
+        if (had_cert)
+            fsMoveFile(rollback_cert, cert_path, TRUE);
+        else
+            fsDeleteFile(cert_path);
+        if (had_key)
+            fsMoveFile(rollback_key, key_path, TRUE);
+        else
+            fsDeleteFile(key_path);
+        cert_tb2_reload(service);
+        goto failed;
+    }
+
+    fsDeleteFile(rollback_cert);
+    fsDeleteFile(rollback_key);
+    result->rotated = TRUE;
+    result->tls_reloaded = TRUE;
+    result->restart_required = FALSE;
+    osSnprintf(result->message, sizeof(result->message),
+               "Rebuilt and reloaded certificate for %s", hostname);
+    cert_tb2_set_status(service, result->message);
+    TRACE_INFO("Rebuilt TB2 %s server certificate hostname=%s reason=%s restart_required=false\r\n",
+               service == CERT_TB2_SERVICE_HTTPS ? "HTTPS" : "MQTT",
+               hostname, reason != NULL ? reason : "certificate mismatch");
+    cert_tb2_rotation_unlock();
+    return NO_ERROR;
+
+failed:
+    fsDeleteFile(temp_cert);
+    fsDeleteFile(temp_key);
+    fsDeleteFile(rollback_cert);
+    fsDeleteFile(rollback_key);
+    osSnprintf(result->message, sizeof(result->message),
+               "Certificate rebuild failed; active files kept or restored");
+    cert_tb2_set_status(service, result->message);
+    TRACE_ERROR("TB2 %s certificate rebuild failed hostname=%s error=%s\r\n",
+                service == CERT_TB2_SERVICE_HTTPS ? "HTTPS" : "MQTT",
+                hostname, error2text(error));
+    cert_tb2_rotation_unlock();
+    return error != NO_ERROR ? error : ERROR_FAILURE;
+}
+
+error_t cert_tb2_reconcile_all(const char *reason)
+{
+    error_t https_error = cert_tb2_reconcile_service(CERT_TB2_SERVICE_HTTPS,
+                                                      reason, NULL, NULL);
+    error_t mqtt_error = cert_tb2_reconcile_service(CERT_TB2_SERVICE_MQTT,
+                                                     reason, NULL, NULL);
+    return https_error != NO_ERROR ? https_error : mqtt_error;
+}
+
 error_t cert_generate_default_tb2()
 {
     const char *cacert = settings_get_string("core.server_cert_tb2.file.ca");
@@ -1086,47 +1719,11 @@ error_t cert_generate_default_tb2()
         TRACE_INFO("TB2 CA DER certificate already there, skipping generation!\r\n");
     }
 
-    const char *server_cert = settings_get_string("core.server_cert_tb2.file.crt");
-    const char *server_key = settings_get_string("core.server_cert_tb2.file.key");
+    error_t reconcile_error = cert_tb2_reconcile_all("certificate initialization");
+    if (reconcile_error != NO_ERROR)
+        return reconcile_error;
 
-    if (!cert_file_is_nonempty(server_cert) || !cert_file_is_nonempty(server_key))
-    {
-        cert_generate_serial(serial, &serial_length);
-
-        TRACE_INFO("Generating TB2 Server certificate (tbs2.tonie.cloud)...\r\n");
-        const char *server_dns_names[] = { "tbs2.tonie.cloud" };
-        if (cert_generate_signed_ec("tbs2.tonie.cloud", serial, serial_length, false, false, server_cert, server_key, "internal.server_tb2.ca", "internal.server_tb2.ca_key", server_dns_names, 1) != NO_ERROR)
-        {
-            TRACE_ERROR("cert_generate_signed_ec failed for Server\r\n");
-            return ERROR_FAILURE;
-        }
-    }
-    else
-    {
-        TRACE_INFO("TB2 Server certificate already there, skipping generation!\r\n");
-    }
-
-    const char *mqtt_cert = settings_get_string("mqtt_server.cert.crt");
-    const char *mqtt_key = settings_get_string("mqtt_server.cert.key");
-
-    if (!cert_file_is_nonempty(mqtt_cert) || !cert_file_is_nonempty(mqtt_key))
-    {
-        cert_generate_serial(serial, &serial_length);
-
-        TRACE_INFO("Generating TB2 MQTT certificate (ici.tonie.cloud)...\r\n");
-        const char *mqtt_dns_names[] = { "ici.tonie.cloud", "ici.dev.tonie.cloud", "ici.stage.tonie.cloud" };
-        if (cert_generate_signed_ec("ici.tonie.cloud", serial, serial_length, false, false, mqtt_cert, mqtt_key, "internal.server_tb2.ca", "internal.server_tb2.ca_key", mqtt_dns_names, 3) != NO_ERROR)
-        {
-            TRACE_ERROR("cert_generate_signed_ec failed for MQTT Server\r\n");
-            return ERROR_FAILURE;
-        }
-    }
-    else
-    {
-        TRACE_INFO("TB2 MQTT certificate already there, skipping generation!\r\n");
-    }
-
-    /* reload certs to reload the other certs */
+    /* Reload the complete certificate settings after any leaf rebuild. */
     return settings_try_load_certs_id(0);
 }
 

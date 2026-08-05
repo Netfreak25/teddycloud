@@ -127,9 +127,19 @@ class Tb2V3NativeCacheContractTests(unittest.TestCase):
         )
         self.assertIn("V3_NATIVE_CHAPTER_BYPASS", chapter)
         self.assertIn("Rejecting V3 chapter without current content-meta route", chapter)
-        self.assertIn("v3_native_cache_route_matches", chapter)
         self.assertIn("V3_NATIVE_CHAPTER_FORWARD", chapter)
         self.assertIn("Rejecting TONIES V3 chapter fallback for NoCloud", chapter)
+
+    def test_validated_route_exposes_its_exact_content_version(self):
+        getter = self.section(
+            self.source,
+            "bool_t v3_native_cache_route_version(",
+            "void v3_native_cache_chapter_append(",
+        )
+        self.assertIn("mutex_lock(MUTEX_V3_NATIVE_CACHE)", getter)
+        self.assertIn("route->valid", getter)
+        self.assertIn("!osStrcasecmp(route->ruid, canonical_ruid)", getter)
+        self.assertIn("*version = route->version", getter)
 
     def test_original_manifest_is_replayed_verbatim_without_local_names(self):
         replay = self.section(

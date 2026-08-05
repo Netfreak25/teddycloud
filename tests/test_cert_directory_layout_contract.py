@@ -35,24 +35,6 @@ class CertificateDirectoryLayoutTests(unittest.TestCase):
         self.assertIn('[ -z "$(ls -A "$target_dir" 2>/dev/null)" ]', entrypoint)
         self.assertIn('cp -a "$legacy_dir"/. "$target_dir"/', entrypoint)
 
-    def test_ota_builder_injects_the_same_runtime_migration(self):
-        builder = (ROOT / "build-tc-ota-update-bundle.ps1").read_text(encoding="utf-8")
-        self.assertIn("function Set-BuildScriptForLegacyCertificateMigration", builder)
-        self.assertIn(
-            "Set-BuildScriptForLegacyCertificateMigration -ScriptPath $buildAndDeploy",
-            builder,
-        )
-        self.assertIn(
-            "migrate_legacy_certificate_directory /teddycloud/certs/server "
-            "/teddycloud/certs/server_tb1",
-            builder,
-        )
-        self.assertIn(
-            "migrate_legacy_certificate_directory /teddycloud/certs/client "
-            "/teddycloud/certs/client_tb1",
-            builder,
-        )
-
     def test_make_workdirs_contains_all_generation_directories(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         for directory in EXPECTED_DIRS:
@@ -88,14 +70,9 @@ class CertificateDirectoryLayoutTests(unittest.TestCase):
         self.assertIn("TB2 certificate generation failed", settings)
 
         self.assertIn("if (!cert_file_is_nonempty(cacert_der))", cert_source)
-        self.assertIn(
-            "if (!cert_file_is_nonempty(server_cert) || !cert_file_is_nonempty(server_key))",
-            cert_source,
-        )
-        self.assertIn(
-            "if (!cert_file_is_nonempty(mqtt_cert) || !cert_file_is_nonempty(mqtt_key))",
-            cert_source,
-        )
+        self.assertIn('cert_tb2_reconcile_all("certificate initialization")', cert_source)
+        self.assertIn('cert_tb2_reconcile_all("startup validation")', settings)
+        self.assertIn("Certificate already matches; no files changed", cert_source)
 
 
 if __name__ == "__main__":

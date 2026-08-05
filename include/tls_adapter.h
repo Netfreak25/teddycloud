@@ -15,5 +15,6 @@ extern YarrowContext yarrowContext;
 
 void tls_context_key_log_init(TlsContext *context);
 error_t load_cert(const char *dest_var, const char *src_file, const char *src_var, uint8_t settingsId);
+error_t read_certificate(const char_t *filename, char_t **buffer, size_t *length);
 
 #endif

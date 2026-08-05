@@ -151,9 +151,11 @@ typedef struct
 typedef struct
 {
     bool enabled;
+    char *hostname;
     uint32_t port;
     char *cert_crt;
     char *cert_key;
+    char *cert_status;
     bool log_full_payloads;
     bool log_connect_details;
 } settings_mqtt_server_t;
@@ -454,6 +456,8 @@ typedef struct
     char *sslkeylogfile;
     settings_cert_opt_t server_cert;
     settings_cert_opt_t server_cert_tb2;
+    char *server_cert_tb2_hostname;
+    char *server_cert_tb2_status;
     settings_cert_opt_t client_cert_legacy;
     settings_cert_opt_t client_cert_tb1;
     settings_cert_opt_t client_cert_tb2;
@@ -647,6 +651,7 @@ typedef struct
 #define OPTION_UNSIGNED(o, p, d, min, max, short, desc, lvl) OPTION_ADV_UNSIGNED(o, p, d, min, max, short, desc, false, false, lvl)
 #define OPTION_FLOAT(o, p, d, min, max, short, desc, lvl) OPTION_ADV_FLOAT(o, p, d, min, max, short, desc, false, false, lvl)
 #define OPTION_STRING(o, p, d, short, desc, lvl) OPTION_ADV_STRING(o, p, d, short, desc, false, false, lvl)
+#define OPTION_READONLY_STRING(o, p, d, short, desc, lvl) {.option_name = o, .ptr = p, .init = {.string_value = d}, .type = TYPE_STRING, .description = desc, .label = short, .internal = false, .read_only = true, .overlayed = false, .level = lvl},
 #define OPTION_U64_ARRAY(o, p, s, short, desc, lvl) OPTION_ADV_U64_ARRAY(o, p, s, short, desc, false, false, lvl)
 
 #define OPTION_INTERNAL_BOOL(o, p, d, desc, lvl) OPTION_ADV_BOOL(o, p, d, desc, desc, true, false, lvl)
@@ -869,6 +874,7 @@ bool settings_set_by_string_id(const char *item, const char *value, uint8_t sett
 void settings_load_all_certs();
 error_t settings_try_load_certs_id(uint8_t settingsId);
 error_t settings_load_certs_id(uint8_t settingsId);
+error_t settings_reload_tb2_server_certificate(void);
 bool test_boxine_ca(uint8_t settingsId);
 
 #endif

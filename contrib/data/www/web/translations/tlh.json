@@ -170,6 +170,14 @@
             "core__certdir_tb2": {
                 "label": "TB2 certificate Daq"
             },
+            "core__server_cert_tb2__hostname": {
+                "label": "TB2 HTTPS De'wI' pong",
+                "description": "TB2 HTTPS certificate DNS pong. poQlu'DI' neH certificate chu' chenmoHlu'."
+            },
+            "core__server_cert_tb2__rotation_status": {
+                "label": "TB2 HTTPS certificate Dotlh",
+                "description": "certificate nuDta' pagh chenmoHqa'ta' Dotlh."
+            },
             "cloud__tb2_enabled": {
                 "label": "TB2 HTTPS proxy QotlhHa'"
             },
@@ -191,6 +199,14 @@
             },
             "mqtt_server__enabled": {
                 "label": "MQTT De'wI' QotlhHa'"
+            },
+            "mqtt_server__hostname": {
+                "label": "ICI MQTT De'wI' pong",
+                "description": "ICI MQTT certificate DNS pong. poQlu'DI' neH certificate chu' chenmoHlu'."
+            },
+            "mqtt_server__cert__rotation_status": {
+                "label": "ICI MQTT certificate Dotlh",
+                "description": "certificate nuDta' pagh chenmoHqa'ta' Dotlh."
             }
         }
     },

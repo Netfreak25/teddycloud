@@ -2107,6 +2107,29 @@ bool_t v3_native_cache_route_matches(uint8_t overlay_id,
     return matches;
 }
 
+bool_t v3_native_cache_route_version(uint8_t overlay_id,
+                                     const char *ruid,
+                                     uint32_t *version)
+{
+    char canonical_ruid[TB2_RUID_SIZE];
+    if (overlay_id >= MAX_OVERLAYS || version == NULL ||
+        !tb2_ruid_canonicalize(ruid, canonical_ruid))
+    {
+        return FALSE;
+    }
+
+    bool_t found = FALSE;
+    mutex_lock(MUTEX_V3_NATIVE_CACHE);
+    v3_native_route_t *route = &routes[overlay_id];
+    if (route->valid && !osStrcasecmp(route->ruid, canonical_ruid))
+    {
+        *version = route->version;
+        found = TRUE;
+    }
+    mutex_unlock(MUTEX_V3_NATIVE_CACHE);
+    return found;
+}
+
 void v3_native_cache_chapter_append(v3_native_cache_chapter_capture_t *capture,
                                     const void *data,
                                     size_t length)

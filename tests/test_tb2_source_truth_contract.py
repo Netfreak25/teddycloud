@@ -15,6 +15,7 @@ class Tb2SourceTruthContractTests(unittest.TestCase):
         cls.content = (ROOT / "src/contentJson.c").read_text(encoding="utf-8")
         cls.api = (ROOT / "src/handler_api.c").read_text(encoding="utf-8")
         cls.cloud = (ROOT / "src/handler_cloud.c").read_text(encoding="utf-8")
+        cls.mqtt = (ROOT / "src/mqtt_server.c").read_text(encoding="utf-8")
         cls.policy = (ROOT / "src/tb2_nocloud_policy.c").read_text(encoding="utf-8")
         cls.native = (ROOT / "src/v3_native_cache.c").read_text(encoding="utf-8")
 
@@ -153,18 +154,20 @@ class Tb2SourceTruthContractTests(unittest.TestCase):
         )
         self.assertIn("v3_native_cache_invalidate", marker)
         self.assertIn("freshness_cache_add_source_changed_uid", marker)
-        self.assertNotIn("freshness_confirm_v3_content_version", self.cloud)
+        self.assertIn("freshness_confirm_v3_content_version", self.cloud)
         self.assertIn("fsDeleteFile(marker_path)", self.native)
 
-    def test_marker_clears_only_after_matching_successful_chapter(self):
+    def test_marker_clears_only_after_matching_playback_version(self):
         confirm = self.section(
             self.cloud,
-            "static bool_t freshness_confirm_source_change_after_chapter(",
+            "bool_t freshness_confirm_v3_content_version(",
             "static void freshness_evaluate_tonie(",
         )
         self.assertIn("freshness_source_changed_contains_ruid", confirm)
-        self.assertIn("source_configured == private_source", confirm)
         self.assertIn("freshness_v3_content_meta_version", confirm)
+        self.assertIn("v3_native_cache_route_version", confirm)
+        self.assertIn("v3_source_is_tap(current)", confirm)
+        self.assertIn("expected_version != (uint32_t)content_version", confirm)
         self.assertIn("freshness_cache_remove_uid", confirm)
 
         chapter = self.section(
@@ -172,10 +175,14 @@ class Tb2SourceTruthContractTests(unittest.TestCase):
             "error_t handleCloudChapterV3(",
             "error_t handleCloudOtaV3(",
         )
-        success = chapter.index("connection->response.statusCode == 200")
-        confirmation = chapter.index("freshness_confirm_source_change_after_chapter", success)
-        self.assertLess(success, confirmation)
-        self.assertIn("v3_native_cache_route_matches", chapter)
+        self.assertNotIn("freshness_confirm_source_change_after_chapter", chapter)
+
+        playback = self.section(
+            self.mqtt,
+            "static error_t handle_mqtt_publish_playback_state(",
+            "static error_t handle_mqtt_publish_generic(",
+        )
+        self.assertIn("freshness_confirm_v3_content_version", playback)
 
 
 if __name__ == "__main__":

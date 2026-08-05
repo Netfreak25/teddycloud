@@ -34,6 +34,7 @@
 #include "stdbool.h"              // for true, bool, false
 #include "tls.h"                  // for _TlsContext, tlsLoadCertificate
 #include "tls_adapter.h"          // for tls_context_key_log_init, tlsCache
+#include "cert.h"
 #include "tb2_https_passthrough.h"
 #include "tb2_mqtt_passthrough.h"
 #include "toniebox_state.h"       // for get_toniebox_state, get_toniebox_s...
@@ -771,7 +772,9 @@ error_t httpServerTlsInitCallbackBase(HttpConnection *connection, TlsContext *tl
         return error;
     }
 
-    // Import TB2 server's certificate if available
+    // Import TB2 server's certificate if available. The rotation lock keeps
+    // the in-memory chain stable while a leaf certificate is reloaded.
+    cert_tb2_rotation_lock();
     const char *cert_chain_tb2 = settings_get_string("internal.server_tb2.cert_chain");
     const char *server_key_tb2 = settings_get_string("internal.server_tb2.key");
 
@@ -783,6 +786,7 @@ error_t httpServerTlsInitCallbackBase(HttpConnection *connection, TlsContext *tl
             TRACE_WARNING("  Failed to add TB2 cert: %s\r\n", error2text(error));
         }
     }
+    cert_tb2_rotation_unlock();
 
 
 

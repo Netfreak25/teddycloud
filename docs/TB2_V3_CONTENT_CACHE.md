@@ -552,12 +552,14 @@ After the merged HTTPS decision is stored, local MQTT delivery remains one
 `fresh-tonies` QoS-1 publish per RUID. This local notification is not relayed to
 TONIES and does not alter the HTTPS request grouping.
 
-MQTT playback no longer clears a source-change marker. A successful full or
-partial chapter response clears it only after revalidating the current source,
-canonical RUID, effective version and exact active route. `404`, `416`, upstream
-errors, interrupted transfers and requests from an older generation keep the
-marker restart-safe. The forced private version remains stored after cleanup so
-later meta and chapter requests continue to resolve the same generation.
+Content-meta, full or partial chapter responses and MQTT `PUBACK` do not clear a
+source-change marker. `playback/state` clears it only when its canonical RUID and
+content version exactly match the expected current generation. Direct private
+content uses the effective source version; original content requires the current
+validated TONIES route version. TAP remains owned by its specialized observer.
+Failed, stale, unassigned or mismatched observations keep the marker
+restart-safe. The forced private version remains stored after cleanup so later
+meta and chapter requests continue to resolve the same generation.
 
 ## Source and file map
 
@@ -594,7 +596,7 @@ later meta and chapter requests continue to resolve the same generation.
 - Loads or creates generation descriptors for content-meta.
 - Parses hashed and legacy chapter names, applies the transition gate and keeps local misses local.
 - Observes original content-meta routes even when native caching is disabled, applies NoCloud before upstream chapter forwarding and rejects every unassigned original name fail-closed.
-- Returns `416` for resumed legacy requests, delegates hashed objects to the existing unchanged immutable-file streamer and completes source-change state only after a matching successful chapter transfer.
+- Returns `416` for resumed legacy requests, delegates hashed objects to the existing unchanged immutable-file streamer and leaves source-change completion to exact-version playback confirmation.
 - Canonicalizes and deduplicates V3 freshness input, builds one filtered TONIES
   request, selects only active native-cache versions and merges the allowlisted
   response additively with local stale decisions.
@@ -609,7 +611,7 @@ later meta and chapter requests continue to resolve the same generation.
 
 - Keep native cache persistence and cacheless original-route observation in one validated manifest parser.
 - Bind every current chapter name to its overlay, canonical requested RUID and TONIES content version.
-- Expose an exact route revalidation used before source-change cleanup; no second content pipeline or filename guessing is introduced.
+- Expose the exact validated route version used by playback-based source-change confirmation; no second content pipeline or filename guessing is introduced.
 
 ### `include/settings.h` and `src/settings.c`
 

@@ -224,7 +224,7 @@ class Tb2V3LocalContentContractTests(unittest.TestCase):
         self.assertIn("connection->response.statusCode == 206", chapter)
         self.assertIn("connection->response.statusCode = 416", self.cloud)
 
-    def test_source_change_survives_meta_and_only_current_chapter_completes_it(self):
+    def test_source_change_survives_meta_and_chapter_delivery(self):
         cleanup = self.function(
             self.cloud,
             "static void freshness_clear_cache_after_content_request(",
@@ -240,20 +240,33 @@ class Tb2V3LocalContentContractTests(unittest.TestCase):
             "error_t handleCloudChapterV3(",
             "error_t handleCloudOtaV3(",
         )
-        self.assertIn("freshness_confirm_source_change_after_chapter", chapter)
+        self.assertNotIn("freshness_confirm_source_change_after_chapter", chapter)
         self.assertIn("connection->response.statusCode == 200", chapter)
         self.assertIn("connection->response.statusCode == 206", chapter)
-        self.assertIn("private source is no longer selected", chapter)
 
-    def test_playback_does_not_clear_pending_source_change(self):
+    def test_playback_confirms_exact_pending_source_version(self):
         playback = self.function(
             self.mqtt,
             "static error_t handle_mqtt_publish_playback_state(",
             "static error_t handle_mqtt_publish_generic(",
         )
-        self.assertNotIn("freshness_confirm_v3_content_version", playback)
-        self.assertNotIn("freshness_confirm_v3_content_version", self.cloud_header)
-        self.assertNotIn("freshness_confirm_v3_content_version", self.cloud)
+        self.assertIn("v3_tap_playback_observe", playback)
+        self.assertIn("freshness_confirm_v3_content_version", playback)
+        self.assertLess(
+            playback.index("v3_tap_playback_observe"),
+            playback.index("freshness_confirm_v3_content_version"),
+        )
+        self.assertIn("freshness_confirm_v3_content_version", self.cloud_header)
+
+        confirmation = self.function(
+            self.cloud,
+            "bool_t freshness_confirm_v3_content_version(",
+            "static void freshness_evaluate_tonie(",
+        )
+        self.assertIn("v3_source_is_tap(current)", confirmation)
+        self.assertIn("v3_native_cache_route_version", confirmation)
+        self.assertIn("expected_version != (uint32_t)content_version", confirmation)
+        self.assertIn("freshness_cache_remove_uid", confirmation)
 
     def test_tb2_freshness_compares_raw_content_versions(self):
         evaluation = self.function(

@@ -13,6 +13,7 @@ typedef enum
 } mqtt_server_playback_action_t;
 
 void mqtt_server_init();
+error_t mqtt_server_reload_certificate();
 void mqtt_server_task();
 void mqtt_server_deinit();
 bool_t mqtt_server_has_active_box_connection(uint8_t overlay_id);

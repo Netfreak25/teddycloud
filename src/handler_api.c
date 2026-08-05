@@ -749,19 +749,56 @@ error_t handleApiSettingsSet(HttpConnection *connection, const char_t *uri, cons
         }
 
         bool success = false;
+        bool isTb2Hostname = !osStrcmp(item, "core.server_cert_tb2.hostname") ||
+                             !osStrcmp(item, "mqtt_server.hostname");
+        char hostnameValidation[128] = {0};
         if (size > 0)
         {
-            success = settings_set_by_string_ovl(item, data, overlay);
+            if (isTb2Hostname &&
+                !cert_tb2_hostname_is_valid(data, hostnameValidation,
+                                            sizeof(hostnameValidation)))
+            {
+                success = false;
+            }
+            else
+            {
+                success = settings_set_by_string_ovl(item, data, overlay);
+            }
         }
 
         if (success)
         {
             api_trigger_toniebox2_settings_desired(item, overlay);
-            osStrcpy(response, "OK");
+            const char *status = !osStrcmp(item, "core.server_cert_tb2.hostname")
+                                     ? settings_get_string("core.server_cert_tb2.rotation_status")
+                                     : (!osStrcmp(item, "mqtt_server.hostname")
+                                            ? settings_get_string("mqtt_server.cert.rotation_status")
+                                            : NULL);
+            if (status != NULL)
+                osSnprintf(response, sizeof(response), "OK: %s", status);
+            else
+                osStrcpy(response, "OK");
         }
+        else if (hostnameValidation[0] != '\0')
+        {
+            osSnprintf(response, sizeof(response), "ERROR: %s", hostnameValidation);
+        }
+        else if (isTb2Hostname)
+        {
+            const char *status = !osStrcmp(item, "core.server_cert_tb2.hostname")
+                                     ? settings_get_string("core.server_cert_tb2.rotation_status")
+                                     : settings_get_string("mqtt_server.cert.rotation_status");
+            osSnprintf(response, sizeof(response), "ERROR: %s",
+                       status != NULL ? status : "certificate reconciliation failed");
+        }
+
+        httpPrepareHeader(connection, "text/plain; charset=utf-8", 0);
+        connection->response.statusCode = success ? 200 : 400;
+        return httpWriteResponseString(connection, response, false);
     }
 
     httpPrepareHeader(connection, "text/plain; charset=utf-8", 0);
+    connection->response.statusCode = 400;
     return httpWriteResponseString(connection, response, false);
 }
 error_t handleApiSettingsReset(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)

@@ -1318,6 +1318,14 @@
                 "label": "Datos del certificado CA",
                 "description": "Datos del certificado CA"
             },
+            "core__server_cert_tb2__hostname": {
+                "label": "Nombre de host HTTPS de TB2",
+                "description": "Nombre DNS usado por el certificado del servidor HTTPS de TB2. El certificado leaf solo se reconstruye cuando es necesario."
+            },
+            "core__server_cert_tb2__rotation_status": {
+                "label": "Estado del certificado HTTPS de TB2",
+                "description": "Resultado de la última comprobación o reconstrucción del certificado HTTPS de TB2."
+            },
             "core__server_cert_tb2__file__ca": {
                 "label": "Certificado CA",
                 "description": "Certificado CA"
@@ -2058,6 +2066,10 @@
                 "label": "Habilitar Servidor MQTT",
                 "description": "Habilitar servidor MQTT interno"
             },
+            "mqtt_server__hostname": {
+                "label": "Nombre de host MQTT de ICI",
+                "description": "Nombre DNS usado por el certificado del servidor MQTT de ICI. El certificado leaf solo se reconstruye cuando es necesario."
+            },
             "mqtt_server__port": {
                 "label": "Puerto del servidor MQTT",
                 "description": "Puerto para el servidor MQTT interno"
@@ -2069,6 +2081,10 @@
             "mqtt_server__cert__key": {
                 "label": "Clave del servidor",
                 "description": "Ruta al archivo de clave del servidor (formato PEM)"
+            },
+            "mqtt_server__cert__rotation_status": {
+                "label": "Estado del certificado MQTT de ICI",
+                "description": "Resultado de la última comprobación o reconstrucción del certificado MQTT de ICI."
             },
             "mqtt_server__log_full_payloads": {
                 "label": "Registrar cargas completas de MQTT",
