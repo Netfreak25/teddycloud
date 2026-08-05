@@ -4,7 +4,7 @@
 
 [submodule "teddycloud_web"]
 	path = teddycloud_web
-	url = https://github.com/toniebox-reverse-engineering/teddycloud_web.git
+	url = ../teddycloud_web.git
 [submodule "cyclone/common"]
 	path = cyclone/common
 	url = https://github.com/Oryx-Embedded/Common
