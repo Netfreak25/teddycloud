@@ -28,11 +28,17 @@ static setting_item_t *settings_get_by_name_id(const char *item, uint8_t setting
 static char *settings_sanitize_box_id(const char *input_id);
 static bool settings_migrate_id(uint8_t settingsId);
 static void settings_normalize_tb2_https_modes(uint8_t settingsId);
+static void settings_migrate_legacy_mqtt_server_files(void);
 
 #define CLOUD_TB2_PROXY_SETTING "cloud.tb2_enabled"
 #define CLOUD_TB2_V3_SETTING "cloud.tb2_v3_enabled"
 #define CLOUD_TB2_CAPTURE_SETTING "cloud.tb2_capture_enabled"
 #define CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING "cloud.tb2_passthrough_enabled"
+#define MQTT_SERVER_LEGACY_CERT_PATH "certs/server/ici.pem"
+#define MQTT_SERVER_LEGACY_KEY_PATH "certs/server/ici.key"
+#define MQTT_SERVER_CERT_PATH "certs/server_tb2/ici.pem"
+#define MQTT_SERVER_KEY_PATH "certs/server_tb2/ici.key"
+#define MQTT_SERVER_CERT_DIR "certs/server_tb2"
 
 /* macros */
 #define ERR_RETURN(command)    \
@@ -481,8 +487,8 @@ static void option_map_init(uint8_t settingsId)
     OPTION_TREE_DESC("mqtt_server", "MQTT Server", LEVEL_DETAIL)
     OPTION_BOOL("mqtt_server.enabled", &settings->mqtt_server.enabled, FALSE, "Enable MQTT Server", "Enable internal MQTT server", LEVEL_DETAIL)
     OPTION_UNSIGNED("mqtt_server.port", &settings->mqtt_server.port, 8883, 1, 65535, "MQTT Server port", "Port for internal MQTT server", LEVEL_DETAIL)
-    OPTION_STRING("mqtt_server.cert.crt", &settings->mqtt_server.cert_crt, "certs/server_tb2/ici.pem", "Server certificate", "Path to server certificate file (PEM format)", LEVEL_DETAIL)
-    OPTION_STRING("mqtt_server.cert.key", &settings->mqtt_server.cert_key, "certs/server_tb2/ici.key", "Server key", "Path to server key file (PEM format)", LEVEL_DETAIL)
+    OPTION_STRING("mqtt_server.cert.crt", &settings->mqtt_server.cert_crt, MQTT_SERVER_CERT_PATH, "Server certificate", "Path to server certificate file (PEM format)", LEVEL_DETAIL)
+    OPTION_STRING("mqtt_server.cert.key", &settings->mqtt_server.cert_key, MQTT_SERVER_KEY_PATH, "Server key", "Path to server key file (PEM format)", LEVEL_DETAIL)
     OPTION_BOOL("mqtt_server.log_full_payloads", &settings->mqtt_server.log_full_payloads, FALSE, "Log full MQTT payloads", "Log large MQTT server payloads as base64 for reverse-engineering exports.", LEVEL_EXPERT)
     OPTION_BOOL("mqtt_server.log_connect_details", &settings->mqtt_server.log_connect_details, FALSE, "Log MQTT CONNECT details", "Log MQTT CONNECT structure and plain client ID at debug level 5. Username, password and Will fields remain masked.", LEVEL_EXPERT)
 
@@ -793,6 +799,46 @@ static void settings_migrate_tb2_https_modes(uint8_t settingsId)
     }
 }
 
+static bool settings_migrate_string_default(uint8_t settingsId, const char *optionName,
+                                            const char *legacyValue, const char *newValue)
+{
+    setting_item_t *option = settings_get_by_name_id(optionName, settingsId);
+    if (option == NULL || option->type != TYPE_STRING ||
+        (settingsId > 0 && !option->overlayed))
+    {
+        return false;
+    }
+
+    char **value = (char **)option->ptr;
+    if (*value == NULL || osStrcmp(*value, legacyValue) != 0)
+    {
+        return false;
+    }
+
+    char *replacement = strdup(newValue);
+    if (replacement == NULL)
+    {
+        TRACE_ERROR("Failed to migrate setting '%s': out of memory\r\n", optionName);
+        return false;
+    }
+
+    osFreeMem(*value);
+    *value = replacement;
+    TRACE_INFO("Migrated legacy setting '%s' from '%s' to '%s'\r\n",
+               optionName, legacyValue, newValue);
+    return true;
+}
+
+static void settings_migrate_legacy_mqtt_server_paths(uint8_t settingsId)
+{
+    settings_migrate_string_default(settingsId, "mqtt_server.cert.crt",
+                                    MQTT_SERVER_LEGACY_CERT_PATH,
+                                    MQTT_SERVER_CERT_PATH);
+    settings_migrate_string_default(settingsId, "mqtt_server.cert.key",
+                                    MQTT_SERVER_LEGACY_KEY_PATH,
+                                    MQTT_SERVER_KEY_PATH);
+}
+
 static bool settings_migrate_id(uint8_t settingsId)
 {
     settings_t *settings = &Settings_Overlay[settingsId];
@@ -834,6 +880,10 @@ static bool settings_migrate_id(uint8_t settingsId)
         settings_migrate_tb2_https_modes(settingsId);
     }
 
+    if (settings->configVersion < 21)
+    {
+        settings_migrate_legacy_mqtt_server_paths(settingsId);
+    }
     return true;
 }
 
@@ -944,6 +994,111 @@ void settings_resolve_dir(char **resolvedPath, char *path, char *basePath)
     fsFixPath(*resolvedPath);
 }
 
+
+static char *settings_resolve_mqtt_server_path(settings_t *settings, const char *path)
+{
+    char *resolvedPath = osAllocMem(PATH_LEN + 1);
+    if (resolvedPath == NULL)
+    {
+        return NULL;
+    }
+
+    resolvedPath[0] = '\0';
+    settings_resolve_dir(&resolvedPath, (char *)path, settings->internal.basedirfull);
+    return resolvedPath;
+}
+
+static void settings_migrate_legacy_mqtt_server_files(void)
+{
+    settings_t *settings = get_settings();
+    if (settings == NULL || settings->mqtt_server.cert_crt == NULL ||
+        settings->mqtt_server.cert_key == NULL ||
+        osStrcmp(settings->mqtt_server.cert_crt, MQTT_SERVER_CERT_PATH) != 0 ||
+        osStrcmp(settings->mqtt_server.cert_key, MQTT_SERVER_KEY_PATH) != 0)
+    {
+        return;
+    }
+
+    char *legacyCert = settings_resolve_mqtt_server_path(settings, MQTT_SERVER_LEGACY_CERT_PATH);
+    char *legacyKey = settings_resolve_mqtt_server_path(settings, MQTT_SERVER_LEGACY_KEY_PATH);
+    char *targetCert = settings_resolve_mqtt_server_path(settings, MQTT_SERVER_CERT_PATH);
+    char *targetKey = settings_resolve_mqtt_server_path(settings, MQTT_SERVER_KEY_PATH);
+    char *targetDir = settings_resolve_mqtt_server_path(settings, MQTT_SERVER_CERT_DIR);
+    if (legacyCert == NULL || legacyKey == NULL || targetCert == NULL ||
+        targetKey == NULL || targetDir == NULL)
+    {
+        TRACE_ERROR("Failed to allocate paths for legacy TB2 MQTT certificate migration\r\n");
+        goto cleanup;
+    }
+
+    const bool_t legacyCertExists = fsFileExists(legacyCert);
+    const bool_t legacyKeyExists = fsFileExists(legacyKey);
+    if (!legacyCertExists && !legacyKeyExists)
+    {
+        goto cleanup;
+    }
+    if (!legacyCertExists || !legacyKeyExists)
+    {
+        TRACE_WARNING("Legacy TB2 MQTT certificate migration skipped: incomplete source pair cert='%s' key='%s'\r\n",
+                      legacyCert, legacyKey);
+        goto cleanup;
+    }
+    if (fsFileExists(targetCert) || fsFileExists(targetKey))
+    {
+        TRACE_WARNING("Legacy TB2 MQTT certificate migration skipped: destination is not empty cert='%s' key='%s'\r\n",
+                      targetCert, targetKey);
+        goto cleanup;
+    }
+
+    error_t error = fsCreateDirEx(targetDir, TRUE);
+    if (error != NO_ERROR && !fsDirExists(targetDir))
+    {
+        TRACE_ERROR("Legacy TB2 MQTT certificate migration failed: cannot create '%s' (%s)\r\n",
+                    targetDir, error2text(error));
+        goto cleanup;
+    }
+
+    error = fsCopyFile(legacyCert, targetCert, FALSE);
+    if (error == NO_ERROR)
+    {
+        error = fsCopyFile(legacyKey, targetKey, FALSE);
+    }
+    if (error == NO_ERROR)
+    {
+        error = fsCompareFiles(legacyCert, targetCert, NULL);
+    }
+    if (error == NO_ERROR)
+    {
+        error = fsCompareFiles(legacyKey, targetKey, NULL);
+    }
+    if (error != NO_ERROR)
+    {
+        fsDeleteFile(targetCert);
+        fsDeleteFile(targetKey);
+        TRACE_ERROR("Legacy TB2 MQTT certificate migration failed: cert='%s' key='%s' error=%s\r\n",
+                    legacyCert, legacyKey, error2text(error));
+        goto cleanup;
+    }
+
+    error_t certDeleteError = fsDeleteFile(legacyCert);
+    error_t keyDeleteError = fsDeleteFile(legacyKey);
+    if (certDeleteError != NO_ERROR || keyDeleteError != NO_ERROR)
+    {
+        TRACE_WARNING("Legacy TB2 MQTT certificates copied to '%s', but legacy cleanup was incomplete\r\n",
+                      targetDir);
+    }
+    else
+    {
+        TRACE_INFO("Migrated legacy TB2 MQTT certificates to '%s'\r\n", targetDir);
+    }
+
+cleanup:
+    osFreeMem(legacyCert);
+    osFreeMem(legacyKey);
+    osFreeMem(targetCert);
+    osFreeMem(targetKey);
+    osFreeMem(targetDir);
+}
 static void settings_generate_internal_dirs(settings_t *settings)
 {
     osFreeMem(settings->internal.basedirfull);
@@ -1176,7 +1331,12 @@ error_t settings_init(const char *cwd, const char *base_dir)
 
     settings_changed();
 
-    return settings_load();
+    error_t error = settings_load();
+    if (error == NO_ERROR)
+    {
+        settings_migrate_legacy_mqtt_server_files();
+    }
+    return error;
 }
 
 error_t settings_save()

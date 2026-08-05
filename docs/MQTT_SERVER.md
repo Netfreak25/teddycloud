@@ -23,6 +23,17 @@ The server-side ICI settings are:
 | `mqtt_server.log_full_payloads` | `false` | Expert diagnostic switch for base64 full-payload capture of large MQTT publishes. |
 | `mqtt_server.log_connect_details` | `false` | Logs the MQTT CONNECT structure and plain client ID at global log level 5; credentials and Will fields remain masked. |
 
+Upgrades migrate only the exact former default paths `certs/server/ici.pem`
+and `certs/server/ici.key` to their `certs/server_tb2/` counterparts. Custom
+certificate paths are never rewritten. If both legacy files exist and neither
+target file exists, TeddyCloud copies and verifies the pair before removing the
+legacy files. This is a one-time migration, not a runtime TB1 fallback.
+
+The ICI listener is fail-closed. TeddyCloud does not bind its MQTT port when
+either resolved PEM path is missing, unreadable or empty. A TLS context/setup
+failure on an accepted socket closes that socket before MQTT parsing; encrypted
+TLS bytes are therefore never treated as plaintext MQTT packets.
+
 The separate **MQTT Client Upstream** category controls the optional TB2 ICI
 packet proxy:
 
@@ -45,6 +56,12 @@ box certificate to an overlay and opens a second TLS connection using the
 original per-box identity from `core.client_cert_tb2.*`. It must never fall back
 to the TB1 `core.client_cert_tb1.*` identity. The local `mqtt_server.cert.*` ICI
 identity is never reused for the outbound role.
+
+For Docker installations, publish TCP port `8883` unchanged when the internal
+ICI endpoint is enabled. Split DNS must resolve the box-facing ICI hostname to
+TeddyCloud, while DNS inside the TeddyCloud container must continue to resolve
+the public TONIES ICI and HTTPS hostnames. Pointing the container itself back to
+TeddyCloud would create a forwarding loop instead of an upstream connection.
 
 For an armed connection, decrypted MQTT application bytes are reassembled into
 complete MQTT packets in both directions. Fragmented packets and multiple

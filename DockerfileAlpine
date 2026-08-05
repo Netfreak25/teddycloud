@@ -21,7 +21,7 @@ RUN cp /tmp/tonies.json /tmp/tonieboxes.json /buildenv/contrib/config/ || true
 FROM alpine:latest
 ARG TEDDYCLOUD_VERSION=unknown
 LABEL org.opencontainers.image.version=$TEDDYCLOUD_VERSION
-EXPOSE 80 443 8443
+EXPOSE 80 443 8443 8883
 
 # Install necessary runtime dependencies
 RUN apk --no-cache add strace ffmpeg curl ca-certificates bash su-exec shadow libcap

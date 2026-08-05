@@ -10,6 +10,7 @@ services:
     #  - 80:80 #optional (for the webinterface)
     #  - 8443:8443 #optional (for the webinterface)
     #  - 443:443 #Port is needed for the connection for the box, must not be changed!
+    #  - 8883:8883 #Needed for the TB2 ICI/MQTT connection, must not be changed!
     volumes:
       - certs:/teddycloud/certs #certificates of the server
       - config:/teddycloud/config #config file for the server and the boxes

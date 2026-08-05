@@ -17,7 +17,7 @@ RUN cp /tmp/tonies.json /tmp/tonieboxes.json /buildenv/contrib/config/ || true
 FROM ubuntu:latest
 ARG TEDDYCLOUD_VERSION=unknown
 LABEL org.opencontainers.image.version=$TEDDYCLOUD_VERSION
-EXPOSE 80 443 8443
+EXPOSE 80 443 8443 8883
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libubsan1 strace ffmpeg curl ca-certificates gosu libcap2-bin \

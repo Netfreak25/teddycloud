@@ -557,7 +557,7 @@ error_t mqtt_server_tls_init(TlsContext *tlsContext)
     }
     else
     {
-        TRACE_ERROR("Certificates not loaded\r\n");
+        TRACE_ERROR("MQTT TLS setup refused: server certificate or key is not loaded\r\n");
         error = ERROR_FAILURE;
     }
 
@@ -568,11 +568,16 @@ void mqtt_server_init() {
     settings_t *settings = get_settings();
     if (!settings->mqtt_server.enabled) return;
 
-    TRACE_INFO("Initializing on port %u\r\n", settings->mqtt_server.port);
-
     // Load certificates once
     char *cert_path = osAllocMem(256);
     char *key_path = osAllocMem(256);
+    if (cert_path == NULL || key_path == NULL)
+    {
+        TRACE_ERROR("MQTT TLS listener disabled: failed to allocate certificate paths\r\n");
+        osFreeMem(cert_path);
+        osFreeMem(key_path);
+        return;
+    }
 
     settings_resolve_dir(&cert_path, settings->mqtt_server.cert_crt, settings->internal.basedirfull);
     settings_resolve_dir(&key_path, settings->mqtt_server.cert_key, settings->internal.basedirfull);
@@ -580,14 +585,26 @@ void mqtt_server_init() {
     mqtt_server_cert = mqtt_server_read_file(cert_path, &mqtt_server_cert_len);
     mqtt_server_key = mqtt_server_read_file(key_path, &mqtt_server_key_len);
 
-    if (!mqtt_server_cert || !mqtt_server_key)
+    if (mqtt_server_cert == NULL || mqtt_server_cert_len == 0 ||
+        mqtt_server_key == NULL || mqtt_server_key_len == 0)
     {
-        TRACE_ERROR("Failed to load certificates (cert: %s, key: %s)\r\n", cert_path, key_path);
+        TRACE_ERROR("MQTT TLS listener disabled: certificate or key missing/unreadable cert='%s' key='%s'\r\n",
+                    cert_path, key_path);
+        osFreeMem(mqtt_server_cert);
+        osFreeMem(mqtt_server_key);
+        mqtt_server_cert = NULL;
+        mqtt_server_key = NULL;
+        mqtt_server_cert_len = 0;
+        mqtt_server_key_len = 0;
+        osFreeMem(cert_path);
+        osFreeMem(key_path);
+        return;
     }
 
     osFreeMem(cert_path);
     osFreeMem(key_path);
 
+    TRACE_INFO("Initializing MQTT TLS listener on port %u\r\n", settings->mqtt_server.port);
     serverSocket = socketOpen(SOCKET_TYPE_STREAM, SOCKET_IP_PROTO_TCP);
     if (serverSocket == NULL) {
         TRACE_ERROR("Failed to open socket\r\n");
@@ -3467,18 +3484,23 @@ void mqtt_server_task()
                 conn->client_ctx.mqtt_connection = conn;
 
                 conn->tlsContext = tlsInit();
-                if (conn->tlsContext != NULL)
+                if (conn->tlsContext == NULL)
                 {
-                    if (mqtt_server_tls_init(conn->tlsContext) == NO_ERROR)
-                    {
-                        tlsSetSocket(conn->tlsContext, conn->socket);
-                    }
-                    else
-                    {
-                        TRACE_ERROR("TLS init failed\r\n");
-                        tlsFree(conn->tlsContext);
-                        conn->tlsContext = NULL;
-                    }
+                    TRACE_ERROR("MQTT TLS connection rejected: failed to allocate TLS context\r\n");
+                    mqtt_connection_close(conn, "TLS context allocation failed");
+                    continue;
+                }
+
+                error_t tlsError = mqtt_server_tls_init(conn->tlsContext);
+                if (tlsError == NO_ERROR)
+                {
+                    tlsError = tlsSetSocket(conn->tlsContext, conn->socket);
+                }
+                if (tlsError != NO_ERROR)
+                {
+                    TRACE_ERROR("MQTT TLS connection rejected before MQTT parsing: %s (%d)\r\n",
+                                error2text(tlsError), (int)tlsError);
+                    mqtt_connection_close(conn, "TLS setup failed");
                 }
             }
             else
@@ -3513,6 +3535,8 @@ void mqtt_server_deinit() {
         osFreeMem(mqtt_server_key);
         mqtt_server_key = NULL;
     }
+    mqtt_server_cert_len = 0;
+    mqtt_server_key_len = 0;
 }
 
 static bool_t mqtt_mark_toniebox2_settings_pending(uint8_t overlay_id, const char *setting_name)
