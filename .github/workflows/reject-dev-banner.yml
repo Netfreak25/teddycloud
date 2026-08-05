@@ -1,0 +1,22 @@
+name: Reject DEV banner
+
+on:
+  pull_request:
+    paths:
+      - "contrib/data/www/web/**"
+      - "scripts/check-no-dev-banner.sh"
+  push:
+    paths:
+      - "contrib/data/www/web/**"
+      - "scripts/check-no-dev-banner.sh"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Reject DEV banner markers
+        run: ./scripts/check-no-dev-banner.sh

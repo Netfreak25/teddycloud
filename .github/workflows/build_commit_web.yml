@@ -83,6 +83,9 @@ jobs:
       - name: Make Web
         run: make web
 
+      - name: Reject DEV banner markers
+        run: ./scripts/check-no-dev-banner.sh
+
       - name: Configure Git
         run: |
           git config --global user.email "scilor@users.noreply.github.com"
