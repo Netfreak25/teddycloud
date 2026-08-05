@@ -345,6 +345,14 @@
         "deleteMultiple": "{{selectedRowCount}} markierte Zeilen löschen",
         "downloadFile": "Download file",
         "downloadFileAsOgg": "Download TAF als *.ogg",
+        "nativeCollection": {
+            "deleteTitle": "TB2-Collection löschen",
+            "deleteWarning": "Zuweisungen, die diese Collection verwenden, können danach nicht mehr abgespielt werden. Wenn der TB2-Bibliothekscache aktiv ist, kann TONIES-Content später erneut importiert werden.",
+            "downloadFailed": "Collection-Download fehlgeschlagen",
+            "downloadZip": "Collection als ZIP herunterladen",
+            "open": "Collection öffnen",
+            "summary": "{{count}} Kapitel · {{size}}"
+        },
         "encodeFiles": {
             "addFiles": "Dateien hinzufügen",
             "cancel": "Abbrechen",
@@ -642,6 +650,58 @@
                         "01pluginFeature": "Erweiter die TeddyCloud-Funktionalität durch benutzerdefinierte Plugins"
                     },
                     "title": "TeddyCloud-Plugins"
+                },
+                "15tb2Management": {
+                    "items": {
+                        "01registration": "Toniebox-2-Geräte automatisch erkennen und mit eigenen Box-Overlays verwalten",
+                        "02liveState": "Wiedergabe, Lautstärke, Akku, Kopfhörer und weitere Live-Zustände anzeigen",
+                        "03liveControls": "Wiedergabe, Lautstärke, Ping, Schlafenszeit und weitere Boxfunktionen direkt steuern",
+                        "04generationSettings": "Einstellungen und Zertifikate übersichtlich nach Global, TB1 und TB2 trennen"
+                    },
+                    "title": "Toniebox 2 verwalten"
+                },
+                "16tb2Content": {
+                    "items": {
+                        "01v3Routing": "Inhaltsbewusster V3-Cloudpfad mit lokaler Source-of-Truth- und NoCloud-Steuerung",
+                        "02nativeCache": "Originale TONIES-Manifeste und Ogg/Opus-Kapitel versionssicher und atomar zwischenspeichern",
+                        "03customContent": "Private TAF-Inhalte als eigenständige, cache-sichere Ogg/Opus-Kapitel an TB2 ausliefern",
+                        "04freshness": "Geänderte Inhalte über HTTPS-Freshness und zuverlässige MQTT-QoS-1-Benachrichtigungen aktualisieren",
+                        "05download": "Originalinhalte abhängig von der Boxgeneration über V1/V2 oder V3 herunterladen",
+                        "06library": "Vollständige TB2-Originalinhalte nativ und inhaltsbasiert dedupliziert in die Library übernehmen"
+                    },
+                    "title": "Native TB2-Inhaltsbereitstellung"
+                },
+                "17iciMqtt": {
+                    "items": {
+                        "01serverAndUpstream": "Integrierter TLS-MQTT-Server mit optionaler transparenter ICI-Weiterleitung",
+                        "02observer": "Claims, Wiedergabe, Lautstärke, Einstellungen, Metriken und Boxstatus lokal beobachten",
+                        "03localControl": "TeddyCloud-Steuerbefehle auch während einer aktiven ICI-Verbindung sicher nutzen",
+                        "04filters": "Topics, Metriken und Log-Quellen mit bidirektionalen Weiterleitungsfiltern steuern",
+                        "05privacy": "Private und durch NoCloud geschützte Inhalte automatisch aus dem Upstream-Traffic entfernen",
+                        "06capture": "MQTT-Pakete, Filterentscheidungen und TLS-Verbindungsdetails vollständig diagnostizieren und erfassen"
+                    },
+                    "title": "ICI-MQTT für Toniebox 2"
+                },
+                "18tb2Https": {
+                    "items": {
+                        "01modes": "Zwischen dem inhaltsbewussten V3-Cloudpfad und einem transparenten DEV-Monitor wählen",
+                        "02capture": "Vollständige HTTP-Anfragen, Antworten, Payloads und Statuscodes erfassen",
+                        "03status": "BOX-, ICI-, TONIES- und TeddyCloud-Status samt aktivem HTTPS-Modus in der Navbar anzeigen"
+                    },
+                    "title": "TB2-HTTPS-Modi und Diagnose"
+                },
+                "19customPlaylists": {
+                    "items": {
+                        "01contentPlaylists": "Inhaltsspezifische TAP-Playlists für benutzerdefinierte TAFs erstellen und bearbeiten",
+                        "02chapterMetadata": "Eigene Kapiteltitel und gespeicherte Kapiteldauern in Wiedergabe und Playlist anzeigen"
+                    },
+                    "title": "Erweiterte benutzerdefinierte Inhalte"
+                },
+                "20languages": {
+                    "items": {
+                        "01klingon": "Kuratierte Klingonisch-Unterstützung in der WebUI"
+                    },
+                    "title": "Zusätzliche Sprache"
                 }
             },
             "futureFeatures": {
@@ -1063,6 +1123,8 @@
             "encoding": "Encoding",
             "webui": "WebUI",
             "cloudContent": "Generationsübergreifende Cloud- und Content-Optionen",
+            "bothGenerations": "Beide Generationen",
+            "localIciControl": "Lokale Steuerung während ICI-Upstream",
             "mqtt": "MQTT und Home Assistant",
             "diagnostics": "Diagnose",
             "tonieJson": "Tonie-Daten",
@@ -1719,6 +1781,10 @@
             "mqtt_client_upstream__passthrough_enabled": {
                 "label": "Transparenten MQTT-Proxy aktivieren",
                 "description": "MQTT-Verkehr transparent weiterleiten und vollständig lokal aufzeichnen"
+            },
+            "mqtt_client_upstream__local_control_enabled": {
+                "label": "TeddyCloud-Steuerung während ICI-Upstream erlauben",
+                "description": "TeddyCloud darf bei aktivem ICI-Proxy lokale TB2-Einstellungen und App-Steuerbefehle an die Box senden"
             },
             "mqtt_client_upstream__port": {
                 "label": "MQTT-Server-Port",
@@ -2717,17 +2783,37 @@
             "bedtimeDuration": "{{minutes}} Minuten",
             "bedtimeUnknown": "Schlafenszeitstatus unbekannt",
             "bedtimeUntil": "bis {{time}}",
+            "cancelPlaylistEdit": "Abbrechen",
             "chapter": "Kapitel {{number}}",
+            "chapterDuration": "Dauer {{time}}",
+            "chapterTitle": "Titel für Kapitel {{number}}",
             "chapters": "Kapitel",
             "commandFailed": "Toniebox-Befehl fehlgeschlagen",
             "commandFailedDetails": "Der Befehl konnte nicht gesendet werden",
+            "customContent": "Eigener Inhalt",
+            "editPlaylist": "Bearbeiten",
+            "playlistTypes": {
+                "directTaf": "Eigener Inhalt",
+                "tap": "TeddyAudio-Playlist"
+            },
+            "shuffleModes": {
+                "ordered": "Reihenfolge",
+                "all": "Gemischt",
+                "one": "Zufallsauswahl"
+            },
             "headphonesConnected": "Verbundene Kopfhörer: {{count}}",
             "next": "Weiter",
             "pause": "Pause",
             "playbackUnknown": "Wiedergabestatus unbekannt",
             "playChapter": "Kapitel {{number}} abspielen",
+            "playlistSaveFailed": "Playlist konnte nicht gespeichert werden",
+            "playlistSaveFailedDetails": "Titel und Kapitelnamen konnten nicht gespeichert werden",
+            "playlistSaved": "Playlist gespeichert",
+            "playlistSavedDetails": "Titel und alle Kapitelnamen wurden gespeichert",
+            "playlistTitle": "Inhaltstitel",
             "previous": "Zurück",
             "restart": "Aktuelle Wiedergabe neu starten",
+            "savePlaylist": "Alle speichern",
             "start": "Abspielen",
             "unknownTonie": "Unbekannter Tonie",
             "volume": "Lautstärke"
@@ -3187,6 +3273,7 @@
         "noPlayableContentHint": "Es ist kein Inhalt zum Abspielen verfügbar. Entweder ist er nicht zugewiesen oder es fehlen Daten von der Tonies/Boxine-Cloud. Stelle die Figur auf die Box, um dies zu beheben.",
         "selectFileModal": {
             "cancel": "Abbrechen",
+            "nativeCollection": "TB2-Ursprung · Ogg/Opus · {{count}} Kapitel · {{hash}}",
             "ok": "OK",
             "selectFile": "Datei auswählen"
         },
@@ -3224,6 +3311,12 @@
             "addFile": "Datei hinzufügen",
             "audioId": "Audio-ID",
             "audioIdTooltip": "Legt die Audio-ID fest, wenn die Datei zwischengespeichert ist. Setze sie auf 0, um die zwischengespeicherte Datei neu zu erstellen",
+            "shuffle": "Wiedergabereihenfolge",
+            "shuffleModes": {
+                "ordered": "Reihenfolge",
+                "all": "Alle mischen",
+                "one": "Zufallsauswahl"
+            },
             "cancel": "Abbrechen",
             "create": "Anlegen",
             "fileNameContentFile": "Beschreibung",

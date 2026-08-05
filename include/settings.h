@@ -97,6 +97,8 @@ typedef struct
     bool enableV3SetupStatus;
     bool enableV3ContentMeta;
     bool enableV3Chapter;
+    bool cacheContentV3;
+    bool cacheToLibraryV3;
     bool cacheOta;
     bool localOta;
     bool cacheContent;
@@ -239,6 +241,7 @@ typedef struct
 {
     bool enabled;
     bool passthrough_enabled;
+    bool local_control_enabled;
     uint32_t port;
     char *hostname;
     char *capture_dir;
@@ -298,9 +301,6 @@ typedef struct
     char *id;
     char *git_sha_short;
     char *git_sha;
-    char *package_git_sha_short;
-    char *package_git_sha;
-    bool package_git_sha_set;
     bool dirty;
     char *datetime;
     char *platform;
@@ -414,6 +414,7 @@ typedef struct
     uint64_t *v3ForcedVersionUids;
     uint64_t *v3ForcedVersions;
     uint64_t *v3ForcedVersionBaseAudioIds;
+    uint64_t *v3HashedChapterUids;
     uint64_t *toniebox2SettingsDesiredRevisions;
     uint64_t *toniebox2SettingsDesiredPendingFields;
     uint64_t *toniebox2SettingsDesiredValues;
@@ -671,6 +672,7 @@ settings_t *get_settings_ovl(const char *overlay_unique_id);
 settings_t *get_settings_id(uint8_t settingsId);
 settings_t *get_settings_cn(const char *commonName);
 uint8_t get_overlay_id(const char *overlay_unique_id);
+bool_t settings_canonicalize_box_id(const char *input_id, char *output_id, size_t output_size);
 
 void settings_resolve_dir(char **resolvedPath, char *path, char *basePath);
 void settings_changed_id(uint8_t settingsId);

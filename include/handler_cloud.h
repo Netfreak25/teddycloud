@@ -26,11 +26,20 @@ error_t handleCloudClaim(HttpConnection *connection, const char_t *uri, const ch
 error_t handleCloudContent(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx, bool_t noPassword);
 error_t handleCloudContentV1(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
 error_t handleCloudContentV2(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
+error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *ruid,
+                                     const contentJson_t *content,
+                                     client_ctx_t *client_ctx);
 error_t handleCloudFreshnessCheck(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
 error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
 error_t handleCloudReset(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
 error_t handleContent(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
-void freshness_mark_content_mapping_changed(const char *ruid, bool_t source_changed);
+void freshness_mark_content_mapping_changed(settings_t *target_settings, const char *ruid,
+                                            bool_t source_changed);
 void freshness_cache_sync_source_changed_uids(settings_t *settings);
+void v3_tap_playback_observe(settings_t *settings,
+                             const char *previous_ruid,
+                             const char *current_ruid,
+                             bool_t content_version_valid,
+                             uint32_t content_version);
 
 #endif

@@ -1,14 +1,63 @@
 #!/usr/bin/env python3
-"""Contract checks for generation-specific certificate paths in TeddyCloud code."""
+"""Contract checks for the generation-specific certificate directories."""
 
 import pathlib
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+EXPECTED_DIRS = (
+    "certs/client_tb1",
+    "certs/client_tb2",
+    "certs/server_tb1",
+    "certs/server_tb2",
+)
 
 
 class CertificateDirectoryLayoutTests(unittest.TestCase):
+    def test_docker_entrypoint_creates_all_generation_directories(self):
+        entrypoint = (ROOT / "docker" / "docker-entrypoint.sh").read_text(encoding="utf-8")
+        for directory in EXPECTED_DIRS:
+            self.assertIn(f"/teddycloud/{directory}", entrypoint)
+
+    def test_docker_entrypoint_migrates_legacy_tb1_directories_without_overwrite(self):
+        entrypoint = (ROOT / "docker" / "docker-entrypoint.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            "migrate_legacy_certificate_directory /teddycloud/certs/server "
+            "/teddycloud/certs/server_tb1",
+            entrypoint,
+        )
+        self.assertIn(
+            "migrate_legacy_certificate_directory /teddycloud/certs/client "
+            "/teddycloud/certs/client_tb1",
+            entrypoint,
+        )
+        self.assertIn('[ -z "$(ls -A "$target_dir" 2>/dev/null)" ]', entrypoint)
+        self.assertIn('cp -a "$legacy_dir"/. "$target_dir"/', entrypoint)
+
+    def test_ota_builder_injects_the_same_runtime_migration(self):
+        builder = (ROOT / "build-tc-ota-update-bundle.ps1").read_text(encoding="utf-8")
+        self.assertIn("function Set-BuildScriptForLegacyCertificateMigration", builder)
+        self.assertIn(
+            "Set-BuildScriptForLegacyCertificateMigration -ScriptPath $buildAndDeploy",
+            builder,
+        )
+        self.assertIn(
+            "migrate_legacy_certificate_directory /teddycloud/certs/server "
+            "/teddycloud/certs/server_tb1",
+            builder,
+        )
+        self.assertIn(
+            "migrate_legacy_certificate_directory /teddycloud/certs/client "
+            "/teddycloud/certs/client_tb1",
+            builder,
+        )
+
+    def test_make_workdirs_contains_all_generation_directories(self):
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        for directory in EXPECTED_DIRS:
+            self.assertIn(f"{directory}/", makefile)
+
     def test_generation_specific_defaults_use_matching_directories(self):
         settings = (ROOT / "src" / "settings.c").read_text(encoding="utf-8")
         self.assertIn('"core.certdir", &settings->core.certdir, "certs/client_tb1"', settings)

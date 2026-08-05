@@ -21,6 +21,8 @@ bool_t mqtt_server_has_volume_control(uint8_t overlay_id);
 bool_t mqtt_server_has_ping_control(uint8_t overlay_id);
 bool_t mqtt_server_publish_fresh_tonies(client_ctx_t *client_ctx);
 bool_t mqtt_server_publish_fresh_tonies_for_overlay(uint8_t overlay_id);
+bool_t mqtt_server_publish_fresh_tonie_for_overlay(uint8_t overlay_id,
+                                                   uint64_t uid);
 void mqtt_server_mark_toniebox2_settings_changed(uint8_t overlay_id);
 void mqtt_server_mark_toniebox2_setting_changed(uint8_t overlay_id, const char *setting_name);
 bool_t mqtt_server_publish_toniebox2_settings_desired_for_overlay(uint8_t overlay_id);

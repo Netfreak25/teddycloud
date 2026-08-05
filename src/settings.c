@@ -242,9 +242,6 @@ static void option_map_init(uint8_t settingsId)
     OPTION_INTERNAL_STRING("internal.version.id", &settings->internal.version.id, "", "Version id", LEVEL_NONE)
     OPTION_INTERNAL_STRING("internal.version.git_sha_short", &settings->internal.version.git_sha_short, "", "Short Git SHA-1 hash of the build version", LEVEL_NONE)
     OPTION_INTERNAL_STRING("internal.version.git_sha", &settings->internal.version.git_sha, "", "Full Git SHA-1 hash of the build version", LEVEL_NONE)
-    OPTION_INTERNAL_STRING("internal.version.package_git_sha_short", &settings->internal.version.package_git_sha_short, "", "Short Git SHA-1 hash of the installed patch package", LEVEL_NONE)
-    OPTION_INTERNAL_STRING("internal.version.package_git_sha", &settings->internal.version.package_git_sha, "", "Full Git SHA-1 hash of the installed patch package", LEVEL_NONE)
-    OPTION_INTERNAL_BOOL("internal.version.package_git_sha_set", &settings->internal.version.package_git_sha_set, FALSE, "Indicates if the installed patch hash was explicitly provided by the build pipeline", LEVEL_NONE)
     OPTION_INTERNAL_BOOL("internal.version.dirty", &settings->internal.version.dirty, FALSE, "Indicates if the build was made from a modified (dirty) git tree", LEVEL_NONE)
     OPTION_INTERNAL_STRING("internal.version.datetime", &settings->internal.version.datetime, "", "Datetime of the build or git commit", LEVEL_NONE)
     OPTION_INTERNAL_STRING("internal.version.platform", &settings->internal.version.platform, "", "Platform on which the software was built", LEVEL_NONE)
@@ -286,6 +283,7 @@ static void option_map_init(uint8_t settingsId)
     OPTION_INTERNAL_U64_ARRAY("internal.v3ForcedVersionUids", &settings->internal.v3ForcedVersionUids, 0, "V3 forced version UIDs", LEVEL_NONE)
     OPTION_INTERNAL_U64_ARRAY("internal.v3ForcedVersions", &settings->internal.v3ForcedVersions, 0, "V3 forced versions", LEVEL_NONE)
     OPTION_INTERNAL_U64_ARRAY("internal.v3ForcedVersionBaseAudioIds", &settings->internal.v3ForcedVersionBaseAudioIds, 0, "V3 forced version base audio IDs", LEVEL_NONE)
+    OPTION_INTERNAL_U64_ARRAY("internal.v3HashedChapterUids", &settings->internal.v3HashedChapterUids, 0, "V3 hashed chapter UIDs", LEVEL_NONE)
     OPTION_INTERNAL_U64_ARRAY("internal.toniebox2SettingsDesiredRevisions", &settings->internal.toniebox2SettingsDesiredRevisions, 0, "Toniebox 2 settings desired revisions", LEVEL_NONE)
     OPTION_INTERNAL_U64_ARRAY("internal.toniebox2SettingsDesiredPendingFields", &settings->internal.toniebox2SettingsDesiredPendingFields, 0, "Toniebox 2 settings desired pending fields", LEVEL_NONE)
     OPTION_INTERNAL_U64_ARRAY("internal.toniebox2SettingsDesiredValues", &settings->internal.toniebox2SettingsDesiredValues, 0, "Toniebox 2 settings desired values", LEVEL_NONE)
@@ -329,6 +327,8 @@ static void option_map_init(uint8_t settingsId)
     OPTION_BOOL("cloud.enableV3SetupStatus", &settings->cloud.enableV3SetupStatus, TRUE, "Forward 'setup-status' v3", "Forward 'setup-status' v3 queries to tonies cloud", LEVEL_DETAIL)
     OPTION_BOOL("cloud.enableV3ContentMeta", &settings->cloud.enableV3ContentMeta, TRUE, "Forward 'content-meta' v3", "Forward 'content-meta' v3 queries to tonies cloud", LEVEL_DETAIL)
     OPTION_BOOL("cloud.enableV3Chapter", &settings->cloud.enableV3Chapter, TRUE, "Forward 'chapter' v3", "Forward 'chapter' v3 queries to tonies cloud", LEVEL_DETAIL)
+    OPTION_BOOL("toniebox2.cacheContentV3", &settings->cloud.cacheContentV3, FALSE, "Cache TB2 V3 content", "Cache complete TONIES V3 manifests and Ogg/Opus chapters atomically", LEVEL_DETAIL)
+    OPTION_BOOL("toniebox2.cacheToLibraryV3", &settings->cloud.cacheToLibraryV3, FALSE, "Cache TB2 V3 content to library", "Import complete active TONIES V3 versions into the native TB2 library (requires TB2 V3 content caching)", LEVEL_DETAIL)
     OPTION_BOOL("cloud.cacheOta", &settings->cloud.cacheOta, TRUE, "Cache OTA", "Cache OTA files in firmware dir of local server (this still blocks OTA if local OTA delivery is disabled)", LEVEL_EXPERT)
     OPTION_BOOL("cloud.localOta", &settings->cloud.localOta, FALSE, "Local OTA delivery", "Send local OTA files in firmware dir", LEVEL_EXPERT)
     OPTION_BOOL("cloud.cacheContent", &settings->cloud.cacheContent, TRUE, "Cache content", "Cache cloud content on local server", LEVEL_DETAIL)
@@ -408,6 +408,7 @@ static void option_map_init(uint8_t settingsId)
     OPTION_TREE_DESC("mqtt_client_upstream", "MQTT upstream client", LEVEL_DETAIL)
     OPTION_BOOL("mqtt_client_upstream.enabled", &settings->mqtt_client_upstream.enabled, FALSE, "Enable MQTT Client", "Enable the Tonies ICI upstream MQTT cloud path", LEVEL_DETAIL)
     OPTION_BOOL("mqtt_client_upstream.passthrough_enabled", &settings->mqtt_client_upstream.passthrough_enabled, FALSE, "Enable transparent capture forwarder", "Forward MQTT traffic unchanged while recording a full local capture", LEVEL_DETAIL)
+    OPTION_BOOL("mqtt_client_upstream.local_control_enabled", &settings->mqtt_client_upstream.local_control_enabled, FALSE, "Allow TeddyCloud settings and controls during ICI upstream", "Allow TeddyCloud to send local settings and app controls while the Tonies ICI upstream proxy is active", LEVEL_DETAIL)
     OPTION_UNSIGNED("mqtt_client_upstream.port", &settings->mqtt_client_upstream.port, 8883, 1, 65535, "MQTT Server port", "Port of the Tonies ICI upstream MQTT server", LEVEL_DETAIL)
     OPTION_STRING("mqtt_client_upstream.hostname", &settings->mqtt_client_upstream.hostname, "ici.tonie.cloud", "MQTT Server hostname", "Hostname of the Tonies ICI upstream MQTT server", LEVEL_DETAIL)
     OPTION_STRING("mqtt_client_upstream.capture_dir", &settings->mqtt_client_upstream.capture_dir, "data/diagnostics/tb2-mqtt-passthrough", "Capture directory", "Directory for full MQTT passthrough captures", LEVEL_EXPERT)
@@ -843,7 +844,7 @@ settings_t *get_settings_cn(const char *commonName)
     {
         for (size_t i = 1; i < MAX_OVERLAYS; i++)
         {
-            if (osStrcmp(Settings_Overlay[i].commonName, commonName) == 0)
+            if (osStrcasecmp(Settings_Overlay[i].commonName, commonName) == 0)
             {
                 mutex_unlock(MUTEX_SETTINGS);
                 return &Settings_Overlay[i];
@@ -854,9 +855,18 @@ settings_t *get_settings_cn(const char *commonName)
         {
             if (!Settings_Overlay[i].internal.config_used)
             {
-                char *boxId = settings_sanitize_box_id((const char *)commonName);
+                char canonicalBoxId[13];
+                char *boxId = settings_canonicalize_box_id(commonName, canonicalBoxId,
+                                                            sizeof(canonicalBoxId))
+                                  ? strdup(canonicalBoxId)
+                                  : settings_sanitize_box_id((const char *)commonName);
+                if (boxId == NULL)
+                {
+                    mutex_unlock(MUTEX_SETTINGS);
+                    return get_settings();
+                }
                 char *boxPrefix = "teddyCloud Box ";
-                char *boxName = custom_asprintf("%s%s", boxPrefix, commonName);
+                char *boxName = custom_asprintf("%s%s", boxPrefix, boxId);
 
                 settings_set_string_id("commonName", boxId, i);
                 settings_set_string_id("internal.overlayUniqueId", boxId, i);
@@ -897,7 +907,7 @@ uint8_t get_overlay_id(const char *overlay_unique_id)
 
     for (uint8_t i = 1; i < MAX_OVERLAYS; i++)
     {
-        if (osStrcmp(Settings_Overlay[i].internal.overlayUniqueId, overlay_unique_id) == 0)
+        if (osStrcasecmp(Settings_Overlay[i].internal.overlayUniqueId, overlay_unique_id) == 0)
         {
             return i;
         }
@@ -1140,10 +1150,7 @@ error_t settings_init(const char *cwd, const char *base_dir)
     settings_set_string("internal.version.id", BUILD_VERSION);
     settings_set_string("internal.version.git_sha_short", BUILD_GIT_SHORT_SHA);
     settings_set_string("internal.version.git_sha", BUILD_GIT_SHA);
-    settings_set_string("internal.version.package_git_sha_short", BUILD_PACKAGE_GIT_SHORT_SHA);
-    settings_set_string("internal.version.package_git_sha", BUILD_PACKAGE_GIT_SHA);
-    settings_set_bool("internal.version.package_git_sha_set", BUILD_PACKAGE_GIT_SHA_SET ? TRUE : FALSE);
-    settings_set_bool("internal.version.dirty", BUILD_GIT_IS_DIRTY);
+    settings_set_bool("internal.version.id", BUILD_GIT_IS_DIRTY);
     settings_set_string("internal.version.datetime", BUILD_DATETIME);
     settings_set_string("internal.version.platform", BUILD_PLATFORM);
     settings_set_string("internal.version.os", BUILD_OS);
@@ -1155,7 +1162,7 @@ error_t settings_init(const char *cwd, const char *base_dir)
     settings_set_string("internal.version_web.id", WEB_VERSION);
     settings_set_string("internal.version_web.git_sha_short", WEB_GIT_SHORT_SHA);
     settings_set_string("internal.version_web.git_sha", WEB_GIT_SHA);
-    settings_set_bool("internal.version_web.dirty", WEB_GIT_IS_DIRTY);
+    settings_set_bool("internal.version_web.id", WEB_GIT_IS_DIRTY);
     settings_set_string("internal.version_web.datetime", WEB_DATETIME);
     settings_set_string("internal.version_web.v_short", WEB_FULL_NAME_SHORT);
     settings_set_string("internal.version_web.v_long", WEB_FULL_NAME_LONG);
@@ -2105,6 +2112,26 @@ static char *settings_sanitize_box_id(const char *input_id)
     *dst = '\0'; // null terminate the string
 
     return new_str;
+}
+
+bool_t settings_canonicalize_box_id(const char *input_id, char *output_id, size_t output_size)
+{
+    if (input_id == NULL || output_id == NULL || output_size < 13 || osStrlen(input_id) != 12)
+    {
+        return FALSE;
+    }
+
+    for (size_t index = 0; index < 12; index++)
+    {
+        if (!isxdigit((unsigned char)input_id[index]))
+        {
+            output_id[0] = '\0';
+            return FALSE;
+        }
+        output_id[index] = (char)toupper((unsigned char)input_id[index]);
+    }
+    output_id[12] = '\0';
+    return TRUE;
 }
 
 bool settings_set_by_string(const char *item, const char *value)

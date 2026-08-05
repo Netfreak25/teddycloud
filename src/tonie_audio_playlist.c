@@ -451,7 +451,10 @@ static error_t tap_remux_process_packet(tap_remux_ctx_t *ctx, const uint8_t *pac
     return tap_remux_add_audio_packet(ctx, packet, packet_len, (uint32_t)frames);
 }
 
-static error_t tap_remux_process_source(tap_remux_ctx_t *ctx, const char *source_path, size_t source_index)
+static error_t tap_remux_process_source(tap_remux_ctx_t *ctx,
+                                        const char *source_path,
+                                        size_t source_index,
+                                        size_t source_offset)
 {
     FsFile *source = fsOpenFile(source_path, FS_FILE_MODE_READ);
     if (source == NULL)
@@ -459,7 +462,7 @@ static error_t tap_remux_process_source(tap_remux_ctx_t *ctx, const char *source
         return ERROR_FILE_OPENING_FAILED;
     }
 
-    error_t error = fsSeekFile(source, TONIEFILE_FRAME_SIZE, SEEK_SET);
+    error_t error = fsSeekFile(source, source_offset, SEEK_SET);
     if (error != NO_ERROR)
     {
         fsCloseFile(source);
@@ -556,7 +559,7 @@ static error_t tap_remux_process_source(tap_remux_ctx_t *ctx, const char *source
     return error;
 }
 
-static error_t tap_remux_taf(tonie_audio_playlist_t *tap, size_t *runtime_indices, size_t runtime_files_count, const char *target_taf, size_t *current_source, bool_t *active, bool_t write_output, toniefile_live_header_t *live_header, uint32_t *predicted_size)
+static error_t tap_remux_taf(tonie_audio_playlist_t *tap, size_t *runtime_indices, size_t runtime_files_count, const char *target_taf, size_t *current_source, bool_t *active, bool_t write_output, bool_t independent_opus, toniefile_live_header_t *live_header, uint32_t *predicted_size)
 {
     if (tap == NULL || tap->files == NULL || runtime_indices == NULL || runtime_files_count == 0 || runtime_files_count > TONIEFILE_MAX_SOURCES || live_header == NULL || predicted_size == NULL)
     {
@@ -648,7 +651,8 @@ static error_t tap_remux_taf(tonie_audio_playlist_t *tap, size_t *runtime_indice
         {
             *current_source = i;
         }
-        if (source_path == NULL || !toniefile_is_valid(source_path))
+        if (source_path == NULL ||
+            (!independent_opus && !toniefile_is_valid(source_path)))
         {
             error = ERROR_INVALID_FILE;
             break;
@@ -673,7 +677,10 @@ static error_t tap_remux_taf(tonie_audio_playlist_t *tap, size_t *runtime_indice
             ctx->track_page_nums[ctx->track_page_nums_count++] = ctx->payload_size / TONIEFILE_FRAME_SIZE;
         }
 
-        error = tap_remux_process_source(ctx, source_path, i);
+        error = tap_remux_process_source(ctx, source_path, i,
+                                         independent_opus
+                                             ? 0U
+                                             : TONIEFILE_FRAME_SIZE);
         if (error != NO_ERROR)
         {
             break;
@@ -1085,7 +1092,57 @@ void tap_free_runtime_indices(size_t *runtime_indices)
 
 error_t tap_predict_taf_live_header(tonie_audio_playlist_t *tap, size_t *runtime_indices, size_t runtime_files_count, toniefile_live_header_t *live_header, uint32_t *predicted_size)
 {
-    return tap_remux_taf(tap, runtime_indices, runtime_files_count, NULL, NULL, NULL, FALSE, live_header, predicted_size);
+    return tap_remux_taf(tap, runtime_indices, runtime_files_count, NULL, NULL, NULL, FALSE, FALSE, live_header, predicted_size);
+}
+
+error_t tap_remux_native_collection(const char *const *chapter_paths,
+                                    size_t chapter_count,
+                                    uint32_t audio_id,
+                                    const char *target_taf,
+                                    size_t *current_source,
+                                    bool_t *active,
+                                    toniefile_live_header_t *live_header,
+                                    uint32_t *predicted_size)
+{
+    if (chapter_paths == NULL || chapter_count == 0 ||
+        chapter_count > TONIEFILE_MAX_SOURCES || audio_id == 0 ||
+        live_header == NULL || predicted_size == NULL)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    tonie_audio_playlist_t tap;
+    osMemset(&tap, 0, sizeof(tap));
+    tap.audio_id = audio_id;
+    tap.filesCount = chapter_count;
+    tap.files = osAllocMem(sizeof(*tap.files) * chapter_count);
+    size_t *indices = osAllocMem(sizeof(*indices) * chapter_count);
+    if (tap.files == NULL || indices == NULL)
+    {
+        osFreeMem(tap.files);
+        osFreeMem(indices);
+        return ERROR_OUT_OF_MEMORY;
+    }
+    osMemset(tap.files, 0, sizeof(*tap.files) * chapter_count);
+    for (size_t i = 0; i < chapter_count; i++)
+    {
+        if (chapter_paths[i] == NULL)
+        {
+            osFreeMem(tap.files);
+            osFreeMem(indices);
+            return ERROR_INVALID_PARAMETER;
+        }
+        tap.files[i]._filepath_resolved = (char *)chapter_paths[i];
+        indices[i] = i;
+    }
+
+    error_t error = tap_remux_taf(&tap, indices, chapter_count, target_taf,
+                                  current_source, active,
+                                  target_taf != NULL, TRUE,
+                                  live_header, predicted_size);
+    osFreeMem(tap.files);
+    osFreeMem(indices);
+    return error;
 }
 
 error_t tap_publish_taf_replace_safe(const char *tmp_taf, const char *final_taf)
@@ -1231,7 +1288,7 @@ static error_t tap_generate_taf(tonie_audio_playlist_t *tap, size_t *runtime_ind
         toniefile_live_header_t remux_header;
         uint32_t remux_predicted_size = 0;
         bool_t remux_available = false;
-        error_t remux_probe_error = tap_remux_taf(tap, runtime_indices, runtime_files_count, NULL, NULL, NULL, FALSE, &remux_header, &remux_predicted_size);
+        error_t remux_probe_error = tap_remux_taf(tap, runtime_indices, runtime_files_count, NULL, NULL, NULL, FALSE, FALSE, &remux_header, &remux_predicted_size);
         if (remux_probe_error == NO_ERROR)
         {
             remux_available = true;
@@ -1252,7 +1309,7 @@ static error_t tap_generate_taf(tonie_audio_playlist_t *tap, size_t *runtime_ind
 
         if (remux_available)
         {
-            error = tap_remux_taf(tap, runtime_indices, runtime_files_count, tmp_taf, current_source, generator_active, TRUE, &remux_header, &remux_predicted_size);
+            error = tap_remux_taf(tap, runtime_indices, runtime_files_count, tmp_taf, current_source, generator_active, TRUE, FALSE, &remux_header, &remux_predicted_size);
         }
         else
         {
@@ -1315,6 +1372,93 @@ static error_t tap_generate_taf(tonie_audio_playlist_t *tap, size_t *runtime_ind
         osFreeMem(tmp_taf);
         freeTonieInfo(tonieInfo);
     }
+    return error;
+}
+
+error_t tap_materialize_final_snapshot_selected(tonie_audio_playlist_t *tap,
+                                                size_t *runtime_indices,
+                                                size_t runtime_files_count,
+                                                const char **final_taf_path)
+{
+    if (final_taf_path == NULL)
+    {
+        return ERROR_FAILURE;
+    }
+    *final_taf_path = NULL;
+
+    if (tap == NULL || !tap->_valid || tap->_filepath_resolved == NULL || tap->_filepath_resolved[0] == '\0')
+    {
+        return ERROR_INVALID_FILE;
+    }
+
+    char *tmp_taf = custom_asprintf("%s.tmp", tap->_filepath_resolved);
+    if (tmp_taf == NULL)
+    {
+        return ERROR_OUT_OF_MEMORY;
+    }
+
+    error_t error = runtime_indices != NULL && runtime_files_count > 0
+                        ? NO_ERROR
+                        : ERROR_INVALID_PARAMETER;
+    if (error == NO_ERROR)
+    {
+        size_t current_source = 0;
+        bool_t generator_active = FALSE;
+        toniefile_live_header_t live_header;
+        osMemset(&live_header, 0, sizeof(live_header));
+
+        error = tap_generate_taf(tap,
+                                 runtime_indices,
+                                 runtime_files_count,
+                                 &current_source,
+                                 &generator_active,
+                                 TRUE,
+                                 FALSE,
+                                 &live_header);
+    }
+
+    if (error == NO_ERROR)
+    {
+        error = tap_publish_taf_replace_safe(tmp_taf, tap->_filepath_resolved);
+    }
+
+    if (fsFileExists(tmp_taf))
+    {
+        error_t delete_error = fsDeleteFile(tmp_taf);
+        if (delete_error != NO_ERROR && delete_error != ERROR_FILE_NOT_FOUND)
+        {
+            TRACE_WARNING("Could not delete temporary TAP snapshot %s, error=%s\r\n", tmp_taf, error2text(delete_error));
+        }
+    }
+
+    osFreeMem(tmp_taf);
+
+    if (error == NO_ERROR)
+    {
+        *final_taf_path = tap->_filepath_resolved;
+    }
+    return error;
+}
+
+error_t tap_materialize_final_snapshot(tonie_audio_playlist_t *tap, const char **final_taf_path)
+{
+    if (final_taf_path == NULL)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+    *final_taf_path = NULL;
+    size_t *runtime_indices = NULL;
+    size_t runtime_files_count = 0;
+    error_t error = tap_prepare_runtime_indices(tap, &runtime_indices,
+                                                &runtime_files_count);
+    if (error == NO_ERROR)
+    {
+        error = tap_materialize_final_snapshot_selected(tap,
+                                                        runtime_indices,
+                                                        runtime_files_count,
+                                                        final_taf_path);
+    }
+    tap_free_runtime_indices(runtime_indices);
     return error;
 }
 

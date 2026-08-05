@@ -1,6 +1,7 @@
 #include "tb2_client_identity.h"
 
 #include "debug.h"
+#include "net_config.h"
 #include "os_port.h"
 
 static const char *const tb2_identity_options[] = {
@@ -70,4 +71,41 @@ const settings_cert_t *tb2_client_identity_resolve(settings_t *box_settings,
                 identity_source,
                 box_settings != NULL ? (unsigned int)box_settings->internal.overlayNumber : 0U);
     return identity;
+}
+
+bool_t tb2_content_identity_resolve(const char *requested_ruid,
+                                    const uint8_t *requested_auth,
+                                    const contentJson_t *content,
+                                    tb2_content_identity_t *identity)
+{
+    if (identity == NULL)
+    {
+        return FALSE;
+    }
+    osMemset(identity, 0, sizeof(*identity));
+
+    const bool_t overridden = content != NULL && content->cloud_override;
+    const char *selected_ruid = overridden ? content->cloud_ruid : requested_ruid;
+    if (!tb2_ruid_canonicalize(selected_ruid, identity->ruid))
+    {
+        return FALSE;
+    }
+
+    identity->overridden = overridden;
+    if (overridden)
+    {
+        if (!content->_has_cloud_auth || content->cloud_auth == NULL ||
+            content->cloud_auth_len != TONIE_AUTH_TOKEN_LENGTH)
+        {
+            return FALSE;
+        }
+        identity->auth = content->cloud_auth;
+        identity->auth_len = content->cloud_auth_len;
+    }
+    else if (requested_auth != NULL)
+    {
+        identity->auth = requested_auth;
+        identity->auth_len = TONIE_AUTH_TOKEN_LENGTH;
+    }
+    return TRUE;
 }

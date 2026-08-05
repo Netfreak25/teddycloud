@@ -55,18 +55,6 @@ GIT_BUILD_TIME ?= unknown
 GIT_SHORT_SHA ?= unknown
 GIT_SHA ?= unknown
 GIT_TAG ?= unknown
-ifneq ($(strip $(PACKAGE_GIT_SHA)),)
-BUILD_PACKAGE_GIT_SHA := $(PACKAGE_GIT_SHA)
-BUILD_PACKAGE_GIT_SHA_SET := 1
-else
-BUILD_PACKAGE_GIT_SHA := $(build_gitSha)
-BUILD_PACKAGE_GIT_SHA_SET := 0
-endif
-ifneq ($(strip $(BUILD_PACKAGE_GIT_SHA)),)
-BUILD_PACKAGE_GIT_SHORT_SHA := $(shell printf "%s" "$(BUILD_PACKAGE_GIT_SHA)" | cut -c1-8)
-else
-BUILD_PACKAGE_GIT_SHORT_SHA :=
-endif
 build_gitDirty:=$(shell git diff --quiet 2>/dev/null && echo '0' || echo $(GIT_DIRTY))
 build_gitDateTime:="$(shell git log -1 --format=%ai 2>/dev/null || echo $(GIT_BUILD_TIME))"
 build_gitShortSha:=${shell git rev-parse --short HEAD 2>/dev/null || echo $(GIT_SHORT_SHA)}
@@ -75,7 +63,7 @@ build_gitTag:=${shell git describe --tags --exact-match $(build_gitSha) 2>/dev/n
 build_platform:=$(PLATFORM)
 build_os:="$(OS)"
 
-CFLAGS_VERSION:=-DBUILD_GIT_IS_DIRTY=${build_gitDirty} -DBUILD_GIT_DATETIME=\"${build_gitDateTime}\" -DBUILD_RAW_DATETIME=\"${build_rawDateTime}\" -DBUILD_GIT_SHORT_SHA=\"${build_gitShortSha}\" -DBUILD_GIT_SHA=\"${build_gitSha}\" -DBUILD_GIT_TAG=\"${build_gitTag}\" -DBUILD_PACKAGE_GIT_SHORT_SHA=\"${BUILD_PACKAGE_GIT_SHORT_SHA}\" -DBUILD_PACKAGE_GIT_SHA=\"${BUILD_PACKAGE_GIT_SHA}\" -DBUILD_PACKAGE_GIT_SHA_SET=${BUILD_PACKAGE_GIT_SHA_SET}
+CFLAGS_VERSION:=-DBUILD_GIT_IS_DIRTY=${build_gitDirty} -DBUILD_GIT_DATETIME=\"${build_gitDateTime}\" -DBUILD_RAW_DATETIME=\"${build_rawDateTime}\" -DBUILD_GIT_SHORT_SHA=\"${build_gitShortSha}\" -DBUILD_GIT_SHA=\"${build_gitSha}\" -DBUILD_GIT_TAG=\"${build_gitTag}\"
 CFLAGS_VERSION+=-DBUILD_PLATFORM=\"${build_platform}\" -DBUILD_OS=\"${build_os}\" -DBUILD_OS_ID=\"${build_os_id}\" -DBUILD_ARCH=\"${build_arch}\" -DBUILD_ARCH_BITS=\"${build_arch_bits}\"
 
 ifeq ($(build_os_id),"alpine")
@@ -584,7 +572,7 @@ endif
 $(LINK_LO_FILE): $$(dir $$@)
 	$(file >$@, $(OBJECTS) $(OBJ_ONLY_FILES) )
 
-workdirs: certs/server/ certs/server_tb2/ certs/client/ config/ data/www/ data/content/ data/library/ data/www/web/ data/firmware/ data/cache/
+workdirs: certs/server_tb1/ certs/server_tb2/ certs/client_tb1/ certs/client_tb2/ config/ data/www/ data/content/ data/library/ data/www/web/ data/firmware/ data/cache/
 	$(QUIET)$(ECHO) '[ ${YELLOW}DIRS${NC}  ] ${CYAN}$@${NC}'
 	$(QUIET)$(CP_R) $(subst /,$(SEP),$(CONTRIB_DIR)/data/www/*) $(subst /,$(SEP),data/www/)
 

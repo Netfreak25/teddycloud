@@ -17,7 +17,9 @@
 #include "encoding/base64.h"
 #include "cJSON.h"
 #include "handler.h"
+#include "handler_cloud.h"
 #include "tb2_mqtt_passthrough.h"
+#include "tb2_ruid.h"
 #include "toniebox_state.h"
 
 // Forward declaration of platform-specific function
@@ -26,7 +28,6 @@ uint_t tcpWaitForEvents(Socket *socket, uint_t eventMask, systime_t timeout);
 #define MQTT_MAX_PACKET_SIZE 4096
 #define MQTT_MAX_CONNECTIONS 32
 #define MQTT_MAX_SUBSCRIPTIONS 32
-#define MQTT_FRESH_TONIES_MAX 50
 #define MQTT_SETTINGS_DESIRED_PAYLOAD_SIZE 2048
 #define MQTT_SETTINGS_DESIRED_MAX_ATTEMPTS 3
 #define MQTT_SETTINGS_DESIRED_RETRY_INTERVAL_SEC 5
@@ -35,8 +36,9 @@ uint_t tcpWaitForEvents(Socket *socket, uint_t eventMask, systime_t timeout);
 #define MQTT_JSON_SAFE_INTEGER_MAX 9007199254740991.0
 #define MQTT_LOG_INLINE_PAYLOAD_SIZE 256
 #define MQTT_FRESH_TONIES_DEBOUNCE_SEC 2
+#define MQTT_FRESH_TONIES_RETRY_INTERVAL_SEC 5
+#define MQTT_FRESH_TONIES_MAX_ATTEMPTS 3
 #define MQTT_FRESH_TONIES_REASON_MAX 32
-#define MQTT_FRESH_TONIES_DUPLICATE_LOG_INTERVAL_SEC 60
 #define MQTT_CONNECT_FLAG_USERNAME 0x80U
 #define MQTT_CONNECT_FLAG_PASSWORD 0x40U
 #define MQTT_CONNECT_FLAG_WILL_RETAIN 0x20U
@@ -51,6 +53,13 @@ typedef struct {
     uint8_t qos;
 } MqttSubscription;
 
+typedef struct MqttFreshTonieEntry {
+    uint64_t uid;
+    bool_t present;
+    bool_t delivered;
+    struct MqttFreshTonieEntry *next;
+} MqttFreshTonieEntry;
+
 typedef struct {
     Socket *socket;
     TlsContext *tlsContext;
@@ -62,9 +71,17 @@ typedef struct {
     bool_t box_connection;
     uint8_t box_overlay_id;
     char box_common_name[32];
+    char box_topic_id[32];
     tb2_mqtt_passthrough_session_t *passthrough;
     MqttSubscription subscriptions[MQTT_MAX_SUBSCRIPTIONS];
     size_t subscription_count;
+    MqttFreshTonieEntry *fresh_tonie_entries;
+    MqttFreshTonieEntry *fresh_tonie_inflight;
+    uint16_t fresh_tonie_packet_id;
+    uint16_t next_packet_id;
+    uint8_t fresh_tonie_attempts;
+    uint32_t fresh_tonie_sent_at;
+    bool_t observer_local_reply_matched;
 } MqttClientConnection;
 
 typedef struct {
@@ -86,11 +103,8 @@ typedef struct {
     uint32_t pending_since;
     uint32_t last_publish_at;
     uint32_t last_delay_log_at;
-    uint32_t last_duplicate_log_at;
     uint32_t coalesced_count;
-    bool_t last_payload_valid;
-    uint32_t last_payload_hash;
-    size_t last_payload_len;
+    bool_t waiting_for_subscription_logged;
     char reason[MQTT_FRESH_TONIES_REASON_MAX];
 } MqttFreshToniesPublishState;
 
@@ -117,7 +131,9 @@ typedef enum {
     MQTT_MSG_ANY = 0,
     MQTT_MSG_CONNECT = 0x10,
     MQTT_MSG_PUBLISH = 0x30,
+    MQTT_MSG_PUBACK = 0x40,
     MQTT_MSG_SUBSCRIBE = 0x80,
+    MQTT_MSG_UNSUBSCRIBE = 0xA0,
     MQTT_MSG_PINGREQ = 0xC0,
     MQTT_MSG_DISCONNECT = 0xE0
 } MqttMessageType;
@@ -146,10 +162,11 @@ static MqttAppControlStlState app_control_stl_state[MAX_OVERLAYS];
 static MqttAppControlPingState app_control_ping_state[MAX_OVERLAYS];
 static MqttFreshToniesPublishState fresh_tonies_publish_state[MAX_OVERLAYS];
 
-static bool_t mqtt_publish_fresh_tonies_to_connection(MqttClientConnection *conn, settings_t *settings, bool_t finish_on_success, bool_t allow_duplicate);
 static MqttFreshToniesPublishState *mqtt_fresh_tonies_publish_state(settings_t *settings);
 static void mqtt_mark_fresh_tonies_pending(settings_t *settings, const char *reason);
-static bool_t mqtt_fresh_tonies_background_payload_already_sent(settings_t *settings);
+static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn);
+static bool_t mqtt_handle_fresh_tonies_puback(MqttClientConnection *conn,
+                                              uint16_t packet_id);
 static const MqttToniebox2SettingDescriptor toniebox2_settings_descriptors[MQTT_TB2_SETTING_COUNT] = {
     [MQTT_TB2_SETTING_MAX_VOLUME] = {"max_volume", "toniebox2.max_volume"},
     [MQTT_TB2_SETTING_BEDTIME_MAX_VOLUME] = {"bedtime_max_volume", "toniebox2.bedtime_max_volume"},
@@ -217,6 +234,18 @@ static uint8_t mqtt_connection_overlay_id(MqttClientConnection *conn)
     return 0;
 }
 
+static bool_t mqtt_connection_local_control_allowed(MqttClientConnection *conn)
+{
+    if (conn == NULL || !conn->active || !conn->box_connection ||
+        conn->client_ctx.settings == NULL)
+    {
+        return FALSE;
+    }
+
+    return conn->passthrough == NULL ||
+           conn->client_ctx.settings->mqtt_client_upstream.local_control_enabled;
+}
+
 static bool_t mqtt_connection_has_trusted_client_cert(MqttClientConnection *conn)
 {
     if (conn == NULL || conn->tlsContext == NULL)
@@ -243,11 +272,19 @@ static bool_t mqtt_promote_connection_to_box(MqttClientConnection *conn, setting
         return FALSE;
     }
 
-    if (conn->box_common_name[0] != '\0' && osStrcasecmp(conn->box_common_name, common_name) != 0)
+    char canonical_common_name[13];
+    const char *logical_common_name =
+        settings_canonicalize_box_id(common_name, canonical_common_name,
+                                     sizeof(canonical_common_name))
+            ? canonical_common_name
+            : common_name;
+
+    if (conn->box_common_name[0] != '\0' &&
+        osStrcasecmp(conn->box_common_name, logical_common_name) != 0)
     {
         TRACE_WARNING("MQTT connection topic/cert mismatch: existing box=%s new box=%s source=%s\r\n",
                       conn->box_common_name,
-                      common_name,
+                      logical_common_name,
                       source != NULL ? source : "-");
         return FALSE;
     }
@@ -260,7 +297,7 @@ static bool_t mqtt_promote_connection_to_box(MqttClientConnection *conn, setting
     conn->client_ctx.state->box.name = conn->client_ctx.settings->boxName;
     conn->box_connection = TRUE;
     conn->box_overlay_id = box_settings->internal.overlayNumber;
-    osStrncpy(conn->box_common_name, common_name, sizeof(conn->box_common_name) - 1);
+    osStrncpy(conn->box_common_name, logical_common_name, sizeof(conn->box_common_name) - 1);
     conn->box_common_name[sizeof(conn->box_common_name) - 1] = '\0';
 
     if (!was_box_connection)
@@ -273,12 +310,28 @@ static bool_t mqtt_promote_connection_to_box(MqttClientConnection *conn, setting
     return TRUE;
 }
 
+static void mqtt_fresh_tonies_reset_connection(MqttClientConnection *conn)
+{
+    while (conn->fresh_tonie_entries != NULL)
+    {
+        MqttFreshTonieEntry *removed = conn->fresh_tonie_entries;
+        conn->fresh_tonie_entries = removed->next;
+        osFreeMem(removed);
+    }
+    conn->fresh_tonie_inflight = NULL;
+    conn->fresh_tonie_packet_id = 0;
+    conn->fresh_tonie_attempts = 0;
+    conn->fresh_tonie_sent_at = 0;
+}
+
 static void mqtt_connection_close(MqttClientConnection *conn, const char *reason)
 {
     if (conn == NULL)
     {
         return;
     }
+
+    uint8_t closed_overlay_id = conn->box_overlay_id;
 
     if (reason != NULL && reason[0] != '\0')
     {
@@ -287,6 +340,12 @@ static void mqtt_connection_close(MqttClientConnection *conn, const char *reason
                    mqtt_connection_common_name(conn),
                    (unsigned)mqtt_connection_overlay_id(conn),
                    reason);
+    }
+
+    if (conn->client_ctx.settings != NULL &&
+        conn->client_ctx.settings->internal.freshnessCacheChanged)
+    {
+        mqtt_mark_fresh_tonies_pending(conn->client_ctx.settings, "reconnect");
     }
 
     if (conn->passthrough != NULL)
@@ -311,11 +370,21 @@ static void mqtt_connection_close(MqttClientConnection *conn, const char *reason
     conn->buffer_len = 0;
     conn->mode_decided = FALSE;
     conn->subscription_count = 0;
+    mqtt_fresh_tonies_reset_connection(conn);
     osMemset(conn->buffer, 0, sizeof(conn->buffer));
     osMemset(conn->subscriptions, 0, sizeof(conn->subscriptions));
     conn->box_connection = FALSE;
     conn->box_overlay_id = 0;
     conn->box_common_name[0] = '\0';
+    conn->box_topic_id[0] = '\0';
+    conn->observer_local_reply_matched = FALSE;
+    if (closed_overlay_id > 0 && closed_overlay_id < MAX_OVERLAYS)
+    {
+        osMemset(&app_control_stl_state[closed_overlay_id], 0,
+                 sizeof(app_control_stl_state[closed_overlay_id]));
+        osMemset(&app_control_ping_state[closed_overlay_id], 0,
+                 sizeof(app_control_ping_state[closed_overlay_id]));
+    }
 }
 
 static bool mqtt_topic_match(const char *filter, const char *topic)
@@ -372,11 +441,18 @@ static void mqtt_connection_update_context(MqttClientConnection *conn, const cha
     if (mac_end != NULL)
     {
         size_t mac_len = mac_end - mac_start;
-        if (mac_len > 0 && mac_len < 32)
+        if (mac_len == 12)
         {
             char mac[32];
             memcpy(mac, mac_start, mac_len);
             mac[mac_len] = '\0';
+
+            char canonical_mac[13];
+            if (!settings_canonicalize_box_id(mac, canonical_mac,
+                                              sizeof(canonical_mac)))
+            {
+                return;
+            }
 
             if (get_overlay_id(mac) > 0)
             {
@@ -385,7 +461,13 @@ static void mqtt_connection_update_context(MqttClientConnection *conn, const cha
                 {
                     if (conn->box_connection || mqtt_connection_has_trusted_client_cert(conn))
                     {
-                        mqtt_promote_connection_to_box(conn, box_settings, mac, conn->box_connection ? "topic" : "trusted-topic");
+                        if (mqtt_promote_connection_to_box(conn, box_settings, canonical_mac,
+                                                           conn->box_connection ? "topic" : "trusted-topic"))
+                        {
+                            osStrncpy(conn->box_topic_id, mac,
+                                      sizeof(conn->box_topic_id) - 1);
+                            conn->box_topic_id[sizeof(conn->box_topic_id) - 1] = '\0';
+                        }
                     }
                     else
                     {
@@ -533,6 +615,8 @@ void mqtt_server_init() {
     osMemset(connections, 0, sizeof(connections));
     osMemset(app_control_stl_state, 0, sizeof(app_control_stl_state));
     osMemset(app_control_ping_state, 0, sizeof(app_control_ping_state));
+    osMemset(fresh_tonies_publish_state, 0,
+             sizeof(fresh_tonies_publish_state));
 }
 
 static const char *mqtt_json_bool(bool value)
@@ -881,22 +965,6 @@ static bool mqtt_connection_has_sub(MqttClientConnection *conn, const char *topi
     return false;
 }
 
-static bool mqtt_connection_has_exact_sub(MqttClientConnection *conn, const char *topic)
-{
-    if (conn == NULL || !conn->active || topic == NULL)
-    {
-        return false;
-    }
-    for (size_t i = 0; i < conn->subscription_count; i++)
-    {
-        if (osStrcmp(conn->subscriptions[i].topic, topic) == 0)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 static bool_t mqtt_extract_toniebox_topic_common_name(const char *topic, const char *suffix, char *common_name, size_t common_name_size)
 {
     const char *prefix = "toniebox/";
@@ -930,25 +998,6 @@ static bool_t mqtt_extract_toniebox_topic_common_name(const char *topic, const c
 
     osMemcpy(common_name, topic + prefix_len, cn_len);
     common_name[cn_len] = '\0';
-    return TRUE;
-}
-
-static bool_t mqtt_is_hex_string(const char *value, size_t len)
-{
-    if (value == NULL || osStrlen(value) != len)
-    {
-        return FALSE;
-    }
-
-    for (size_t i = 0; i < len; i++)
-    {
-        char c = value[i];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
-        {
-            return FALSE;
-        }
-    }
-
     return TRUE;
 }
 
@@ -1004,15 +1053,13 @@ static bool_t mqtt_extract_toniebox_claim_topic(const char *topic, char *common_
     }
 
     const char *ruid_start = claim_start + claim_segment_len;
-    if (!mqtt_is_hex_string(ruid_start, 16))
+    if (!tb2_ruid_canonicalize(ruid_start, ruid))
     {
         return FALSE;
     }
 
     osMemcpy(common_name, common_start, common_len);
     common_name[common_len] = '\0';
-    osMemcpy(ruid, ruid_start, 16);
-    ruid[16] = '\0';
     return TRUE;
 }
 
@@ -1113,57 +1160,120 @@ static void mqtt_trace_full_publish(const char *direction, const char *topic, co
     osFreeMem(payload_b64);
 }
 
-static bool_t mqtt_connection_publish(MqttClientConnection *conn, const char *topic, const char *payload)
+static bool_t mqtt_build_publish_packet(const char *topic, const char *payload,
+                                        uint8_t qos, bool_t duplicate,
+                                        uint16_t packet_id, uint8_t **packet_out,
+                                        size_t *packet_size_out)
 {
-    if (conn == NULL || !conn->active || topic == NULL || payload == NULL)
-    {
+    if (topic == NULL || payload == NULL || packet_out == NULL ||
+        packet_size_out == NULL || qos > 1 || (qos == 1 && packet_id == 0))
         return FALSE;
-    }
 
-    size_t topic_len = strlen(topic);
-    size_t payload_len = strlen(payload);
-    size_t remaining_len = 2 + topic_len + payload_len;
+    size_t topic_len = osStrlen(topic);
+    size_t payload_len = osStrlen(payload);
+    if (topic_len == 0 || topic_len > UINT16_MAX)
+        return FALSE;
+    size_t remaining_len = 2 + topic_len + (qos == 1 ? 2 : 0) + payload_len;
 
-    // Allocate memory for the packet
-    size_t header_len = 1; // 0x30
     uint8_t length_bytes[4];
     size_t length_count = 0;
     size_t temp_len = remaining_len;
-    do {
+    do
+    {
         uint8_t encoded_byte = temp_len % 128;
         temp_len /= 128;
-        if (temp_len > 0) {
+        if (temp_len > 0)
             encoded_byte |= 128;
-        }
         length_bytes[length_count++] = encoded_byte;
     } while (temp_len > 0);
 
-    size_t packet_size = header_len + length_count + remaining_len;
+    size_t packet_size = 1 + length_count + remaining_len;
     uint8_t *packet = osAllocMem(packet_size);
     if (packet == NULL)
+        return FALSE;
+
+    size_t p = 0;
+    packet[p++] = (uint8_t)(0x30U | (qos << 1) | (duplicate ? 0x08U : 0));
+    osMemcpy(&packet[p], length_bytes, length_count);
+    p += length_count;
+    packet[p++] = (topic_len >> 8) & 0xFF;
+    packet[p++] = topic_len & 0xFF;
+    osMemcpy(&packet[p], topic, topic_len);
+    p += topic_len;
+    if (qos == 1)
     {
-        TRACE_ERROR("Failed to allocate memory for MQTT PUBLISH packet\r\n");
+        packet[p++] = (uint8_t)(packet_id >> 8);
+        packet[p++] = (uint8_t)packet_id;
+    }
+    osMemcpy(&packet[p], payload, payload_len);
+    p += payload_len;
+
+    *packet_out = packet;
+    *packet_size_out = p;
+    return TRUE;
+}
+
+static bool_t mqtt_connection_publish_packet(MqttClientConnection *conn,
+                                             const char *topic,
+                                             const char *payload, uint8_t qos,
+                                             bool_t duplicate,
+                                             uint16_t *packet_id,
+                                             const char *capture_action)
+{
+    if (conn == NULL || !conn->active || topic == NULL || payload == NULL ||
+        packet_id == NULL)
+        return FALSE;
+
+    bool_t reserved_passthrough_id = FALSE;
+    if (qos == 1 && *packet_id == 0)
+    {
+        if (conn->passthrough != NULL)
+        {
+            error_t reserve_error = tb2_mqtt_passthrough_reserve_local_packet_id(
+                conn->passthrough, packet_id);
+            if (reserve_error)
+            {
+                TRACE_ERROR("MQTT local packet-id reservation failed: %s\r\n",
+                            error2text(reserve_error));
+                return FALSE;
+            }
+            reserved_passthrough_id = TRUE;
+        }
+        else
+        {
+            if (conn->next_packet_id == 0)
+                conn->next_packet_id = UINT16_MAX;
+            *packet_id = conn->next_packet_id--;
+            if (conn->next_packet_id == 0)
+                conn->next_packet_id = UINT16_MAX;
+        }
+    }
+
+    uint8_t *packet = NULL;
+    size_t packet_size = 0;
+    if (!mqtt_build_publish_packet(topic, payload, qos, duplicate,
+                                   *packet_id, &packet, &packet_size))
+    {
+        if (reserved_passthrough_id)
+        {
+            tb2_mqtt_passthrough_release_local_packet_id(conn->passthrough,
+                                                         *packet_id);
+            *packet_id = 0;
+        }
+        TRACE_ERROR("Failed to allocate or encode MQTT PUBLISH packet\r\n");
         return FALSE;
     }
 
-    size_t p = 0;
-    packet[p++] = 0x30; // PUBLISH (QoS 0)
-    
-    memcpy(&packet[p], length_bytes, length_count);
-    p += length_count;
-
-    packet[p++] = (topic_len >> 8) & 0xFF;
-    packet[p++] = topic_len & 0xFF;
-
-    memcpy(&packet[p], topic, topic_len);
-    p += topic_len;
-
-    memcpy(&packet[p], payload, payload_len);
-    p += payload_len;
-
     size_t written = 0;
-    error_t error;
-    if (conn->tlsContext)
+    error_t error = NO_ERROR;
+    if (conn->passthrough != NULL)
+    {
+        error = tb2_mqtt_passthrough_write_local_publish(
+            conn->passthrough, packet, packet_size, topic, *packet_id,
+            capture_action);
+        written = error ? 0 : packet_size;
+    }
+    else if (conn->tlsContext)
     {
         error = tlsWrite(conn->tlsContext, packet, packet_size, &written, 0);
     }
@@ -1174,12 +1284,15 @@ static bool_t mqtt_connection_publish(MqttClientConnection *conn, const char *to
 
     if (error != NO_ERROR || written != packet_size)
     {
-        TRACE_WARNING("MQTT PUBLISH failed: slot=%d box=%s overlay=%u topic=%s -> len %" PRIuSIZE ", written %" PRIuSIZE ", error=%s\r\n",
+        TRACE_WARNING("MQTT PUBLISH failed: slot=%d box=%s overlay=%u topic=%s qos=%u packet_id=%u dup=%s -> len %" PRIuSIZE ", written %" PRIuSIZE ", error=%s\r\n",
                       mqtt_connection_slot(conn),
                       mqtt_connection_common_name(conn),
                       (unsigned)mqtt_connection_overlay_id(conn),
                       topic,
-                      payload_len,
+                      (unsigned)qos,
+                      (unsigned)*packet_id,
+                      duplicate ? "true" : "false",
+                      osStrlen(payload),
                       written,
                       error2text(error));
         osFreeMem(packet);
@@ -1187,11 +1300,23 @@ static bool_t mqtt_connection_publish(MqttClientConnection *conn, const char *to
         return FALSE;
     }
 
-    mqtt_trace_full_publish("tx", topic, (const uint8_t *)payload, payload_len, 0);
-    TRACE_INFO("MQTT PUBLISH: %s -> %s (len %" PRIuSIZE ")\r\n", topic, payload, payload_len);
+    mqtt_trace_full_publish("tx", topic, (const uint8_t *)payload,
+                            osStrlen(payload), qos);
+    TRACE_INFO("MQTT PUBLISH: %s -> %s (qos=%u packet_id=%u dup=%s len %" PRIuSIZE ")\r\n",
+               topic, payload, (unsigned)qos, (unsigned)*packet_id,
+               duplicate ? "true" : "false", osStrlen(payload));
 
     osFreeMem(packet);
     return TRUE;
+}
+
+static bool_t mqtt_connection_publish(MqttClientConnection *conn,
+                                      const char *topic, const char *payload,
+                                      const char *capture_action)
+{
+    uint16_t packet_id = 0;
+    return mqtt_connection_publish_packet(conn, topic, payload, 0, FALSE,
+                                          &packet_id, capture_action);
 }
 
 static void mqtt_connection_update_context_from_cert(MqttClientConnection *conn)
@@ -1199,6 +1324,7 @@ static void mqtt_connection_update_context_from_cert(MqttClientConnection *conn)
     conn->box_connection = FALSE;
     conn->box_overlay_id = 0;
     conn->box_common_name[0] = '\0';
+    conn->box_topic_id[0] = '\0';
     if (conn->tlsContext != NULL && osStrlen(conn->tlsContext->client_cert_subject) > 0)
     {
         char_t *subject = conn->tlsContext->client_cert_subject;
@@ -1258,26 +1384,65 @@ static void mqtt_touch_box_connection(MqttClientConnection *conn)
     internal->last_connection = time(NULL);
 }
 
-static bool_t mqtt_toniebox2_settings_desired_topic(settings_t *settings, char *topic, size_t topic_size)
+static bool_t mqtt_connection_topic_id(MqttClientConnection *conn, char *topic_id,
+                                       size_t topic_id_size)
 {
-    if (settings == NULL || settings->commonName == NULL || settings->commonName[0] == '\0')
+    if (conn == NULL || topic_id == NULL || topic_id_size < 13)
     {
         return FALSE;
     }
 
-    osSnprintf(topic, topic_size, "toniebox/%s/settings/desired", settings->commonName);
+    char canonical_topic_id[13];
+    if (conn->box_topic_id[0] != '\0' &&
+        settings_canonicalize_box_id(conn->box_topic_id, canonical_topic_id,
+                                     sizeof(canonical_topic_id)))
+    {
+        osStrncpy(topic_id, conn->box_topic_id, topic_id_size - 1);
+        topic_id[topic_id_size - 1] = '\0';
+        return TRUE;
+    }
+
+    const char *fallback = conn->box_common_name;
+    if (fallback[0] == '\0' && conn->client_ctx.settings != NULL)
+    {
+        fallback = conn->client_ctx.settings->commonName;
+    }
+    if (!settings_canonicalize_box_id(fallback, canonical_topic_id,
+                                      sizeof(canonical_topic_id)))
+    {
+        return FALSE;
+    }
+
+    osStrncpy(topic_id, canonical_topic_id, topic_id_size - 1);
+    topic_id[topic_id_size - 1] = '\0';
     return TRUE;
 }
 
-static bool_t mqtt_app_control_topic(settings_t *settings, const char *command, char *topic, size_t topic_size)
+static bool_t mqtt_toniebox2_settings_desired_topic(MqttClientConnection *conn,
+                                                    char *topic, size_t topic_size)
 {
-    if (settings == NULL || settings->commonName == NULL || settings->commonName[0] == '\0' ||
-        command == NULL || command[0] == '\0')
+    char topic_id[13];
+    if (!mqtt_connection_topic_id(conn, topic_id, sizeof(topic_id)))
     {
         return FALSE;
     }
 
-    osSnprintf(topic, topic_size, "toniebox/%s/app-control/%s", settings->commonName, command);
+    osSnprintf(topic, topic_size, "toniebox/%s/settings/desired", topic_id);
+    return TRUE;
+}
+
+static bool_t mqtt_app_control_topic(MqttClientConnection *conn,
+                                     const char *command, char *topic,
+                                     size_t topic_size)
+{
+    char topic_id[13];
+    if (command == NULL || command[0] == '\0' ||
+        !mqtt_connection_topic_id(conn, topic_id, sizeof(topic_id)))
+    {
+        return FALSE;
+    }
+
+    osSnprintf(topic, topic_size, "toniebox/%s/app-control/%s", topic_id, command);
     return TRUE;
 }
 
@@ -1288,14 +1453,14 @@ static bool_t mqtt_is_toniebox2_overlay(settings_t *settings)
 
 static bool_t mqtt_publish_settings_desired_to_connection(MqttClientConnection *conn, bool_t track_pending_attempt)
 {
-    if (conn == NULL || !conn->active || !conn->box_connection || conn->client_ctx.settings == NULL)
+    if (!mqtt_connection_local_control_allowed(conn))
     {
         return FALSE;
     }
 
     settings_t *settings = conn->client_ctx.settings;
     char topic[128];
-    if (!mqtt_toniebox2_settings_desired_topic(settings, topic, sizeof(topic)))
+    if (!mqtt_toniebox2_settings_desired_topic(conn, topic, sizeof(topic)))
     {
         return FALSE;
     }
@@ -1307,7 +1472,8 @@ static bool_t mqtt_publish_settings_desired_to_connection(MqttClientConnection *
         return FALSE;
     }
 
-    bool_t published = mqtt_connection_publish(conn, topic, settings_payload);
+    bool_t published = mqtt_connection_publish(conn, topic, settings_payload,
+                                                "local_settings_desired");
     osFreeMem(settings_payload);
 
     if (published && track_pending_attempt && settings->internal.toniebox2SettingsDesiredPending)
@@ -1347,7 +1513,7 @@ static bool_t mqtt_publish_pending_settings_desired_to_connection(MqttClientConn
     }
 
     char topic[128];
-    if (!mqtt_toniebox2_settings_desired_topic(settings, topic, sizeof(topic)))
+    if (!mqtt_toniebox2_settings_desired_topic(conn, topic, sizeof(topic)))
     {
         return FALSE;
     }
@@ -1475,7 +1641,10 @@ static size_t mqtt_count_legacy_toniebox2_confirm_values(cJSON *json)
     return seen;
 }
 
-static void mqtt_ack_toniebox2_settings_history(settings_t *settings, cJSON *history, size_t *acked, size_t *missing, size_t *stale, size_t *remaining)
+static void mqtt_ack_toniebox2_settings_history(settings_t *settings, cJSON *history,
+                                                bool_t remove_acked,
+                                                size_t *acked, size_t *missing,
+                                                size_t *stale, size_t *remaining)
 {
     uint64_t revisions[MQTT_TB2_SETTING_COUNT];
     uint64_t pending[MQTT_TB2_SETTING_COUNT];
@@ -1508,6 +1677,11 @@ static void mqtt_ack_toniebox2_settings_history(settings_t *settings, cJSON *his
         {
             pending[i] = 0;
             (*acked)++;
+            if (remove_acked)
+            {
+                cJSON_DeleteItemFromObjectCaseSensitive(
+                    history, toniebox2_settings_descriptors[i].json_name);
+            }
             continue;
         }
 
@@ -1526,6 +1700,15 @@ static void mqtt_ack_toniebox2_settings_history(settings_t *settings, cJSON *his
     if (*remaining == 0)
     {
         mqtt_clear_settings_desired_pending(settings);
+    }
+    else if (*acked > 0)
+    {
+        // A partial confirmation starts a fresh retry window for the fields
+        // that are still pending instead of leaving them stuck at max attempts.
+        settings_set_unsigned_id("internal.toniebox2SettingsDesiredAttempts", 0,
+                                 settings->internal.overlayNumber);
+        settings_set_unsigned_id("internal.toniebox2SettingsDesiredLastAttempt", 0,
+                                 settings->internal.overlayNumber);
     }
 }
 
@@ -1620,6 +1803,120 @@ static bool_t mqtt_get_json_decimal_text(cJSON *json, const char *name, char *va
     }
 
     return FALSE;
+}
+
+static bool_t mqtt_settings_confirm_has_forward_content(cJSON *json)
+{
+    cJSON *item = NULL;
+    cJSON_ArrayForEach(item, json)
+    {
+        if (item->string == NULL ||
+            (osStrcmp(item->string, "settings_applied") != 0 &&
+             osStrcmp(item->string, "toniebox_history") != 0))
+        {
+            return TRUE;
+        }
+        if (osStrcmp(item->string, "toniebox_history") == 0 &&
+            cJSON_IsObject(item) && item->child != NULL)
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static error_t mqtt_process_settings_confirm(MqttClientConnection *conn,
+                                             const uint8_t *payload,
+                                             size_t payload_len,
+                                             bool_t prepare_forward,
+                                             bool_t *matched,
+                                             uint8_t **forward_payload,
+                                             size_t *forward_payload_len)
+{
+    if (matched != NULL)
+        *matched = FALSE;
+    if (forward_payload != NULL)
+        *forward_payload = NULL;
+    if (forward_payload_len != NULL)
+        *forward_payload_len = 0;
+
+    if (conn == NULL || !conn->box_connection ||
+        conn->client_ctx.settings == NULL)
+    {
+        TRACE_INFO("Ignoring settings confirm from non-box MQTT connection\r\n");
+        return NO_ERROR;
+    }
+
+    cJSON *json = cJSON_ParseWithLength((const char *)payload, payload_len);
+    if (json == NULL)
+    {
+        TRACE_WARNING("MQTT settings confirm payload is not valid JSON for %s\r\n",
+                      conn->client_ctx.settings->commonName);
+        return NO_ERROR;
+    }
+
+    settings_t *settings = conn->client_ctx.settings;
+    size_t legacy_fields = mqtt_count_legacy_toniebox2_confirm_values(json);
+    cJSON *settings_applied = cJSON_GetObjectItemCaseSensitive(json, "settings_applied");
+    bool_t legacy_settings_applied = cJSON_IsTrue(settings_applied);
+    cJSON *history = cJSON_GetObjectItemCaseSensitive(json, "toniebox_history");
+    size_t acked = 0;
+    size_t missing = 0;
+    size_t stale = 0;
+    size_t remaining = 0;
+
+    if (cJSON_IsObject(history))
+    {
+        mqtt_ack_toniebox2_settings_history(settings, history, prepare_forward,
+                                            &acked, &missing, &stale, &remaining);
+        TRACE_INFO("MQTT settings confirm for %s overlay=%u: acked=%" PRIuSIZE " missing=%" PRIuSIZE " stale=%" PRIuSIZE " remaining=%" PRIuSIZE "\r\n",
+                   settings->commonName,
+                   (unsigned)settings->internal.overlayNumber,
+                   acked, missing, stale, remaining);
+    }
+    else
+    {
+        TRACE_INFO("MQTT settings confirm for %s overlay=%u without toniebox_history; pending unchanged (settings_applied=%s legacy_fields=%" PRIuSIZE ")\r\n",
+                   settings->commonName,
+                   (unsigned)settings->internal.overlayNumber,
+                   legacy_settings_applied ? "true" : "false",
+                   legacy_fields);
+    }
+
+    if (legacy_settings_applied || legacy_fields > 0)
+    {
+        TRACE_INFO("MQTT settings confirm for %s overlay=%u contains legacy confirm fields; local settings are not overwritten\r\n",
+                   settings->commonName,
+                   (unsigned)settings->internal.overlayNumber);
+    }
+
+    if (prepare_forward && acked > 0)
+    {
+        if (matched != NULL)
+            *matched = TRUE;
+        if (cJSON_IsObject(history) && history->child == NULL)
+            cJSON_DeleteItemFromObjectCaseSensitive(json, "toniebox_history");
+
+        if (mqtt_settings_confirm_has_forward_content(json))
+        {
+            char *rendered = cJSON_PrintUnformatted(json);
+            if (rendered == NULL)
+            {
+                cJSON_Delete(json);
+                return ERROR_OUT_OF_MEMORY;
+            }
+            size_t rendered_len = osStrlen(rendered);
+            if (forward_payload != NULL)
+                *forward_payload = (uint8_t *)rendered;
+            else
+                osFreeMem(rendered);
+            if (forward_payload_len != NULL)
+                *forward_payload_len = rendered_len;
+        }
+    }
+
+    cJSON_Delete(json);
+    return NO_ERROR;
 }
 
 static bool_t mqtt_connect_read_u8(MqttConnectReader *reader, uint8_t *value)
@@ -1840,92 +2137,121 @@ static error_t handle_mqtt_disconnect(MqttClientConnection *conn, MqttMessageTyp
     return NO_ERROR;
 }
 
-static error_t handle_mqtt_subscribe(MqttClientConnection *conn, MqttMessageType type, const char *topic, const uint8_t *payload, size_t payload_len)
+static void mqtt_store_subscription(MqttClientConnection *conn,
+                                    const char *sub_topic, uint8_t qos)
 {
-    TRACE_INFO("SUBSCRIBE received\r\n");
-    if (payload_len < 2)
+    for (size_t index = 0; index < conn->subscription_count; index++)
+    {
+        if (osStrcmp(conn->subscriptions[index].topic, sub_topic) == 0)
+        {
+            conn->subscriptions[index].qos = qos;
+            return;
+        }
+    }
+    if (conn->subscription_count >= MQTT_MAX_SUBSCRIPTIONS)
+    {
+        TRACE_WARNING("MQTT subscription table full, ignoring topic='%s'\r\n",
+                      sub_topic);
+        return;
+    }
+    MqttSubscription *subscription =
+        &conn->subscriptions[conn->subscription_count++];
+    osStrncpy(subscription->topic, sub_topic,
+              sizeof(subscription->topic) - 1);
+    subscription->topic[sizeof(subscription->topic) - 1] = '\0';
+    subscription->qos = qos;
+}
+
+static void mqtt_remove_subscription(MqttClientConnection *conn,
+                                     const char *sub_topic)
+{
+    for (size_t index = 0; index < conn->subscription_count; index++)
+    {
+        if (osStrcmp(conn->subscriptions[index].topic, sub_topic) != 0)
+            continue;
+        conn->subscription_count--;
+        if (index < conn->subscription_count)
+        {
+            osMemmove(&conn->subscriptions[index],
+                      &conn->subscriptions[index + 1],
+                      sizeof(conn->subscriptions[0]) *
+                          (conn->subscription_count - index));
+        }
+        osMemset(&conn->subscriptions[conn->subscription_count], 0,
+                 sizeof(conn->subscriptions[0]));
+        return;
+    }
+}
+
+static error_t mqtt_apply_subscription_packet(MqttClientConnection *conn,
+                                              const uint8_t *payload,
+                                              size_t payload_len,
+                                              bool_t unsubscribe,
+                                              uint16_t *packet_id_out)
+{
+    if (conn == NULL || payload == NULL || payload_len < 2)
         return ERROR_INVALID_LENGTH;
 
     size_t p = 0;
     uint16_t packet_id = (payload[p] << 8) | payload[p + 1];
+    if (packet_id == 0)
+        return ERROR_INVALID_LENGTH;
     p += 2;
-    bool_t publish_fresh_tonies_after_suback = FALSE;
+    size_t topic_count = 0;
 
     while (p < payload_len)
     {
         if (p + 2 > payload_len)
-            break;
+            return ERROR_INVALID_LENGTH;
         size_t topic_len = (payload[p] << 8) | payload[p + 1];
         p += 2;
-
-        if (p + topic_len > payload_len)
-            break;
+        if (topic_len == 0 || topic_len >= sizeof(conn->subscriptions[0].topic) ||
+            p + topic_len > payload_len)
+            return ERROR_INVALID_LENGTH;
 
         char sub_topic[256];
-        size_t copy_len = topic_len < sizeof(sub_topic) - 1 ? topic_len : sizeof(sub_topic) - 1;
-        memcpy(sub_topic, &payload[p], copy_len);
-        sub_topic[copy_len] = '\0';
+        osMemcpy(sub_topic, &payload[p], topic_len);
+        sub_topic[topic_len] = '\0';
         p += topic_len;
-
-        if (p >= payload_len)
-            break;
-        uint8_t qos = payload[p++];
-        TRACE_INFO("  Topic='%s', QoS=%u\r\n", sub_topic, qos);
+        uint8_t qos = 0;
+        if (!unsubscribe)
+        {
+            if (p >= payload_len)
+                return ERROR_INVALID_LENGTH;
+            qos = payload[p++];
+            if (qos > 2)
+                return ERROR_INVALID_TYPE;
+        }
 
         mqtt_connection_update_context(conn, sub_topic);
-
-        // Store subscription on connection
-        bool sub_found = false;
-        for (size_t s = 0; s < conn->subscription_count; s++)
-        {
-            if (strcmp(conn->subscriptions[s].topic, sub_topic) == 0)
-            {
-                conn->subscriptions[s].qos = qos;
-                sub_found = true;
-                break;
-            }
-        }
-        if (!sub_found && conn->subscription_count < MQTT_MAX_SUBSCRIPTIONS)
-        {
-            osStrncpy(conn->subscriptions[conn->subscription_count].topic, sub_topic, sizeof(conn->subscriptions[conn->subscription_count].topic) - 1);
-            conn->subscriptions[conn->subscription_count].topic[sizeof(conn->subscriptions[conn->subscription_count].topic) - 1] = '\0';
-            conn->subscriptions[conn->subscription_count].qos = qos;
-            conn->subscription_count++;
-        }
-
-        // Check if this is the fresh-tonies topic subscription
-        bool is_fresh_tonies_sub = false;
-        char mac[32] = {0};
-        if (strncmp(sub_topic, "toniebox/", 9) == 0 && topic_len > 22)
-        {
-            const char *suffix = "/fresh-tonies";
-            size_t suffix_len = strlen(suffix);
-            if (strcmp(sub_topic + topic_len - suffix_len, suffix) == 0)
-            {
-                size_t mac_len = topic_len - 9 - suffix_len;
-                if (mac_len < sizeof(mac))
-                {
-                    memcpy(mac, sub_topic + 9, mac_len);
-                    mac[mac_len] = '\0';
-                    is_fresh_tonies_sub = true;
-                }
-            }
-        }
-
-        if (is_fresh_tonies_sub)
-        {
-            settings_t *box_settings = get_settings_cn(mac);
-            if (box_settings != NULL && box_settings->internal.config_used)
-            {
-                publish_fresh_tonies_after_suback = TRUE;
-            }
-        }
+        if (unsubscribe)
+            mqtt_remove_subscription(conn, sub_topic);
+        else
+            mqtt_store_subscription(conn, sub_topic, qos);
+        TRACE_INFO("  Topic='%s', action=%s, QoS=%u\r\n", sub_topic,
+                   unsubscribe ? "unsubscribe" : "subscribe", (unsigned)qos);
+        topic_count++;
     }
+    if (topic_count == 0)
+        return ERROR_INVALID_LENGTH;
+    if (packet_id_out != NULL)
+        *packet_id_out = packet_id;
+    return NO_ERROR;
+}
 
-    // Responding with SUBACK (0x90)
+static error_t handle_mqtt_subscribe(MqttClientConnection *conn,
+                                     MqttMessageType type, const char *topic,
+                                     const uint8_t *payload, size_t payload_len)
+{
+    TRACE_INFO("SUBSCRIBE received\r\n");
+    uint16_t packet_id = 0;
+    error_t error = mqtt_apply_subscription_packet(conn, payload, payload_len,
+                                                   FALSE, &packet_id);
+    if (error)
+        return error;
+
     uint8_t suback[] = {0x90, 0x03, (uint8_t)(packet_id >> 8), (uint8_t)(packet_id & 0xFF), 0x00};
     size_t written = 0;
-    error_t error;
     if (conn->tlsContext)
         error = tlsWrite(conn->tlsContext, suback, sizeof(suback), &written, 0);
     else
@@ -1937,15 +2263,63 @@ static error_t handle_mqtt_subscribe(MqttClientConnection *conn, MqttMessageType
         return error != NO_ERROR ? error : ERROR_FAILURE;
     }
 
-    if (error == NO_ERROR && publish_fresh_tonies_after_suback)
-    {
-        mqtt_server_publish_fresh_tonies(&conn->client_ctx);
-    }
     if (error == NO_ERROR)
     {
+        mqtt_server_publish_fresh_tonies(&conn->client_ctx);
         mqtt_publish_pending_settings_desired_to_connection(conn, TRUE, TRUE);
     }
     return error;
+}
+
+static error_t handle_mqtt_unsubscribe(MqttClientConnection *conn,
+                                       MqttMessageType type, const char *topic,
+                                       const uint8_t *payload,
+                                       size_t payload_len)
+{
+    TRACE_INFO("UNSUBSCRIBE received\r\n");
+    uint16_t packet_id = 0;
+    error_t error = mqtt_apply_subscription_packet(conn, payload, payload_len,
+                                                   TRUE, &packet_id);
+    if (error)
+        return error;
+
+    uint8_t unsuback[] = {0xB0, 0x02, (uint8_t)(packet_id >> 8),
+                          (uint8_t)packet_id};
+    size_t written = 0;
+    if (conn->tlsContext)
+        error = tlsWrite(conn->tlsContext, unsuback, sizeof(unsuback), &written, 0);
+    else
+        error = socketSend(conn->socket, unsuback, sizeof(unsuback), &written, 0);
+    if (error != NO_ERROR || written != sizeof(unsuback))
+    {
+        mqtt_connection_close(conn, "unsuback write failed");
+        return error != NO_ERROR ? error : ERROR_FAILURE;
+    }
+    return NO_ERROR;
+}
+
+static error_t handle_mqtt_puback(MqttClientConnection *conn,
+                                  MqttMessageType type, const char *topic,
+                                  const uint8_t *payload, size_t payload_len)
+{
+    if (payload == NULL || payload_len != 2)
+    {
+        mqtt_connection_close(conn, "invalid PUBACK");
+        return ERROR_INVALID_LENGTH;
+    }
+    uint16_t packet_id = ((uint16_t)payload[0] << 8) | payload[1];
+    if (packet_id == 0)
+    {
+        mqtt_connection_close(conn, "invalid PUBACK packet id");
+        return ERROR_INVALID_LENGTH;
+    }
+    if (!mqtt_handle_fresh_tonies_puback(conn, packet_id))
+    {
+        TRACE_INFO("MQTT PUBACK ignored: slot=%d box=%s packet_id=%u\r\n",
+                   mqtt_connection_slot(conn), mqtt_connection_common_name(conn),
+                   (unsigned)packet_id);
+    }
+    return NO_ERROR;
 }
 
 static error_t handle_mqtt_publish_logs(MqttClientConnection *conn, MqttMessageType type, const char *topic, const uint8_t *payload, size_t payload_len)
@@ -2037,67 +2411,15 @@ static error_t handle_mqtt_publish_settings_request(MqttClientConnection *conn, 
 
     TRACE_INFO("Settings request from mac=%s\r\n", mac);
     bool_t track_pending_attempt = conn->client_ctx.settings != NULL && conn->client_ctx.settings->internal.toniebox2SettingsDesiredPending;
-    if (mqtt_publish_settings_desired_to_connection(conn, track_pending_attempt))
-    {
-        mqtt_server_publish_fresh_tonies(&conn->client_ctx);
-    }
+    mqtt_publish_settings_desired_to_connection(conn, track_pending_attempt);
+    mqtt_server_publish_fresh_tonies(&conn->client_ctx);
     return NO_ERROR;
 }
 
 static error_t handle_mqtt_publish_settings_confirm(MqttClientConnection *conn, MqttMessageType type, const char *topic, const uint8_t *payload, size_t payload_len)
 {
-    if (!conn->box_connection || conn->client_ctx.settings == NULL)
-    {
-        TRACE_INFO("Ignoring settings confirm from non-box MQTT connection\r\n");
-        return NO_ERROR;
-    }
-
-    cJSON *json = cJSON_ParseWithLength((const char *)payload, payload_len);
-    if (json == NULL)
-    {
-        TRACE_WARNING("MQTT settings confirm payload is not valid JSON for %s\r\n", conn->client_ctx.settings->commonName);
-        return NO_ERROR;
-    }
-
-    settings_t *settings = conn->client_ctx.settings;
-    size_t legacy_fields = mqtt_count_legacy_toniebox2_confirm_values(json);
-    cJSON *settings_applied = cJSON_GetObjectItemCaseSensitive(json, "settings_applied");
-    bool_t legacy_settings_applied = cJSON_IsTrue(settings_applied);
-    cJSON *history = cJSON_GetObjectItemCaseSensitive(json, "toniebox_history");
-
-    if (cJSON_IsObject(history))
-    {
-        size_t acked = 0;
-        size_t missing = 0;
-        size_t stale = 0;
-        size_t remaining = 0;
-        mqtt_ack_toniebox2_settings_history(settings, history, &acked, &missing, &stale, &remaining);
-        TRACE_INFO("MQTT settings confirm for %s overlay=%u: acked=%" PRIuSIZE " missing=%" PRIuSIZE " stale=%" PRIuSIZE " remaining=%" PRIuSIZE "\r\n",
-                   settings->commonName,
-                   (unsigned)settings->internal.overlayNumber,
-                   acked,
-                   missing,
-                   stale,
-                   remaining);
-    }
-    else
-    {
-        TRACE_INFO("MQTT settings confirm for %s overlay=%u without toniebox_history; pending unchanged (settings_applied=%s legacy_fields=%" PRIuSIZE ")\r\n",
-                   settings->commonName,
-                   (unsigned)settings->internal.overlayNumber,
-                   legacy_settings_applied ? "true" : "false",
-                   legacy_fields);
-    }
-
-    if (legacy_settings_applied || legacy_fields > 0)
-    {
-        TRACE_INFO("MQTT settings confirm for %s overlay=%u contains legacy confirm fields; local settings are not overwritten\r\n",
-                   settings->commonName,
-                   (unsigned)settings->internal.overlayNumber);
-    }
-
-    cJSON_Delete(json);
-    return NO_ERROR;
+    return mqtt_process_settings_confirm(conn, payload, payload_len, FALSE,
+                                         NULL, NULL, NULL);
 }
 
 static error_t handle_mqtt_publish_app_reply_bedtime_state(MqttClientConnection *conn, MqttMessageType type, const char *topic, const uint8_t *payload, size_t payload_len)
@@ -2203,6 +2525,15 @@ static error_t handle_mqtt_publish_app_reply_bedtime_state(MqttClientConnection 
             sequence = last_stl->sequence;
             payload_hash = last_stl->payload_hash;
             correlation = age <= MQTT_APP_CONTROL_REPLY_WINDOW_SEC ? "matched" : "stale";
+            if (age <= MQTT_APP_CONTROL_REPLY_WINDOW_SEC)
+            {
+                conn->observer_local_reply_matched = TRUE;
+                last_stl->valid = FALSE;
+            }
+            else
+            {
+                last_stl->valid = FALSE;
+            }
         }
     }
 
@@ -2408,12 +2739,24 @@ static bool_t mqtt_match_app_control_ping(uint8_t overlay_id, const char *reques
     }
 
     MqttAppControlPingState *state = &app_control_ping_state[overlay_id];
-    if (!state->valid || osStrcmp(state->request_id, request_id) != 0)
+    if (!state->valid)
     {
         return FALSE;
     }
 
-    *round_trip_ms = (uint32_t)(osGetSystemTime() - state->sent_at);
+    uint32_t elapsed_ms = (uint32_t)(osGetSystemTime() - state->sent_at);
+    if (elapsed_ms > MQTT_APP_CONTROL_REPLY_WINDOW_SEC *
+                         MQTT_MILLISECONDS_PER_SECOND)
+    {
+        state->valid = FALSE;
+        return FALSE;
+    }
+    if (osStrcmp(state->request_id, request_id) != 0)
+    {
+        return FALSE;
+    }
+
+    *round_trip_ms = elapsed_ms;
     state->valid = FALSE;
     return TRUE;
 }
@@ -2445,6 +2788,10 @@ static error_t handle_mqtt_publish_app_reply_pong(MqttClientConnection *conn, Mq
     uint32_t round_trip_ms = 0;
     bool_t round_trip_ms_valid = mqtt_match_app_control_ping(conn->client_ctx.settings->internal.overlayNumber,
                                                              request_id->valuestring, &round_trip_ms);
+    if (round_trip_ms_valid)
+    {
+        conn->observer_local_reply_matched = TRUE;
+    }
     tbs_toniebox2_pong(&conn->client_ctx, request_id->valuestring, round_trip_ms_valid, round_trip_ms);
     TRACE_INFO("MQTT pong for %s overlay=%u requestId=%s roundTripMs=%s%u\r\n",
                conn->client_ctx.settings->commonName,
@@ -2574,8 +2921,13 @@ static error_t handle_mqtt_publish_playback_state(MqttClientConnection *conn, Mq
     }
 
     cJSON *tonie = cJSON_GetObjectItemCaseSensitive(json, "tonie");
+    const char *previous_ruid = conn->client_ctx.state != NULL &&
+                                        conn->client_ctx.state->playback_state.ruid_valid
+                                    ? conn->client_ctx.state->playback_state.ruid
+                                    : NULL;
     if (cJSON_IsNull(tonie))
     {
+        v3_tap_playback_observe(settings, previous_ruid, NULL, FALSE, 0);
         tbs_toniebox2_playback_state(&conn->client_ctx, NULL, false, 0, false, 0, false, 0, NULL);
         TRACE_INFO("MQTT playback-state for %s overlay=%u: stopped\r\n",
                    settings->commonName,
@@ -2624,6 +2976,12 @@ static error_t handle_mqtt_publish_playback_state(MqttClientConnection *conn, Mq
         chapter_duration_text[sizeof(chapter_duration_text) - 1] = '\0';
     }
 
+    v3_tap_playback_observe(settings,
+                            previous_ruid,
+                            tonie->valuestring,
+                            content_version_valid && content_version <= UINT32_MAX,
+                            (uint32_t)content_version);
+
     tbs_toniebox2_playback_state(&conn->client_ctx,
                                  tonie->valuestring,
                                  content_version_valid,
@@ -2633,7 +2991,6 @@ static error_t handle_mqtt_publish_playback_state(MqttClientConnection *conn, Mq
                                  chapter_until_ms_valid,
                                  chapter_until_ms,
                                  chapter_duration_valid ? chapter_duration : NULL);
-
     TRACE_INFO("MQTT playback-state for %s overlay=%u: tonie=%s contentVersion=%s chapter=%s chapterUntilMs=%s chapterDuration=%s\r\n",
                settings->commonName,
                (unsigned)settings->internal.overlayNumber,
@@ -2666,8 +3023,10 @@ static error_t handle_mqtt_publish_generic(MqttClientConnection *conn, MqttMessa
 
 static const MqttHandlerEntry mqtt_handlers[] = {
     {MQTT_MSG_CONNECT, NULL, &handle_mqtt_connect},
+    {MQTT_MSG_PUBACK, NULL, &handle_mqtt_puback},
     {MQTT_MSG_PINGREQ, NULL, &handle_mqtt_pingreq},
     {MQTT_MSG_SUBSCRIBE, NULL, &handle_mqtt_subscribe},
+    {MQTT_MSG_UNSUBSCRIBE, NULL, &handle_mqtt_unsubscribe},
     {MQTT_MSG_DISCONNECT, NULL, &handle_mqtt_disconnect},
     {MQTT_MSG_PUBLISH, "toniebox/+/logs", &handle_mqtt_publish_logs},
     {MQTT_MSG_PUBLISH, "toniebox/+/claim/+", &handle_mqtt_publish_claim},
@@ -2688,6 +3047,7 @@ static const MqttHandlerEntry mqtt_handlers[] = {
 
 static const MqttHandlerEntry mqtt_passthrough_observer_handlers[] = {
     {MQTT_MSG_PUBLISH, "toniebox/+/claim/+", &handle_mqtt_publish_claim},
+    {MQTT_MSG_PUBLISH, "toniebox/+/logs", &handle_mqtt_publish_logs},
     {MQTT_MSG_PUBLISH, "toniebox/+/settings/confirm", &handle_mqtt_publish_settings_confirm},
     {MQTT_MSG_PUBLISH, "toniebox/+/app-reply/bedtime-state", &handle_mqtt_publish_app_reply_bedtime_state},
     {MQTT_MSG_PUBLISH, "toniebox/+/app-reply/pong", &handle_mqtt_publish_app_reply_pong},
@@ -2701,12 +3061,22 @@ static const MqttHandlerEntry mqtt_passthrough_observer_handlers[] = {
     {MQTT_MSG_PUBLISH, "toniebox/+/volume/state", &handle_mqtt_publish_volume_state},
 };
 
-static void mqtt_passthrough_observe_publish(void *context, bool_t box_to_upstream,
-                                             const char *topic, const uint8_t *payload,
-                                             size_t payload_len, uint8_t qos)
+static error_t mqtt_passthrough_observe_publish(
+    void *context, bool_t box_to_upstream, const char *topic,
+    const uint8_t *payload, size_t payload_len, uint8_t qos,
+    tb2_mqtt_observer_result_t *result)
 {
     MqttClientConnection *conn = context;
     const char *direction = box_to_upstream ? "box_to_upstream" : "upstream_to_box";
+    if (result == NULL)
+        return ERROR_INVALID_PARAMETER;
+    result->action = TB2_MQTT_OBSERVER_FORWARD;
+    result->payload = NULL;
+    result->payload_len = 0;
+    result->filter_id = NULL;
+    result->capture_action = NULL;
+    result->locally_processed = FALSE;
+
     mqtt_trace_full_publish(direction, topic, payload, payload_len, qos);
 
     size_t preview_len = payload_len < MQTT_LOG_INLINE_PAYLOAD_SIZE ? payload_len :
@@ -2718,15 +3088,49 @@ static void mqtt_passthrough_observe_publish(void *context, bool_t box_to_upstre
 
     if (!box_to_upstream || conn == NULL)
     {
-        return;
+        return NO_ERROR;
     }
     mqtt_connection_update_context(conn, topic);
+
+    if (mqtt_topic_match("toniebox/+/settings/confirm", topic))
+    {
+        bool_t matched = FALSE;
+        error_t error = mqtt_process_settings_confirm(
+            conn, payload, payload_len, TRUE, &matched, &result->payload,
+            &result->payload_len);
+        if (error)
+            return error;
+        if (matched)
+        {
+            result->locally_processed = TRUE;
+            result->action = result->payload != NULL ?
+                                 TB2_MQTT_OBSERVER_REWRITE :
+                                 TB2_MQTT_OBSERVER_CONSUME;
+            result->filter_id = "local_control.settings_confirm";
+            result->capture_action = result->payload != NULL ?
+                                         "local_response_rewrite" :
+                                         "local_response_consume";
+            TRACE_INFO("MQTT local settings confirmation %s for %s overlay=%u\r\n",
+                       result->payload != NULL ? "partially forwarded" : "consumed",
+                       mqtt_connection_common_name(conn),
+                       (unsigned)mqtt_connection_overlay_id(conn));
+        }
+        else
+        {
+            TRACE_DEBUG("MQTT settings confirmation does not match a local pending revision; forwarding topic='%s'\r\n",
+                        topic);
+        }
+        return NO_ERROR;
+    }
+
+    conn->observer_local_reply_matched = FALSE;
     for (size_t i = 0; i < sizeof(mqtt_passthrough_observer_handlers) /
                             sizeof(mqtt_passthrough_observer_handlers[0]); i++)
     {
         const MqttHandlerEntry *entry = &mqtt_passthrough_observer_handlers[i];
         if (mqtt_topic_match(entry->topic, topic))
         {
+            result->locally_processed = TRUE;
             error_t error = entry->handler(conn, MQTT_MSG_PUBLISH, topic, payload, payload_len);
             if (error)
             {
@@ -2736,6 +3140,51 @@ static void mqtt_passthrough_observe_publish(void *context, bool_t box_to_upstre
             break;
         }
     }
+
+    if (conn->observer_local_reply_matched &&
+        mqtt_topic_match("toniebox/+/app-reply/#", topic))
+    {
+        result->action = TB2_MQTT_OBSERVER_CONSUME;
+        result->filter_id = "local_control.app_reply";
+        result->capture_action = "local_response_consume";
+        TRACE_INFO("MQTT local app reply consumed for %s overlay=%u topic='%s'\r\n",
+                   mqtt_connection_common_name(conn),
+                   (unsigned)mqtt_connection_overlay_id(conn), topic);
+    }
+    else if (mqtt_topic_match("toniebox/+/app-reply/#", topic))
+    {
+        TRACE_DEBUG("MQTT app reply does not match a local pending action; forwarding topic='%s'\r\n",
+                    topic);
+    }
+    return NO_ERROR;
+}
+
+static void mqtt_passthrough_observe_control(
+    void *context, tb2_mqtt_control_event_t event, uint16_t packet_id,
+    const uint8_t *payload, size_t payload_len)
+{
+    MqttClientConnection *conn = context;
+    if (conn == NULL)
+        return;
+
+    if (event == TB2_MQTT_CONTROL_LOCAL_PUBACK)
+    {
+        mqtt_handle_fresh_tonies_puback(conn, packet_id);
+        return;
+    }
+
+    bool_t unsubscribe = event == TB2_MQTT_CONTROL_UNSUBSCRIBE;
+    error_t error = mqtt_apply_subscription_packet(conn, payload, payload_len,
+                                                   unsubscribe, NULL);
+    if (error)
+    {
+        TRACE_WARNING("MQTT passthrough %s observer failed packet_id=%u error=%s code=%d\r\n",
+                      unsubscribe ? "UNSUBSCRIBE" : "SUBSCRIBE",
+                      (unsigned)packet_id, error2text(error), (int)error);
+        return;
+    }
+    if (!unsubscribe)
+        mqtt_server_publish_fresh_tonies(&conn->client_ctx);
 }
 
 void mqtt_server_task()
@@ -2766,6 +3215,12 @@ void mqtt_server_task()
                     conn->passthrough = NULL;
                     mqtt_connection_close(conn, result);
                 }
+                else if (conn->active)
+                {
+                    mqtt_touch_box_connection(conn);
+                    mqtt_publish_pending_settings_desired_to_connection(conn, TRUE, FALSE);
+                    mqtt_fresh_tonies_pump(conn);
+                }
                 continue;
             }
 
@@ -2794,7 +3249,9 @@ void mqtt_server_task()
                             settings_t *passthrough_box_settings = NULL;
                             error = tb2_mqtt_passthrough_start(conn->tlsContext, conn->socket,
                                                                &conn->passthrough, &handled,
-                                                               mqtt_passthrough_observe_publish, conn,
+                                                               mqtt_passthrough_observe_publish,
+                                                               mqtt_passthrough_observe_control,
+                                                               conn,
                                                                &passthrough_box_settings);
                             if (!error && handled)
                             {
@@ -2969,19 +3426,7 @@ void mqtt_server_task()
             {
                 mqtt_touch_box_connection(conn);
                 mqtt_publish_pending_settings_desired_to_connection(conn, TRUE, FALSE);
-                if (conn->box_connection && conn->client_ctx.settings != NULL && conn->client_ctx.settings->internal.freshnessCacheChanged)
-                {
-                    MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(conn->client_ctx.settings);
-                    if (mqtt_fresh_tonies_background_payload_already_sent(conn->client_ctx.settings))
-                    {
-                        continue;
-                    }
-                    if (state == NULL || !state->pending)
-                    {
-                        mqtt_mark_fresh_tonies_pending(conn->client_ctx.settings, "background");
-                    }
-                    mqtt_publish_fresh_tonies_to_connection(conn, conn->client_ctx.settings, TRUE, FALSE);
-                }
+                mqtt_fresh_tonies_pump(conn);
             }
         }
     }
@@ -3011,6 +3456,7 @@ void mqtt_server_task()
                 osMemset(conn, 0, sizeof(MqttClientConnection));
                 conn->socket = clientSocket;
                 conn->active = true;
+                conn->next_packet_id = UINT16_MAX;
                 conn->buffer_len = 0;
                 conn->subscription_count = 0;
                 socketSetTimeout(conn->socket, 0);
@@ -3187,19 +3633,18 @@ static bool_t mqtt_server_publish_app_control_for_overlay(uint8_t overlay_id, co
         return FALSE;
     }
 
-    char topic[128];
-    if (!mqtt_app_control_topic(settings, command, topic, sizeof(topic)))
-    {
-        return FALSE;
-    }
-
     bool_t published = FALSE;
     for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
     {
         MqttClientConnection *conn = &connections[i];
-        if (mqtt_connection_matches_box_overlay(conn, settings) && mqtt_connection_has_exact_sub(conn, topic))
+        char topic[128];
+        if (mqtt_connection_matches_box_overlay(conn, settings) &&
+            mqtt_app_control_topic(conn, command, topic, sizeof(topic)) &&
+            mqtt_connection_has_sub(conn, topic))
         {
-            if (mqtt_connection_publish(conn, topic, payload_json))
+            if (mqtt_connection_local_control_allowed(conn) &&
+                mqtt_connection_publish(conn, topic, payload_json,
+                                        "local_app_control"))
             {
                 published = TRUE;
             }
@@ -3230,16 +3675,14 @@ static bool_t mqtt_server_has_app_control_subscription(uint8_t overlay_id, const
         return FALSE;
     }
 
-    char topic[128];
-    if (!mqtt_app_control_topic(settings, command, topic, sizeof(topic)))
-    {
-        return FALSE;
-    }
-
     for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
     {
         MqttClientConnection *conn = &connections[i];
-        if (mqtt_connection_matches_box_overlay(conn, settings) && mqtt_connection_has_exact_sub(conn, topic))
+        char topic[128];
+        if (mqtt_connection_matches_box_overlay(conn, settings) &&
+            mqtt_connection_local_control_allowed(conn) &&
+            mqtt_app_control_topic(conn, command, topic, sizeof(topic)) &&
+            mqtt_connection_has_sub(conn, topic))
         {
             return TRUE;
         }
@@ -3386,29 +3829,23 @@ bool_t mqtt_server_publish_app_control_stl_for_overlay(uint8_t overlay_id, const
     return mqtt_server_publish_app_control_for_overlay(overlay_id, "stl", payload_json, TRUE);
 }
 
-static void mqtt_uid_to_ruid(uint64_t uid, char ruid[17])
+static bool_t mqtt_fresh_tonies_topic(MqttClientConnection *conn, char *topic,
+                                      size_t topic_size)
 {
-    osSnprintf(ruid, 17, "%016" PRIX64, bswap_64(uid));
-}
-
-static bool_t mqtt_fresh_tonies_topic(settings_t *settings, char *topic, size_t topic_size)
-{
-    if (settings == NULL || settings->commonName == NULL || settings->commonName[0] == '\0')
+    char topic_id[13];
+    if (!mqtt_connection_topic_id(conn, topic_id, sizeof(topic_id)))
     {
         return FALSE;
     }
 
-    osSnprintf(topic, topic_size, "toniebox/%s/fresh-tonies", settings->commonName);
+    osSnprintf(topic, topic_size, "toniebox/%s/fresh-tonies", topic_id);
     return TRUE;
 }
 
 static MqttFreshToniesPublishState *mqtt_fresh_tonies_publish_state(settings_t *settings)
 {
     if (settings == NULL || settings->internal.overlayNumber >= MAX_OVERLAYS)
-    {
         return NULL;
-    }
-
     return &fresh_tonies_publish_state[settings->internal.overlayNumber];
 }
 
@@ -3416,9 +3853,7 @@ static void mqtt_mark_fresh_tonies_pending(settings_t *settings, const char *rea
 {
     MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
     if (state == NULL)
-    {
         return;
-    }
 
     uint32_t now = (uint32_t)time(NULL);
     if (!state->pending)
@@ -3428,7 +3863,9 @@ static void mqtt_mark_fresh_tonies_pending(settings_t *settings, const char *rea
         state->coalesced_count = 0;
     }
     state->coalesced_count++;
-    osStrncpy(state->reason, reason != NULL && reason[0] != '\0' ? reason : "unknown", sizeof(state->reason) - 1);
+    osStrncpy(state->reason,
+              reason != NULL && reason[0] != '\0' ? reason : "unknown",
+              sizeof(state->reason) - 1);
     state->reason[sizeof(state->reason) - 1] = '\0';
 }
 
@@ -3436,56 +3873,270 @@ static void mqtt_clear_fresh_tonies_pending(settings_t *settings)
 {
     MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
     if (state == NULL)
-    {
         return;
-    }
-
     state->pending = FALSE;
     state->pending_since = 0;
+    state->last_delay_log_at = 0;
     state->coalesced_count = 0;
+    state->waiting_for_subscription_logged = FALSE;
     state->reason[0] = '\0';
 }
 
-static bool_t mqtt_fresh_tonies_active_playback_in_cache(settings_t *settings, const uint64_t *freshness_cache,
-                                                         size_t freshness_cache_len, char active_ruid[17])
+static MqttFreshTonieEntry *mqtt_fresh_tonie_find(
+    MqttClientConnection *conn, uint64_t uid)
 {
-    if (settings == NULL || freshness_cache == NULL || active_ruid == NULL || settings->internal.overlayNumber >= MAX_OVERLAYS)
+    MqttFreshTonieEntry *entry = conn->fresh_tonie_entries;
+    while (entry != NULL)
     {
-        return FALSE;
+        if (entry->uid == uid)
+            return entry;
+        entry = entry->next;
     }
+    return NULL;
+}
 
-    toniebox_state_t *box_state = get_toniebox_state_id(settings->internal.overlayNumber);
-    if (box_state == NULL || !box_state->playback_state.valid || !box_state->playback_state.ruid_valid)
-    {
+static bool_t mqtt_fresh_tonies_sync_connection(MqttClientConnection *conn,
+                                                settings_t *settings)
+{
+    if (!mqtt_connection_matches_box_overlay(conn, settings))
         return FALSE;
-    }
 
-    osStrncpy(active_ruid, box_state->playback_state.ruid, 16);
-    active_ruid[16] = '\0';
-    for (size_t i = 0; i < freshness_cache_len; i++)
+    MqttFreshTonieEntry *remaining = conn->fresh_tonie_entries;
+    MqttFreshTonieEntry *ordered = NULL;
+    MqttFreshTonieEntry **tail = &ordered;
+    size_t cache_len = 0;
+    uint64_t *cache = settings_get_u64_array_id(
+        "internal.freshnessCache", settings->internal.overlayNumber, &cache_len);
+    for (size_t index = 0; index < cache_len; index++)
     {
-        char cache_ruid[17];
-        mqtt_uid_to_ruid(freshness_cache[i], cache_ruid);
-        if (osStrcasecmp(cache_ruid, active_ruid) == 0)
+        bool_t duplicate = FALSE;
+        for (MqttFreshTonieEntry *seen = ordered; seen != NULL;
+             seen = seen->next)
         {
-            return TRUE;
+            if (seen->uid == cache[index])
+            {
+                duplicate = TRUE;
+                break;
+            }
+        }
+        if (duplicate)
+            continue;
+
+        MqttFreshTonieEntry *entry = NULL;
+        MqttFreshTonieEntry **cursor = &remaining;
+        while (*cursor != NULL)
+        {
+            if ((*cursor)->uid == cache[index])
+            {
+                entry = *cursor;
+                *cursor = entry->next;
+                break;
+            }
+            cursor = &(*cursor)->next;
+        }
+        if (entry == NULL)
+        {
+            entry = osAllocMem(sizeof(*entry));
+            if (entry == NULL)
+            {
+                TRACE_ERROR("MQTT fresh-tonies queue allocation failed for %s\r\n",
+                            settings->commonName);
+                *tail = remaining;
+                conn->fresh_tonie_entries = ordered;
+                return FALSE;
+            }
+            osMemset(entry, 0, sizeof(*entry));
+            entry->uid = cache[index];
+        }
+        entry->present = TRUE;
+        entry->next = NULL;
+        *tail = entry;
+        tail = &entry->next;
+    }
+
+    while (remaining != NULL)
+    {
+        MqttFreshTonieEntry *entry = remaining;
+        remaining = entry->next;
+        entry->present = FALSE;
+        if (entry == conn->fresh_tonie_inflight)
+        {
+            entry->next = NULL;
+            *tail = entry;
+            tail = &entry->next;
+        }
+        else
+        {
+            osFreeMem(entry);
         }
     }
+    conn->fresh_tonie_entries = ordered;
+    return TRUE;
+}
 
+static MqttFreshTonieEntry *mqtt_fresh_tonies_next(
+    MqttClientConnection *conn)
+{
+    MqttFreshTonieEntry *entry = conn->fresh_tonie_entries;
+    while (entry != NULL)
+    {
+        if (entry->present && !entry->delivered &&
+            entry != conn->fresh_tonie_inflight)
+        {
+            return entry;
+        }
+        entry = entry->next;
+    }
+    return NULL;
+}
+
+static bool_t mqtt_fresh_tonies_cache_contains(settings_t *settings,
+                                               uint64_t uid)
+{
+    size_t cache_len = 0;
+    uint64_t *cache = settings_get_u64_array_id(
+        "internal.freshnessCache", settings->internal.overlayNumber, &cache_len);
+    for (size_t index = 0; index < cache_len; index++)
+    {
+        if (cache[index] == uid)
+            return TRUE;
+    }
     return FALSE;
 }
 
-static bool_t mqtt_fresh_tonies_can_publish(settings_t *settings, const uint64_t *freshness_cache,
-                                            size_t freshness_cache_len, char active_ruid[17])
+static char *mqtt_build_fresh_tonie_payload(uint64_t uid)
 {
-    MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
-    if (state == NULL || !state->pending)
+    char ruid[17];
+    tb2_ruid_from_uid(uid, ruid);
+    char *payload = osAllocMem(40);
+    if (payload == NULL)
+        return NULL;
+    osSnprintf(payload, 40, "{\"tonie\":\"%s\"}", ruid);
+    return payload;
+}
+
+static bool_t mqtt_send_fresh_tonie(MqttClientConnection *conn,
+                                    MqttFreshTonieEntry *entry,
+                                    bool_t duplicate)
+{
+    settings_t *settings = conn->client_ctx.settings;
+    char topic[128];
+    if (!mqtt_fresh_tonies_topic(conn, topic, sizeof(topic)))
+        return FALSE;
+
+    char *payload = mqtt_build_fresh_tonie_payload(entry->uid);
+    if (payload == NULL)
     {
+        TRACE_ERROR("MQTT fresh-tonies payload allocation failed for %s\r\n",
+                    settings->commonName);
         return FALSE;
     }
 
+    uint16_t packet_id = duplicate ? conn->fresh_tonie_packet_id : 0;
+    bool_t published = mqtt_connection_publish_packet(
+        conn, topic, payload, 1, duplicate, &packet_id,
+        "local_freshness_publish");
+    osFreeMem(payload);
+    if (!published)
+        return FALSE;
+
+    conn->fresh_tonie_packet_id = packet_id;
+    conn->fresh_tonie_sent_at = (uint32_t)time(NULL);
+    if (!duplicate)
+    {
+        conn->fresh_tonie_inflight = entry;
+        conn->fresh_tonie_attempts = 1;
+    }
+    else
+    {
+        conn->fresh_tonie_attempts++;
+    }
+
+    MqttFreshToniesPublishState *state =
+        mqtt_fresh_tonies_publish_state(settings);
+    if (state != NULL)
+        state->last_publish_at = conn->fresh_tonie_sent_at;
+    return TRUE;
+}
+
+static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn)
+{
+    if (conn == NULL || !conn->active || !conn->box_connection ||
+        conn->client_ctx.settings == NULL)
+    {
+        return TRUE;
+    }
+
+    settings_t *settings = conn->client_ctx.settings;
+    if (!mqtt_fresh_tonies_sync_connection(conn, settings))
+        return TRUE;
+
     uint32_t now = (uint32_t)time(NULL);
-    if (now >= state->pending_since && (now - state->pending_since) < MQTT_FRESH_TONIES_DEBOUNCE_SEC)
+    if (conn->fresh_tonie_inflight != NULL)
+    {
+        if (now >= conn->fresh_tonie_sent_at &&
+            (now - conn->fresh_tonie_sent_at) <
+                MQTT_FRESH_TONIES_RETRY_INTERVAL_SEC)
+        {
+            return TRUE;
+        }
+        if (conn->fresh_tonie_attempts >= MQTT_FRESH_TONIES_MAX_ATTEMPTS)
+        {
+            char ruid[17];
+            tb2_ruid_from_uid(conn->fresh_tonie_inflight->uid, ruid);
+            TRACE_WARNING("MQTT fresh-tonies PUBACK timeout for %s ruid=%s packet_id=%u attempts=%u\r\n",
+                          settings->commonName, ruid,
+                          (unsigned)conn->fresh_tonie_packet_id,
+                          (unsigned)conn->fresh_tonie_attempts);
+            mqtt_connection_close(conn, "fresh-tonies PUBACK timeout");
+            return FALSE;
+        }
+
+        char ruid[17];
+        tb2_ruid_from_uid(conn->fresh_tonie_inflight->uid, ruid);
+        TRACE_INFO("MQTT fresh-tonies retry for %s ruid=%s packet_id=%u attempt=%u\r\n",
+                   settings->commonName, ruid,
+                   (unsigned)conn->fresh_tonie_packet_id,
+                   (unsigned)(conn->fresh_tonie_attempts + 1));
+        return mqtt_send_fresh_tonie(conn, conn->fresh_tonie_inflight, TRUE);
+    }
+
+    if (!settings->internal.freshnessCacheChanged)
+        return TRUE;
+
+    MqttFreshToniesPublishState *state =
+        mqtt_fresh_tonies_publish_state(settings);
+    if (state == NULL)
+        return TRUE;
+    if (!state->pending)
+        mqtt_mark_fresh_tonies_pending(settings, "background");
+
+    char topic[128];
+    bool_t topic_available = mqtt_fresh_tonies_topic(conn, topic, sizeof(topic));
+    if (!topic_available || !mqtt_connection_has_sub(conn, topic))
+    {
+        if (!state->waiting_for_subscription_logged)
+        {
+            TRACE_DEBUG("MQTT fresh-tonies waiting for %s reason=%s topic=%s\r\n",
+                        settings->commonName,
+                        topic_available ? "subscription" : "topic_identity",
+                        topic_available ? topic : "-");
+            state->waiting_for_subscription_logged = TRUE;
+        }
+        return TRUE;
+    }
+    state->waiting_for_subscription_logged = FALSE;
+
+    MqttFreshTonieEntry *next = mqtt_fresh_tonies_next(conn);
+    if (next == NULL)
+    {
+        mqtt_clear_fresh_tonies_pending(settings);
+        return TRUE;
+    }
+
+    now = (uint32_t)time(NULL);
+    if (now >= state->pending_since &&
+        (now - state->pending_since) < MQTT_FRESH_TONIES_DEBOUNCE_SEC)
     {
         if (state->last_delay_log_at != now)
         {
@@ -3496,300 +4147,127 @@ static bool_t mqtt_fresh_tonies_can_publish(settings_t *settings, const uint64_t
                        (unsigned)MQTT_FRESH_TONIES_DEBOUNCE_SEC);
             state->last_delay_log_at = now;
         }
-        return FALSE;
-    }
-
-    active_ruid[0] = '\0';
-    if (mqtt_fresh_tonies_active_playback_in_cache(settings, freshness_cache, freshness_cache_len, active_ruid))
-    {
-        if (state->last_delay_log_at != now)
-        {
-            TRACE_INFO("MQTT fresh-tonies held for %s reason=%s activePlayback=%s coalesced=%u\r\n",
-                       settings->commonName,
-                       state->reason[0] != '\0' ? state->reason : "unknown",
-                       active_ruid,
-                       (unsigned)state->coalesced_count);
-            state->last_delay_log_at = now;
-        }
-        return FALSE;
-    }
-
-    return TRUE;
-}
-
-static void mqtt_finish_fresh_tonies_publish(settings_t *settings, size_t freshness_cache_len, const char *active_ruid)
-{
-    MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
-    if (state == NULL)
-    {
-        return;
-    }
-
-    uint32_t now = (uint32_t)time(NULL);
-    TRACE_INFO("MQTT fresh-tonies invalidation sent for %s reason=%s entries=%" PRIuSIZE " coalesced=%u activePlayback=%s at=%u, keeping pending until content request\r\n",
-               settings->commonName,
-               state->reason[0] != '\0' ? state->reason : "unknown",
-               freshness_cache_len,
-               (unsigned)state->coalesced_count,
-               active_ruid != NULL && active_ruid[0] != '\0' ? active_ruid : "-",
-               (unsigned)now);
-    state->last_publish_at = now;
-    state->last_delay_log_at = 0;
-    mqtt_clear_fresh_tonies_pending(settings);
-}
-
-static char *mqtt_build_fresh_tonies_payload(settings_t *settings)
-{
-    if (settings == NULL)
-    {
-        return NULL;
-    }
-
-    size_t freshnessCacheLen = 0;
-    uint64_t *freshnessCache = settings_get_u64_array_id("internal.freshnessCache", settings->internal.overlayNumber, &freshnessCacheLen);
-    if (freshnessCache == NULL || freshnessCacheLen == 0)
-    {
-        return NULL;
-    }
-
-    cJSON *array = cJSON_CreateArray();
-    if (array == NULL)
-    {
-        return NULL;
-    }
-
-    size_t unique_count = 0;
-    bool_t truncated = FALSE;
-    for (size_t i = 0; i < freshnessCacheLen; i++)
-    {
-        bool_t duplicate = FALSE;
-        for (size_t j = 0; j < i; j++)
-        {
-            if (freshnessCache[j] == freshnessCache[i])
-            {
-                duplicate = TRUE;
-                break;
-            }
-        }
-        if (duplicate)
-        {
-            continue;
-        }
-
-        if (unique_count >= MQTT_FRESH_TONIES_MAX)
-        {
-            truncated = TRUE;
-            continue;
-        }
-
-        char ruidStr[17];
-        mqtt_uid_to_ruid(freshnessCache[i], ruidStr);
-        cJSON *ruidItem = cJSON_CreateString(ruidStr);
-        if (ruidItem == NULL || !cJSON_AddItemToArray(array, ruidItem))
-        {
-            cJSON_Delete(ruidItem);
-            cJSON_Delete(array);
-            return NULL;
-        }
-        unique_count++;
-    }
-
-    if (truncated)
-    {
-        TRACE_WARNING("V3 freshness MQTT payload truncated to %u entries\r\n", MQTT_FRESH_TONIES_MAX);
-    }
-
-    char *payload = cJSON_PrintUnformatted(array);
-    cJSON_Delete(array);
-    return payload;
-}
-
-static bool_t mqtt_fresh_tonies_payload_matches_last(settings_t *settings, const char *payload, uint32_t *payload_hash, size_t *payload_len)
-{
-    MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
-    if (state == NULL || payload == NULL || !state->last_payload_valid)
-    {
-        return FALSE;
-    }
-
-    uint32_t hash = mqtt_payload_hash(payload);
-    size_t len = osStrlen(payload);
-    if (payload_hash != NULL)
-    {
-        *payload_hash = hash;
-    }
-    if (payload_len != NULL)
-    {
-        *payload_len = len;
-    }
-
-    return state->last_payload_hash == hash && state->last_payload_len == len;
-}
-
-static void mqtt_record_fresh_tonies_payload(settings_t *settings, const char *payload)
-{
-    MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
-    if (state == NULL || payload == NULL)
-    {
-        return;
-    }
-
-    state->last_payload_hash = mqtt_payload_hash(payload);
-    state->last_payload_len = osStrlen(payload);
-    state->last_payload_valid = TRUE;
-}
-
-static bool_t mqtt_fresh_tonies_background_payload_already_sent(settings_t *settings)
-{
-    MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
-    if (state == NULL || !state->last_payload_valid)
-    {
-        return FALSE;
-    }
-
-    char *payload = mqtt_build_fresh_tonies_payload(settings);
-    if (payload == NULL)
-    {
-        return FALSE;
-    }
-
-    uint32_t payload_hash = 0;
-    size_t payload_len = 0;
-    bool_t duplicate = mqtt_fresh_tonies_payload_matches_last(settings, payload, &payload_hash, &payload_len);
-    osFreeMem(payload);
-    if (!duplicate)
-    {
-        return FALSE;
-    }
-
-    uint32_t now = (uint32_t)time(NULL);
-    if (state->last_duplicate_log_at == 0 ||
-        now < state->last_duplicate_log_at ||
-        (now - state->last_duplicate_log_at) >= MQTT_FRESH_TONIES_DUPLICATE_LOG_INTERVAL_SEC)
-    {
-        TRACE_INFO("MQTT fresh-tonies background duplicate suppressed for %s hash=%08" PRIX32 " len=%" PRIuSIZE "\r\n",
-                   settings->commonName,
-                   payload_hash,
-                   payload_len);
-        state->last_duplicate_log_at = now;
-    }
-
-    mqtt_clear_fresh_tonies_pending(settings);
-    return TRUE;
-}
-
-static bool_t mqtt_publish_fresh_tonies_to_connection(MqttClientConnection *conn, settings_t *settings, bool_t finish_on_success, bool_t allow_duplicate)
-{
-    if (!mqtt_connection_matches_box_overlay(conn, settings))
-    {
-        return FALSE;
-    }
-
-    char topic[128];
-    if (!mqtt_fresh_tonies_topic(settings, topic, sizeof(topic)))
-    {
-        return FALSE;
-    }
-    if (!mqtt_connection_has_sub(conn, topic))
-    {
-        return FALSE;
-    }
-
-    size_t freshnessCacheLen = 0;
-    uint64_t *freshnessCache = settings_get_u64_array_id("internal.freshnessCache", settings->internal.overlayNumber, &freshnessCacheLen);
-    if (freshnessCacheLen == 0)
-    {
-        settings_set_bool_id("internal.freshnessCacheChanged", false, settings->internal.overlayNumber);
-        mqtt_clear_fresh_tonies_pending(settings);
         return TRUE;
     }
 
-    char active_ruid[17];
-    if (!mqtt_fresh_tonies_can_publish(settings, freshnessCache, freshnessCacheLen, active_ruid))
+    char ruid[17];
+    tb2_ruid_from_uid(next->uid, ruid);
+    TRACE_INFO("MQTT fresh-tonies send for %s ruid=%s reason=%s\r\n",
+               settings->commonName, ruid,
+               state->reason[0] != '\0' ? state->reason : "unknown");
+    return mqtt_send_fresh_tonie(conn, next, FALSE);
+}
+
+static bool_t mqtt_handle_fresh_tonies_puback(MqttClientConnection *conn,
+                                              uint16_t packet_id)
+{
+    if (conn == NULL || !conn->active || conn->fresh_tonie_inflight == NULL ||
+        packet_id != conn->fresh_tonie_packet_id)
     {
         return FALSE;
     }
 
-    char *payload = mqtt_build_fresh_tonies_payload(settings);
-    if (payload == NULL)
-    {
-        return FALSE;
-    }
-    if (!allow_duplicate && mqtt_fresh_tonies_payload_matches_last(settings, payload, NULL, NULL))
-    {
-        osFreeMem(payload);
-        mqtt_clear_fresh_tonies_pending(settings);
-        return TRUE;
-    }
+    settings_t *settings = conn->client_ctx.settings;
+    char ruid[17];
+    tb2_ruid_from_uid(conn->fresh_tonie_inflight->uid, ruid);
+    TRACE_INFO("MQTT fresh-tonies acknowledged for %s ruid=%s packet_id=%u attempts=%u\r\n",
+               settings != NULL ? settings->commonName : "-", ruid,
+               (unsigned)packet_id, (unsigned)conn->fresh_tonie_attempts);
 
-    bool_t published = mqtt_connection_publish(conn, topic, payload);
-    if (published)
+    conn->fresh_tonie_inflight->delivered = TRUE;
+    conn->fresh_tonie_inflight = NULL;
+    conn->fresh_tonie_packet_id = 0;
+    conn->fresh_tonie_attempts = 0;
+    conn->fresh_tonie_sent_at = 0;
+
+    if (settings != NULL)
     {
-        mqtt_record_fresh_tonies_payload(settings, payload);
+        mqtt_fresh_tonies_sync_connection(conn, settings);
+        if (mqtt_fresh_tonies_next(conn) == NULL)
+            mqtt_clear_fresh_tonies_pending(settings);
     }
-    osFreeMem(payload);
-    if (published && finish_on_success)
-    {
-        mqtt_finish_fresh_tonies_publish(settings, freshnessCacheLen, active_ruid);
-    }
-    return published;
+    return TRUE;
 }
 
 bool_t mqtt_server_publish_fresh_tonies(client_ctx_t *client_ctx)
 {
-    if (client_ctx == NULL || client_ctx->settings == NULL || client_ctx->mqtt_connection == NULL)
-    {
-        return FALSE;
-    }
-    if (!client_ctx->settings->internal.freshnessCacheChanged)
+    if (client_ctx == NULL || client_ctx->settings == NULL ||
+        client_ctx->mqtt_connection == NULL ||
+        !client_ctx->settings->internal.freshnessCacheChanged)
     {
         return FALSE;
     }
 
+    MqttClientConnection *conn =
+        (MqttClientConnection *)client_ctx->mqtt_connection;
+    if (!mqtt_fresh_tonies_sync_connection(conn, client_ctx->settings))
+        return FALSE;
     mqtt_mark_fresh_tonies_pending(client_ctx->settings, "connection");
-    return mqtt_publish_fresh_tonies_to_connection((MqttClientConnection *)client_ctx->mqtt_connection, client_ctx->settings, TRUE, TRUE);
+    return TRUE;
 }
 
 bool_t mqtt_server_publish_fresh_tonies_for_overlay(uint8_t overlay_id)
 {
     settings_t *settings = get_settings_id(overlay_id);
-    if (settings == NULL || !settings->internal.config_used || !settings->internal.freshnessCacheChanged)
+    if (settings == NULL || !settings->internal.config_used ||
+        !settings->internal.freshnessCacheChanged)
     {
         return FALSE;
     }
 
-    size_t freshnessCacheLen = 0;
-    settings_get_u64_array_id("internal.freshnessCache", settings->internal.overlayNumber, &freshnessCacheLen);
-    if (freshnessCacheLen == 0)
+    size_t cache_len = 0;
+    settings_get_u64_array_id("internal.freshnessCache",
+                              settings->internal.overlayNumber, &cache_len);
+    if (cache_len == 0)
     {
-        settings_set_bool_id("internal.freshnessCacheChanged", false, settings->internal.overlayNumber);
+        settings_set_bool_id("internal.freshnessCacheChanged", false,
+                             settings->internal.overlayNumber);
         mqtt_clear_fresh_tonies_pending(settings);
         return TRUE;
     }
 
     mqtt_mark_fresh_tonies_pending(settings, "overlay");
-
-    bool_t published = FALSE;
-    for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
+    for (size_t index = 0; index < MQTT_MAX_CONNECTIONS; index++)
     {
-        MqttClientConnection *conn = &connections[i];
-        if (mqtt_publish_fresh_tonies_to_connection(conn, settings, FALSE, TRUE))
+        MqttClientConnection *conn = &connections[index];
+        if (mqtt_connection_matches_box_overlay(conn, settings))
+            mqtt_fresh_tonies_sync_connection(conn, settings);
+    }
+
+    TRACE_INFO("MQTT fresh-tonies invalidation queued for %s entries=%" PRIuSIZE "\r\n",
+               settings->commonName, cache_len);
+    return TRUE;
+}
+
+bool_t mqtt_server_publish_fresh_tonie_for_overlay(uint8_t overlay_id,
+                                                   uint64_t uid)
+{
+    settings_t *settings = get_settings_id(overlay_id);
+    if (settings == NULL || !settings->internal.config_used ||
+        !settings->internal.freshnessCacheChanged ||
+        !mqtt_fresh_tonies_cache_contains(settings, uid))
+    {
+        return FALSE;
+    }
+
+    mqtt_mark_fresh_tonies_pending(settings, "tonie");
+    for (size_t index = 0; index < MQTT_MAX_CONNECTIONS; index++)
+    {
+        MqttClientConnection *conn = &connections[index];
+        if (!mqtt_connection_matches_box_overlay(conn, settings) ||
+            !mqtt_fresh_tonies_sync_connection(conn, settings))
         {
-            published = TRUE;
+            continue;
         }
+
+        MqttFreshTonieEntry *entry = mqtt_fresh_tonie_find(conn, uid);
+        if (entry != NULL && entry != conn->fresh_tonie_inflight)
+            entry->delivered = FALSE;
     }
 
-    if (published)
-    {
-        mqtt_finish_fresh_tonies_publish(settings, freshnessCacheLen, NULL);
-    }
-    else
-    {
-        MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
-        TRACE_INFO("MQTT fresh-tonies invalidation queued for %s reason=%s coalesced=%u, not sent yet\r\n",
-                   settings->commonName,
-                   state != NULL && state->reason[0] != '\0' ? state->reason : "unknown",
-                   state != NULL ? (unsigned)state->coalesced_count : 0);
-    }
-    return published;
+    char ruid[17];
+    tb2_ruid_from_uid(uid, ruid);
+    TRACE_INFO("MQTT fresh-tonies targeted invalidation queued for %s ruid=%s\r\n",
+               settings->commonName, ruid);
+    return TRUE;
 }

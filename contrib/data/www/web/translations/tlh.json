@@ -25,6 +25,14 @@
             "cancel": "qIl"
         },
         "delete": "Qaw'",
+        "nativeCollection": {
+            "deleteTitle": "TB2 ghommey Qaw'",
+            "deleteWarning": "ghomvam lo'bogh rarghachmey chu'laHbe'choH. TB2 library cache chu'lu'chugh, TONIES ngaSbogh Dochmey qengqa'laH TeddyCloud.",
+            "downloadFailed": "ghom qengHa' Qagh",
+            "downloadZip": "ghom ZIP qengHa'",
+            "open": "ghom poSmoH",
+            "summary": "{{count}} 'ay'mey · {{size}}"
+        },
         "encodeFiles": {
             "cancel": "qIl"
         },
@@ -104,6 +112,8 @@
             "encoding": "Encoding",
             "webui": "WebUI",
             "cloudContent": "Cloud De'",
+            "bothGenerations": "Toniebox Segh Hoch",
+            "localIciControl": "ICI labtaHvIS naDev SeH",
             "mqtt": "MQTT / Home Assistant",
             "diagnostics": "Qagh nej",
             "tonieJson": "Tonie De'",
@@ -175,6 +185,10 @@
             "mqtt_client_upstream__passthrough_enabled": {
                 "label": "ICI proxy QotlhHa'"
             },
+            "mqtt_client_upstream__local_control_enabled": {
+                "label": "ICI labtaHvIS TeddyCloud SeH chaw'",
+                "description": "ICI proxy QaptaHvIS TB2 DuHmey app SeH je ngeH TeddyCloud"
+            },
             "mqtt_server__enabled": {
                 "label": "MQTT De'wI' QotlhHa'"
             }
@@ -194,6 +208,30 @@
         "delete": "Qaw'",
         "editTonieboxSettingsModal": {
             "editTonieboxSettingsLabel": "DuHmey"
+        },
+        "live": {
+            "cancelPlaylistEdit": "qIl",
+            "chapter": "'ay' {{number}}",
+            "chapterDuration": "poH {{time}}",
+            "chapterTitle": "'ay' {{number}} pong",
+            "chapters": "'ay'mey",
+            "customContent": "De' le'",
+            "editPlaylist": "choH",
+            "playlistTypes": {
+                "directTaf": "nIqHom le'",
+                "tap": "TeddyAudio QonoS"
+            },
+            "shuffleModes": {
+                "ordered": "tlheghDaq",
+                "all": "Hoch DuD",
+                "one": "pagh nabbe' wIv"
+            },
+            "playlistSaveFailed": "QoQ tetlh polbe'lu'",
+            "playlistSaveFailedDetails": "pongmey polmeH Qagh tu'lu'",
+            "playlistSaved": "QoQ tetlh pollu'",
+            "playlistSavedDetails": "De' pong 'ay'mey pong je polta'",
+            "playlistTitle": "De' pong",
+            "savePlaylist": "Hoch pol"
         }
     },
     "tonies": {
@@ -222,7 +260,13 @@
         },
         "tapEditor": {
             "cancel": "qIl",
-            "save": "pol"
+            "save": "pol",
+            "shuffle": "chu'ghach tlhegh",
+            "shuffleModes": {
+                "ordered": "tlhegh",
+                "all": "Hoch Hoch DuD",
+                "one": "wa' wIv lo' SuD"
+            }
         },
         "teddystudio": {
             "cancel": "qIl",

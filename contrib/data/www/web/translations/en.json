@@ -345,6 +345,14 @@
         "deleteMultiple": "Delete {{selectedRowCount}} selected rows",
         "downloadFile": "Download File",
         "downloadFileAsOgg": "Download TAF as *.ogg",
+        "nativeCollection": {
+            "deleteTitle": "Delete TB2 collection",
+            "deleteWarning": "Assignments using this collection may stop playing. If TB2 library caching is enabled, TONIES content can be imported again later.",
+            "downloadFailed": "Collection download failed",
+            "downloadZip": "Download collection as ZIP",
+            "open": "Open collection",
+            "summary": "{{count}} chapters · {{size}}"
+        },
         "encodeFiles": {
             "addFiles": "Add files",
             "cancel": "Cancel",
@@ -642,6 +650,58 @@
                         "01pluginFeature": "extend TeddyCloud functionality by custom plugins"
                     },
                     "title": "TeddyCloud Plugins"
+                },
+                "15tb2Management": {
+                    "items": {
+                        "01registration": "automatically recognize Toniebox 2 devices and manage them with individual box overlays",
+                        "02liveState": "show playback, volume, battery, headphones, and additional live state",
+                        "03liveControls": "control playback, volume, ping, bedtime, and additional box functions directly",
+                        "04generationSettings": "clearly separate settings and certificates into Global, TB1, and TB2"
+                    },
+                    "title": "Manage Toniebox 2 devices"
+                },
+                "16tb2Content": {
+                    "items": {
+                        "01v3Routing": "content-aware V3 cloud path with local source-of-truth and NoCloud control",
+                        "02nativeCache": "cache original TONIES manifests and Ogg/Opus chapters with atomic version activation",
+                        "03customContent": "deliver private TAF content to TB2 as independent, cache-safe Ogg/Opus chapters",
+                        "04freshness": "update changed content through HTTPS freshness and reliable MQTT QoS 1 notifications",
+                        "05download": "download original content through V1/V2 or V3 according to the box generation",
+                        "06library": "import complete TB2 original content natively into the library with content-based deduplication"
+                    },
+                    "title": "Native TB2 content delivery"
+                },
+                "17iciMqtt": {
+                    "items": {
+                        "01serverAndUpstream": "integrated TLS MQTT server with optional transparent ICI forwarding",
+                        "02observer": "locally observe claims, playback, volume, settings, metrics, and box status",
+                        "03localControl": "safely use TeddyCloud controls while an ICI connection is active",
+                        "04filters": "control topics, metrics, and log sources with bidirectional forwarding filters",
+                        "05privacy": "automatically remove private and NoCloud-protected content from upstream traffic",
+                        "06capture": "fully diagnose and capture MQTT packets, filter decisions, and TLS connection details"
+                    },
+                    "title": "ICI MQTT for Toniebox 2"
+                },
+                "18tb2Https": {
+                    "items": {
+                        "01modes": "choose between the content-aware V3 cloud path and a transparent DEV monitor",
+                        "02capture": "capture complete HTTP requests, responses, payloads, and status codes",
+                        "03status": "show BOX, ICI, TONIES, and TeddyCloud status plus the active HTTPS mode in the navbar"
+                    },
+                    "title": "TB2 HTTPS modes and diagnostics"
+                },
+                "19customPlaylists": {
+                    "items": {
+                        "01contentPlaylists": "create and edit content-specific TAP playlists for custom TAF files",
+                        "02chapterMetadata": "show custom chapter titles and saved chapter durations in playback and playlists"
+                    },
+                    "title": "Advanced custom content"
+                },
+                "20languages": {
+                    "items": {
+                        "01klingon": "curated Klingon support in the WebUI"
+                    },
+                    "title": "Additional language"
                 }
             },
             "futureFeatures": {
@@ -1063,6 +1123,8 @@
             "encoding": "Encoding",
             "webui": "WebUI",
             "cloudContent": "Cross-generation cloud and content options",
+            "bothGenerations": "Both generations",
+            "localIciControl": "Local control during ICI upstream",
             "mqtt": "MQTT and Home Assistant",
             "diagnostics": "Diagnostics",
             "tonieJson": "Tonie data",
@@ -1719,6 +1781,10 @@
             "mqtt_client_upstream__passthrough_enabled": {
                 "label": "Enable transparent capture forwarder",
                 "description": "Forward MQTT traffic unchanged while recording a full local capture"
+            },
+            "mqtt_client_upstream__local_control_enabled": {
+                "label": "Allow TeddyCloud control during ICI upstream",
+                "description": "Allow TeddyCloud to send local TB2 settings and app controls while the ICI proxy is active"
             },
             "mqtt_client_upstream__port": {
                 "label": "MQTT Server port",
@@ -2717,17 +2783,37 @@
             "bedtimeDuration": "{{minutes}} minutes",
             "bedtimeUnknown": "Bedtime state unknown",
             "bedtimeUntil": "until {{time}}",
+            "cancelPlaylistEdit": "Cancel",
             "chapter": "Chapter {{number}}",
+            "chapterDuration": "Duration {{time}}",
+            "chapterTitle": "Title for chapter {{number}}",
             "chapters": "Chapters",
             "commandFailed": "Toniebox command failed",
             "commandFailedDetails": "The command could not be sent",
+            "customContent": "Custom content",
+            "editPlaylist": "Edit",
+            "playlistTypes": {
+                "directTaf": "Custom content",
+                "tap": "TeddyAudio playlist"
+            },
+            "shuffleModes": {
+                "ordered": "In order",
+                "all": "Shuffled",
+                "one": "Random selection"
+            },
             "headphonesConnected": "Connected headphones: {{count}}",
             "next": "Next",
             "pause": "Pause",
             "playbackUnknown": "Playback state unknown",
             "playChapter": "Play chapter {{number}}",
+            "playlistSaveFailed": "Could not save playlist",
+            "playlistSaveFailedDetails": "The playlist titles could not be saved",
+            "playlistSaved": "Playlist saved",
+            "playlistSavedDetails": "The title and all chapter names were saved",
+            "playlistTitle": "Content title",
             "previous": "Previous",
             "restart": "Restart current playback",
+            "savePlaylist": "Save all",
             "start": "Play",
             "unknownTonie": "Unknown Tonie",
             "volume": "Volume"
@@ -3187,6 +3273,7 @@
         "noPlayableContentHint": "There is no content available to play. Either it's not assigned or data is missing from the Boxine/Tonies cloud. Place the figurine on the box to fix this.",
         "selectFileModal": {
             "cancel": "Cancel",
+            "nativeCollection": "TB2 origin · Ogg/Opus · {{count}} chapters · {{hash}}",
             "ok": "OK",
             "selectFile": "Select file"
         },
@@ -3224,6 +3311,12 @@
             "addFile": "Add file",
             "audioId": "Audio ID",
             "audioIdTooltip": "Sets the audio id if the file is cached. Set it to 0 to force recreating the cached file",
+            "shuffle": "Playback order",
+            "shuffleModes": {
+                "ordered": "In order",
+                "all": "Shuffle all",
+                "one": "Random selection"
+            },
             "cancel": "Cancel",
             "create": "Create",
             "fileNameContentFile": "Description",

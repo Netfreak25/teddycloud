@@ -20,6 +20,7 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         "mqtt_client_upstream.capture_max_mib",
         "mqtt_client_upstream.enabled",
         "mqtt_client_upstream.passthrough_enabled",
+        "mqtt_client_upstream.local_control_enabled",
         "cloud.remote_port_tb2",
         "cloud.remote_hostname_tb2",
         "cloud.tb2_capture_dir",
@@ -98,6 +99,9 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         mqtt_passthrough = options["mqtt_client_upstream.passthrough_enabled"]
         self.assertFalse(mqtt_passthrough["valueInit"])
         self.assertTrue(mqtt_passthrough["readOnly"])
+        mqtt_local_control = options["mqtt_client_upstream.local_control_enabled"]
+        self.assertFalse(mqtt_local_control["valueInit"])
+        self.assertFalse(mqtt_local_control["readOnly"])
         self.assertEqual(options["mqtt_client_upstream.port"]["valueInit"], 8883)
         self.assertEqual(
             options["mqtt_client_upstream.hostname"]["valueInit"],
@@ -199,6 +203,7 @@ class UpstreamSettingsApiTests(unittest.TestCase):
             "mqtt_client_upstream.capture_max_mib": "128",
             "mqtt_client_upstream.enabled": "true",
             "mqtt_client_upstream.passthrough_enabled": "true",
+            "mqtt_client_upstream.local_control_enabled": "true",
             "cloud.remote_port_tb2": "14443",
             "cloud.remote_hostname_tb2": "tb2-https-test.invalid",
             "cloud.tb2_capture_dir": "data/diagnostics/tb2-test-capture",
@@ -214,6 +219,7 @@ class UpstreamSettingsApiTests(unittest.TestCase):
             "mqtt_client_upstream.capture_max_mib": "129",
             "mqtt_client_upstream.enabled": "true",
             "mqtt_client_upstream.passthrough_enabled": "false",
+            "mqtt_client_upstream.local_control_enabled": "false",
             "cloud.remote_port_tb2": "14444",
             "cloud.remote_hostname_tb2": "tb2-runtime-only.invalid",
             "cloud.tb2_capture_dir": "data/diagnostics/tb2-runtime-only",

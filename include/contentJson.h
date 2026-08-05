@@ -15,13 +15,17 @@ typedef enum
     CT_SOURCE_TAP_STREAM,
     CT_SOURCE_TAP_CACHED,
     CT_SOURCE_STREAM,
+    CT_SOURCE_NATIVE_COLLECTION,
 } ct_source_t;
 
 typedef struct
 {
     bool_t live;
     bool_t nocloud;
+    bool_t nocloud_manual;
+    bool_t nocloud_source;
     char *source;
+    uint32_t source_revision;
     size_t skip_seconds;
     bool_t cache;
     char *cloud_ruid;
@@ -50,6 +54,7 @@ typedef struct
 {
     size_t count;
     uint32_t *pos;
+    uint32_t total_seconds;
 } track_positions_t;
 
 typedef struct
@@ -74,5 +79,8 @@ typedef struct
 
 error_t load_content_json(const char *content_path, contentJson_t *content_json, bool create_if_missing, settings_t *settings);
 error_t save_content_json(const char *json_path, contentJson_t *content_json);
+void content_json_refresh_nocloud(contentJson_t *content_json);
+void content_json_set_manual_nocloud(contentJson_t *content_json, bool_t enabled);
+void content_json_set_source_nocloud(contentJson_t *content_json, bool_t enabled);
 void content_json_update_model(contentJson_t *content_json, uint32_t audio_id, uint8_t *hash);
 void free_content_json(contentJson_t *content_json);

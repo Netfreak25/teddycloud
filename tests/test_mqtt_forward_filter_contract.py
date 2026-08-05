@@ -164,7 +164,11 @@ class MqttForwardFilterContractTests(unittest.TestCase):
             self.proxy.index("static error_t tb2_mqtt_process_packet") :
             self.proxy.index("static error_t tb2_mqtt_process_stream")
         ]
-        self.assertIn("mqtt_forward_filter_should_block(session->box_settings", processor)
+        compact_processor = " ".join(processor.split())
+        self.assertIn(
+            "mqtt_forward_filter_should_block( session->box_settings",
+            compact_processor,
+        )
 
 
 if __name__ == "__main__":

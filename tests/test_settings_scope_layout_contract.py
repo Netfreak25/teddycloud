@@ -111,11 +111,20 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
             "cloud.tb2_v3_enabled": "tb2",
             "mqtt_server.enabled": "tb2",
             "mqtt_client_upstream.enabled": "tb2",
+            "mqtt_client_upstream.local_control_enabled": "tb2",
             "mqtt_client_upstream.forward.logs.other": "tb2",
             "toniebox2.max_volume": "tb2",
             "toniebox.api_access": "global",
             "toniebox.boxGeneration": "global",
-            "cloud.cacheContent": "global",
+            "cloud.cacheOta": "global",
+            "cloud.localOta": "global",
+            "cloud.markCustomTagByPass": "global",
+            "cloud.markCustomTagByUid": "global",
+            "cloud.dumpRuidAuthContentJson": "global",
+            "cloud.cacheContent": "tb1",
+            "cloud.cacheToLibrary": "tb1",
+            "cloud.prioCustomContent": "tb1",
+            "cloud.updateOnLowerAudioId": "tb1",
         }
         self.assertEqual(
             expectations,
@@ -133,6 +142,12 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
         self.assertFalse(self.visible_in_overlay("toniebox2.max_volume", "tb1"))
         self.assertTrue(self.visible_in_overlay("mqtt_client_upstream.forward.claim", "tb2"))
         self.assertFalse(self.visible_in_overlay("mqtt_client_upstream.forward.claim", "tb1"))
+        self.assertTrue(
+            self.visible_in_overlay("mqtt_client_upstream.local_control_enabled", "tb2")
+        )
+        self.assertFalse(
+            self.visible_in_overlay("mqtt_client_upstream.local_control_enabled", "tb1")
+        )
 
     def test_all_ici_forward_filters_are_tb2_overlay_settings(self) -> None:
         filter_ids = {
@@ -173,7 +188,8 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
         )
         handler = SETTINGS_HANDLER_PATH.read_text(encoding="utf-8")
 
-        self.assertIn("handler.getSetting(dependency.master)?.value !== true", scope_tabs)
+        self.assertIn("handler.getSetting(dependency.master)?.value !== enabledWhen", scope_tabs)
+        self.assertIn("dependency?.appliesWhen?.every", scope_tabs)
         self.assertIn("disabled={disabled}", option_item)
         self.assertIn("disabled={disabled}", switch_field)
         self.assertNotIn("changeSetting(", scope_tabs)
@@ -181,6 +197,21 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
         self.assertIn("this.idListeners.push({ iD, listener })", handler)
         self.assertIn("this.idListeners = this.idListeners.filter", handler)
         self.assertIn("return () => handler.removeIdListener(idListener)", switch_field)
+
+    def test_local_control_dependency_covers_all_tb2_settings(self) -> None:
+        dependency = next(
+            item
+            for item in self.layout["dependencies"]
+            if item["master"] == "mqtt_client_upstream.local_control_enabled"
+        )
+        self.assertEqual(["toniebox2."], dependency["dependentPrefixes"])
+        self.assertEqual(
+            {
+                ("mqtt_client_upstream.enabled", True),
+                ("mqtt_client_upstream.passthrough_enabled", True),
+            },
+            {(item["setting"], item["value"]) for item in dependency["appliesWhen"]},
+        )
 
 
 if __name__ == "__main__":

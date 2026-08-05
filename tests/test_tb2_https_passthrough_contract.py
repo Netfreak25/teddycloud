@@ -139,6 +139,43 @@ class Tb2HttpsPassthroughContractTests(unittest.TestCase):
         self.assertIn("settings->cloud.remote_port_tb2", self.cloud_request)
         self.assertIn("httpClientTlsInitCallbackClientAuthTb2", self.cloud_request)
 
+    def test_v3_content_meta_honors_per_tonie_no_cloud_setting(self):
+        helper = self.cloud_handler[
+            self.cloud_handler.index("static bool_t tonie_cloud_access_allowed") :
+            self.cloud_handler.index("void markCustomTonie")
+        ]
+        self.assertIn("!tonieInfo->json.nocloud || tonieInfo->json.cloud_override", helper)
+
+        handler = self.cloud_handler[
+            self.cloud_handler.index("error_t handleCloudContentMetaV3") :
+            self.cloud_handler.index("error_t handleCloudChapterV3")
+        ]
+        local_response = handler.index("tonieInfo->exists && tonieInfo->valid")
+        cloud_gate = handler.index("tonie_cloud_access_allowed(tonieInfo)", local_response)
+        cloud_request = handler.index("cloud_request_tb2_get", cloud_gate)
+        self.assertLess(local_response, cloud_gate)
+        self.assertLess(cloud_gate, cloud_request)
+        self.assertIn("V3 content meta marked as no cloud", handler)
+
+    def test_v3_freshness_honors_per_tonie_cloud_override(self):
+        handler = self.cloud_handler[
+            self.cloud_handler.index("void process_freshness_check") :
+            self.cloud_handler.index("void freshness_mark_content_mapping_changed")
+        ]
+        self.assertIn("allow_cloud_override && tonieInfo->json.cloud_override", handler)
+        self.assertNotIn("if (!tonieInfo->json.nocloud)", handler)
+
+        v1_call = self.cloud_handler[
+            self.cloud_handler.index("error_t handleCloudFreshnessCheck(") :
+            self.cloud_handler.index("error_t handleCloudFreshnessCheckV3(")
+        ]
+        v3_call = self.cloud_handler[
+            self.cloud_handler.index("error_t handleCloudFreshnessCheckV3(") :
+            self.cloud_handler.index("error_t handleCloudCheckOtaV3(")
+        ]
+        self.assertRegex(v1_call, r"process_freshness_check\([^;]+, FALSE\);")
+        self.assertRegex(v3_call, r"process_freshness_check\([^;]+, TRUE\);")
+
     def test_transport_errors_do_not_switch_modes(self):
         self.assertNotIn("settings_set_bool", self.cloud_request)
         self.assertNotIn("settings_set_bool", self.passthrough)
@@ -159,6 +196,7 @@ class Tb2HttpsPassthroughContractTests(unittest.TestCase):
         self.assertIn('"request_active"', self.status)
         self.assertIn("tb2_https_status_v3_start(uri)", self.cloud_request)
         self.assertIn("tb2_https_status_v3_finish(error, http_status)", self.cloud_request)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,29 +1,11 @@
 #include "toniebox_state.h"
 #include "settings.h"
 #include "server_helpers.h"
+#include "tb2_ruid.h"
 #include <ctype.h>
 #include <time.h>
 
 static toniebox_state_t Box_State_Overlay[MAX_OVERLAYS];
-
-static bool tbs_is_hex_ruid(const char *ruid)
-{
-    if (ruid == NULL)
-    {
-        return false;
-    }
-
-    for (size_t i = 0; i < 16; i++)
-    {
-        char c = ruid[i];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
-        {
-            return false;
-        }
-    }
-
-    return ruid[16] == '\0';
-}
 
 const char *tbs_toniebox2_playback_status_name(toniebox_state_tb2_playback_status_t status)
 {
@@ -42,13 +24,15 @@ const char *tbs_toniebox2_playback_status_name(toniebox_state_tb2_playback_statu
 
 static void tbs_record_last_ruid(client_ctx_t *client_ctx, const char *ruid, bool refresh_same_ruid)
 {
-    if (client_ctx == NULL || client_ctx->settingsNoOverlay == NULL || !tbs_is_hex_ruid(ruid))
+    char canonical[TB2_RUID_SIZE];
+    if (client_ctx == NULL || client_ctx->settingsNoOverlay == NULL ||
+        !tb2_ruid_canonicalize(ruid, canonical))
     {
         return;
     }
 
     char last_ruid[17];
-    osStrncpy(last_ruid, ruid, sizeof(last_ruid) - 1);
+    osStrncpy(last_ruid, canonical, sizeof(last_ruid) - 1);
     last_ruid[sizeof(last_ruid) - 1] = '\0';
     for (size_t i = 0; last_ruid[i] != '\0'; i++)
     {
@@ -223,10 +207,13 @@ void tbs_toniebox2_playback_state(client_ctx_t *client_ctx, const char *tonie,
     playback_state->valid = true;
     playback_state->status = TBS_TB2_PLAYBACK_STATUS_PLAYING;
     playback_state->updated_at = (uint32_t)time(NULL);
-    osStrncpy(playback_state->tonie, tonie, sizeof(playback_state->tonie) - 1);
+    char canonical_ruid[TB2_RUID_SIZE];
+    bool_t has_ruid = tb2_ruid_canonicalize(tonie, canonical_ruid);
+    const char *stored_tonie = has_ruid ? canonical_ruid : tonie;
+    osStrncpy(playback_state->tonie, stored_tonie, sizeof(playback_state->tonie) - 1);
     playback_state->tonie[sizeof(playback_state->tonie) - 1] = '\0';
     tbs_record_last_ruid(client_ctx, playback_state->tonie, false);
-    if (tbs_is_hex_ruid(playback_state->tonie))
+    if (has_ruid)
     {
         playback_state->ruid_valid = true;
         osStrncpy(playback_state->ruid, playback_state->tonie, sizeof(playback_state->ruid) - 1);
@@ -281,7 +268,9 @@ void tbs_toniebox2_playback_command_state(client_ctx_t *client_ctx,
 
 void tbs_toniebox2_claim(client_ctx_t *client_ctx, const char *ruid, const char *bd, bool bd_all_zero)
 {
-    if (client_ctx == NULL || client_ctx->state == NULL || ruid == NULL || bd == NULL)
+    char canonical_ruid[TB2_RUID_SIZE];
+    if (client_ctx == NULL || client_ctx->state == NULL || bd == NULL ||
+        !tb2_ruid_canonicalize(ruid, canonical_ruid))
     {
         return;
     }
@@ -291,7 +280,7 @@ void tbs_toniebox2_claim(client_ctx_t *client_ctx, const char *ruid, const char 
     claim->valid = true;
     claim->bd_all_zero = bd_all_zero;
     claim->updated_at = (uint32_t)time(NULL);
-    osStrncpy(claim->ruid, ruid, sizeof(claim->ruid) - 1);
+    osStrncpy(claim->ruid, canonical_ruid, sizeof(claim->ruid) - 1);
     claim->ruid[sizeof(claim->ruid) - 1] = '\0';
     osStrncpy(claim->bd, bd, sizeof(claim->bd) - 1);
     claim->bd[sizeof(claim->bd) - 1] = '\0';

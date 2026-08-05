@@ -1,4 +1,5 @@
 #include <time.h>
+#include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -20,6 +21,11 @@
 #include "toniefile.h"
 #include "toniesJson.h"
 #include "tonie_audio_playlist_internal.h"
+#include "tb2_client_identity.h"
+#include "tb2_nocloud_policy.h"
+#include "tb2_ruid.h"
+#include "v3_local_content.h"
+#include "v3_native_cache.h"
 #include "cJSON.h"
 
 #include <byteswap.h>
@@ -44,6 +50,207 @@ static tap_target_lock_t tap_target_locks[TAP_TARGET_LOCK_COUNT];
 static bool_t tap_is_stable_cached_playlist(tonie_info_t *tonieInfo);
 static void freshness_clear_cache_after_content_request(client_ctx_t *client_ctx, cloudapi_t api, const char *ruid);
 static bool_t freshness_source_changed_contains_ruid(settings_t *settings, const char *ruid);
+static bool_t freshness_confirm_source_change_after_chapter(client_ctx_t *client_ctx,
+                                                            const char *ruid,
+                                                            uint32_t version,
+                                                            bool_t private_source,
+                                                            const char *chapter_name);
+static bool_t v3_source_is_tap(const tonie_info_t *tonieInfo);
+
+typedef struct
+{
+    cbr_ctx_t passthrough;
+    v3_native_cache_meta_capture_t cache;
+    error_t cache_error;
+    bool_t finished;
+} v3_native_meta_cbr_t;
+
+typedef struct
+{
+    cbr_ctx_t passthrough;
+    v3_native_cache_chapter_capture_t cache;
+    bool_t cache_enabled;
+    bool_t response_successful;
+    bool_t downstream_failed;
+    bool_t finished;
+    bool_t successful;
+    error_t cache_error;
+    uint32_t status_code;
+} v3_native_chapter_cbr_t;
+
+static void v3_native_import_library_if_enabled(client_ctx_t *client_ctx,
+                                                const char *ruid)
+{
+    if (client_ctx == NULL || client_ctx->settings == NULL || ruid == NULL ||
+        !client_ctx->settings->cloud.cacheContentV3 ||
+        !client_ctx->settings->cloud.cacheToLibraryV3 ||
+        !v3_native_cache_active_version(
+            client_ctx->settings->internal.cachedirfull,
+            client_ctx->settings->internal.overlayNumber, ruid, NULL))
+    {
+        return;
+    }
+    error_t error = v3_native_cache_import_active_library(
+        client_ctx->settings->internal.cachedirfull,
+        client_ctx->settings->internal.librarydirfull,
+        client_ctx->settings->internal.overlayNumber, ruid);
+    if (error != NO_ERROR)
+    {
+        TRACE_WARNING("Could not import complete TB2 V3 cache into library overlay=%u rUID=%s: %s\r\n",
+                      (unsigned)client_ctx->settings->internal.overlayNumber,
+                      ruid, error2text(error));
+    }
+}
+
+static void v3_native_meta_response(void *source, HttpClientContext *cloud)
+{
+    v3_native_meta_cbr_t *context = source;
+    v3_native_cache_meta_capture_response(&context->cache, cloud->statusCode);
+    if (context->passthrough.connection != NULL)
+    {
+        cbrCloudResponsePassthrough(&context->passthrough, cloud);
+    }
+}
+
+static void v3_native_meta_header(void *source, HttpClientContext *cloud,
+                                  const char *header, const char *value)
+{
+    v3_native_meta_cbr_t *context = source;
+    if (context->passthrough.connection != NULL)
+    {
+        cbrCloudHeaderPassthrough(&context->passthrough, cloud, header, value);
+    }
+}
+
+static void v3_native_meta_body(void *source, HttpClientContext *cloud,
+                                const char *payload, size_t length, error_t error)
+{
+    v3_native_meta_cbr_t *context = source;
+    if (length > 0)
+    {
+        v3_native_cache_meta_capture_append(&context->cache, payload, length);
+    }
+    if (error == ERROR_END_OF_STREAM && !context->finished)
+    {
+        context->finished = TRUE;
+        context->cache_error = v3_native_cache_meta_capture_finish(&context->cache);
+        if (context->cache_error != NO_ERROR)
+        {
+            TRACE_WARNING("TB2 V3 content-meta was received but not cached: %s\r\n",
+                          error2text(context->cache_error));
+        }
+        else
+        {
+            v3_native_import_library_if_enabled(
+                context->passthrough.client_ctx, context->cache.ruid);
+        }
+    }
+    if (context->passthrough.connection != NULL)
+    {
+        cbrCloudBodyPassthrough(&context->passthrough, cloud, payload, length, error);
+    }
+}
+
+static void v3_native_meta_disconnect(void *source, HttpClientContext *cloud)
+{
+    v3_native_meta_cbr_t *context = source;
+    if (context->passthrough.connection != NULL)
+    {
+        cbrCloudServerDiscoPassthrough(&context->passthrough, cloud);
+    }
+}
+
+static void v3_native_chapter_response(void *source, HttpClientContext *cloud)
+{
+    v3_native_chapter_cbr_t *context = source;
+    context->status_code = cloud->statusCode;
+    context->response_successful = cloud->statusCode == 200 ||
+                                   cloud->statusCode == 206;
+    if (cloud->statusCode != 200)
+    {
+        context->cache.failed = TRUE;
+    }
+    if (context->passthrough.connection != NULL)
+    {
+        cbrCloudResponsePassthrough(&context->passthrough, cloud);
+    }
+}
+
+static void v3_native_chapter_header(void *source, HttpClientContext *cloud,
+                                     const char *header, const char *value)
+{
+    v3_native_chapter_cbr_t *context = source;
+    if (context->passthrough.connection != NULL)
+    {
+        cbrCloudHeaderPassthrough(&context->passthrough, cloud, header, value);
+    }
+}
+
+static void v3_native_chapter_body(void *source, HttpClientContext *cloud,
+                                   const char *payload, size_t length, error_t error)
+{
+    v3_native_chapter_cbr_t *context = source;
+    (void)cloud;
+    if (context->cache_enabled && length > 0)
+    {
+        v3_native_cache_chapter_append(&context->cache, payload, length);
+    }
+    if (context->passthrough.connection != NULL)
+    {
+        error_t send_error = httpSend(context->passthrough.connection, payload,
+                                      length, HTTP_FLAG_DELAY);
+        if (send_error != NO_ERROR)
+        {
+            context->downstream_failed = TRUE;
+            TRACE_ERROR("Could not forward TB2 V3 chapter %s to box: %s\r\n",
+                        context->cache.name, error2text(send_error));
+        }
+    }
+    if (error == ERROR_END_OF_STREAM && !context->finished)
+    {
+        context->finished = TRUE;
+        context->successful = context->response_successful &&
+                              !context->downstream_failed;
+        if (context->cache_enabled && !context->cache.failed)
+        {
+            context->cache_error = v3_native_cache_chapter_finish(&context->cache);
+            if (context->cache_error != NO_ERROR)
+            {
+                TRACE_WARNING("TB2 V3 chapter %s was received but not cached: %s\r\n",
+                              context->cache.name,
+                              error2text(context->cache_error));
+            }
+            else
+            {
+                v3_native_import_library_if_enabled(
+                    context->passthrough.client_ctx, context->cache.ruid);
+            }
+        }
+        else if (context->cache_enabled && context->cache.failed)
+        {
+            context->cache_error = context->response_successful
+                                       ? ERROR_WRITE_FAILED
+                                       : ERROR_INVALID_RESPONSE;
+        }
+        else if (!context->response_successful)
+        {
+            context->cache_error = ERROR_INVALID_RESPONSE;
+            TRACE_WARNING("TB2 V3 chapter %s did not complete cleanly: %s\r\n",
+                          context->cache.name,
+                          error2text(ERROR_INVALID_RESPONSE));
+        }
+    }
+    context->passthrough.status = PROX_STATUS_BODY;
+}
+
+static void v3_native_chapter_disconnect(void *source, HttpClientContext *cloud)
+{
+    v3_native_chapter_cbr_t *context = source;
+    if (context->passthrough.connection != NULL)
+    {
+        cbrCloudServerDiscoPassthrough(&context->passthrough, cloud);
+    }
+}
 
 /*
  * Cyclone reads stream_max_size from the connection client context. Keep the
@@ -63,6 +270,53 @@ static error_t tap_send_response_stream_with_size(HttpConnection *connection, co
 
     connection->private.client_ctx = saved_client_ctx;
     return error;
+}
+
+static error_t tap_send_response_stream_unsafe_with_size(
+    HttpConnection *connection,
+    const char_t *uri,
+    const char_t *absolute_path,
+    uint32_t stream_max_size)
+{
+    client_ctx_t saved_client_ctx = connection->private.client_ctx;
+    client_ctx_t local_client_ctx = saved_client_ctx;
+    settings_t local_settings = *local_client_ctx.settings;
+
+    local_settings.encode.stream_max_size = stream_max_size;
+    local_client_ctx.settings = &local_settings;
+    connection->private.client_ctx = local_client_ctx;
+    error_t error = httpSendResponseStreamUnsafe(connection, uri,
+                                                 absolute_path, true);
+    connection->private.client_ctx = saved_client_ctx;
+    return error;
+}
+
+typedef struct
+{
+    const char *const *chapter_paths;
+    size_t chapter_count;
+    uint32_t audio_id;
+    const char *tmp_taf;
+    toniefile_live_header_t live_header;
+    uint32_t predicted_size;
+    size_t current_source;
+    error_t error;
+    bool_t started;
+    bool_t active;
+    bool_t done;
+} native_collection_taf_task_t;
+
+static void native_collection_taf_task(void *param)
+{
+    native_collection_taf_task_t *task = param;
+    task->started = TRUE;
+    task->error = tap_remux_native_collection(
+        task->chapter_paths, task->chapter_count, task->audio_id,
+        task->tmp_taf, &task->current_source, &task->active,
+        &task->live_header, &task->predicted_size);
+    task->active = FALSE;
+    task->done = TRUE;
+    osDeleteTask((OsTaskId)OS_SELF_TASK_ID);
 }
 
 static uint32_t stream_ctx_next_generation(stream_ctx_t *stream_ctx)
@@ -163,7 +417,7 @@ static void tap_target_unlock(const char *target_path)
     mutex_unlock(MUTEX_TAP_TARGETS);
 }
 
-void convertTokenBytesToString(uint8_t *token, char *msg, bool_t logFullAuth)
+void convertTokenBytesToString(const uint8_t *token, char *msg, bool_t logFullAuth)
 {
     char buffer[4];
 
@@ -407,6 +661,10 @@ error_t handleCloudOTA(HttpConnection *connection, const char_t *uri, const char
 
 bool checkCustomTonie(char *ruid, uint8_t *token, settings_t *settings)
 {
+    char canonical_ruid[TB2_RUID_SIZE];
+    const char *checked_ruid = tb2_ruid_canonicalize(ruid, canonical_ruid)
+                                   ? canonical_ruid
+                                   : ruid;
     if (settings->cloud.markCustomTagByPass)
     {
         bool tokenIsZero = TRUE;
@@ -426,10 +684,12 @@ bool checkCustomTonie(char *ruid, uint8_t *token, settings_t *settings)
     }
     if (settings->cloud.markCustomTagByUid)
     {
-        // Ignore TB2 special files 00000af0 (00000001)
-        if (!(ruid[0] == '0' && ruid[1] == '0' && ruid[2] == '0' && ruid[3] == '0' && ruid[4] == '0' && ruid[5] == 'a' && ruid[6] == 'f' && ruid[7] == '0'))
+        // Reserved TB2 system content is not a custom Tonie.
+        if (tb2_ruid_classify(checked_ruid) == TB2_RUID_CONTENT)
         {
-            if (ruid[15] != '0' || ruid[14] != 'e' || ruid[13] != '4' || ruid[12] != '0' || ruid[11] != '3' || ruid[10] != '0')
+            if (checked_ruid[15] != '0' || checked_ruid[14] != 'E' ||
+                checked_ruid[13] != '4' || checked_ruid[12] != '0' ||
+                checked_ruid[11] != '3' || checked_ruid[10] != '0')
             {
                 TRACE_INFO("Found possible custom tonie by uid\r\n");
                 return true;
@@ -439,9 +699,24 @@ bool checkCustomTonie(char *ruid, uint8_t *token, settings_t *settings)
     return false;
 }
 
+static bool_t tonie_cloud_access_allowed(const tonie_info_t *tonieInfo)
+{
+    return tonieInfo != NULL && (!tonieInfo->json.nocloud || tonieInfo->json.cloud_override);
+}
+
+static bool_t tb2_tonie_cloud_access_allowed(settings_t *settings,
+                                              const char *ruid,
+                                              const tonie_info_t *tonieInfo)
+{
+    tb2_nocloud_policy_t policy;
+    const contentJson_t *content = tonieInfo != NULL ? &tonieInfo->json : NULL;
+    return tb2_nocloud_policy_from_content(settings, ruid, content, &policy) &&
+           !tb2_nocloud_policy_blocks_upstream(&policy);
+}
+
 void markCustomTonie(tonie_info_t *tonieInfo)
 {
-    tonieInfo->json.nocloud = true;
+    content_json_set_manual_nocloud(&tonieInfo->json, true);
     tonieInfo->json._updated = true;
     TRACE_INFO("Marked custom tonie %s\r\n", tonieInfo->contentPath);
 }
@@ -543,7 +818,7 @@ error_t handleCloudClaim(HttpConnection *connection, const char_t *uri, const ch
     }
     saveTonieInfo(tonieInfo, true);
 
-    if (!tonieInfo->json.nocloud || tonieInfo->json.cloud_override)
+    if (tonie_cloud_access_allowed(tonieInfo))
     {
         if (checkCustomTonie(ruid, token, client_ctx->settings) && !tonieInfo->json.cloud_override && connection->request.auth.found)
         {
@@ -768,6 +1043,225 @@ tonie_info_t *getTonieInfoForRequest(HttpConnection *connection, const char_t *u
     return tonieInfo;
 }
 
+static bool_t native_collection_taf_is_current(const char *path,
+                                               uint32_t audio_id,
+                                               settings_t *settings)
+{
+    if (path == NULL || !fsFileExists(path))
+    {
+        return FALSE;
+    }
+    tonie_info_t *info = getTonieInfoV2(path, false,
+                                        settings->core.tap_taf_validation,
+                                        settings);
+    bool_t current = info != NULL && info->valid && info->tafHeader != NULL &&
+                     info->tafHeader->audio_id == audio_id;
+    if (info != NULL)
+    {
+        freeTonieInfo(info);
+    }
+    return current;
+}
+
+static error_t serve_native_collection_tb1(
+    HttpConnection *connection,
+    const char_t *uri,
+    client_ctx_t *client_ctx,
+    tonie_info_t *tonieInfo,
+    const char *ruid,
+    cloudapi_t api)
+{
+    v3_native_library_collection_t collection;
+    error_t error = v3_native_library_collection_load(
+        client_ctx->settings->internal.librarydirfull,
+        tonieInfo->json.source, FALSE, &collection);
+    if (error != NO_ERROR)
+    {
+        TRACE_ERROR("Native collection source for rUID %s is unavailable: %s\r\n",
+                    ruid, error2text(error));
+        return error;
+    }
+
+    char *cache_dir = custom_asprintf("%s%ctb1-native-library",
+                                      client_ctx->settings->internal.cachedirfull,
+                                      PATH_SEPARATOR);
+    char *final_taf = cache_dir != NULL
+                          ? custom_asprintf("%s%c%s.taf", cache_dir,
+                                            PATH_SEPARATOR,
+                                            collection.content_hash)
+                          : NULL;
+    char *tmp_taf = final_taf != NULL
+                        ? custom_asprintf("%s.tmp", final_taf)
+                        : NULL;
+    if (cache_dir == NULL || final_taf == NULL || tmp_taf == NULL)
+    {
+        error = ERROR_OUT_OF_MEMORY;
+        goto cleanup;
+    }
+    error = fsCreateDirEx(cache_dir, true);
+    if (error != NO_ERROR && !fsDirExists(cache_dir))
+    {
+        goto cleanup;
+    }
+
+    error = tap_target_lock(final_taf);
+    if (error != NO_ERROR)
+    {
+        TRACE_ERROR("Native collection TAF lock unavailable for %s: %s\r\n",
+                    final_taf, error2text(error));
+        goto cleanup;
+    }
+    bool_t target_locked = TRUE;
+
+    if (native_collection_taf_is_current(final_taf, collection.audio_id,
+                                         client_ctx->settings))
+    {
+        TRACE_INFO("Serve cached TB1 native collection hash=%s audioId=%08" PRIX32
+                   " path=%s\r\n",
+                   collection.content_hash, collection.audio_id, final_taf);
+        tap_target_unlock(final_taf);
+        target_locked = FALSE;
+        connection->response.keepAlive = true;
+        error = httpSendResponseStreamUnsafe(connection, uri, final_taf, false);
+        if (error == NO_ERROR)
+        {
+            freshness_clear_cache_after_content_request(client_ctx, api, ruid);
+        }
+        goto unlock_cleanup;
+    }
+
+    v3_native_library_collection_free(&collection);
+    error = v3_native_library_collection_load(
+        client_ctx->settings->internal.librarydirfull,
+        tonieInfo->json.source, TRUE, &collection);
+    if (error != NO_ERROR)
+    {
+        TRACE_ERROR("Native collection hash verification failed for rUID %s: %s\r\n",
+                    ruid, error2text(error));
+        goto unlock_cleanup;
+    }
+
+    const char **chapter_paths = osAllocMem(
+        sizeof(*chapter_paths) * collection.chapter_count);
+    if (chapter_paths == NULL)
+    {
+        error = ERROR_OUT_OF_MEMORY;
+        goto unlock_cleanup;
+    }
+    for (size_t i = 0; i < collection.chapter_count; i++)
+    {
+        chapter_paths[i] = collection.chapters[i].path;
+    }
+
+    native_collection_taf_task_t task;
+    osMemset(&task, 0, sizeof(task));
+    task.chapter_paths = chapter_paths;
+    task.chapter_count = collection.chapter_count;
+    task.audio_id = collection.audio_id;
+    task.tmp_taf = tmp_taf;
+    error = tap_remux_native_collection(
+        task.chapter_paths, task.chapter_count, task.audio_id,
+        NULL, NULL, NULL, &task.live_header, &task.predicted_size);
+    if (error != NO_ERROR || task.predicted_size <= TONIEFILE_FRAME_SIZE)
+    {
+        TRACE_ERROR("Could not predict TB1 native collection TAF %s: %s\r\n",
+                    final_taf, error2text(error));
+        osFreeMem(chapter_paths);
+        goto unlock_cleanup;
+    }
+
+    if (fsFileExists(tmp_taf))
+    {
+        fsDeleteFile(tmp_taf);
+    }
+    OsTaskParameters task_params;
+    osMemset(&task_params, 0, sizeof(task_params));
+    task_params.stackSize = 10U * 1024U;
+    task_params.priority = 0;
+    OsTaskId task_id = osCreateTask("native-library-taf",
+                                   &native_collection_taf_task,
+                                   &task, &task_params);
+    if (task_id == (OsTaskId)OS_INVALID_TASK_ID)
+    {
+        error = ERROR_FAILURE;
+        osFreeMem(chapter_paths);
+        goto unlock_cleanup;
+    }
+
+    uint32_t waited_ms = 0;
+    while (!task.started && !task.done && waited_ms < TAP_GENERATOR_START_WAIT_MS)
+    {
+        osDelayTask(TAP_GENERATOR_START_POLL_MS);
+        waited_ms += TAP_GENERATOR_START_POLL_MS;
+    }
+    uint32_t tmp_size = 0;
+    waited_ms = 0;
+    while (!task.done && waited_ms < TAP_LIVE_READY_WAIT_MS)
+    {
+        if (fsGetFileSize(tmp_taf, &tmp_size) == NO_ERROR &&
+            tmp_size >= TAP_LIVE_READY_BYTES)
+        {
+            break;
+        }
+        osDelayTask(TAP_LIVE_READY_POLL_MS);
+        waited_ms += TAP_LIVE_READY_POLL_MS;
+    }
+
+    error_t response_error = task.error;
+    if (response_error == NO_ERROR &&
+        (task.active || task.done) && fsFileExists(tmp_taf))
+    {
+        TRACE_INFO("Stream TB1 native collection hash=%s audioId=%08" PRIX32
+                   " chapters=%" PRIuSIZE " bytes=%" PRIu32 "\r\n",
+                   collection.content_hash, collection.audio_id,
+                   collection.chapter_count, task.predicted_size);
+        connection->response.keepAlive = true;
+        response_error = tap_send_response_stream_unsafe_with_size(
+            connection, uri, tmp_taf, task.predicted_size);
+    }
+
+    while (!task.done)
+    {
+        osDelayTask(100);
+    }
+    error = task.error;
+    if (error == NO_ERROR)
+    {
+        error = tap_publish_taf_replace_safe(tmp_taf, final_taf);
+        if (error == NO_ERROR)
+        {
+            TRACE_INFO("Published TB1 native collection hash=%s audioId=%08" PRIX32
+                       " path=%s\r\n",
+                       collection.content_hash, collection.audio_id, final_taf);
+        }
+    }
+    if (fsFileExists(tmp_taf))
+    {
+        fsDeleteFile(tmp_taf);
+    }
+    osFreeMem(chapter_paths);
+    if (response_error != NO_ERROR)
+    {
+        error = response_error;
+    }
+    else if (error == NO_ERROR)
+    {
+        freshness_clear_cache_after_content_request(client_ctx, api, ruid);
+    }
+
+unlock_cleanup:
+    if (target_locked)
+    {
+        tap_target_unlock(final_taf);
+    }
+cleanup:
+    v3_native_library_collection_free(&collection);
+    osFreeMem(tmp_taf);
+    osFreeMem(final_taf);
+    osFreeMem(cache_dir);
+    return error;
+}
+
 error_t handleCloudContentExt(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx, bool_t noPassword, int ruid_begin, cloudapi_t api)
 {
     char ruid[17];
@@ -786,7 +1280,16 @@ error_t handleCloudContentExt(HttpConnection *connection, const char_t *uri, con
     const bool_t cloud_mode_enabled = api == V3_CHAPTER
                                           ? client_ctx->settings->cloud.tb2_v3_enabled
                                           : client_ctx->settings->cloud.enabled;
-    bool can_use_cloud = !(!cloud_mode_enabled || (api == V2_CONTENT && !client_ctx->settings->cloud.enableV2Content) || (tonieInfo->json.nocloud && !tonieInfo->json.cloud_override));
+    bool can_use_cloud = cloud_mode_enabled &&
+                         (api != V2_CONTENT || client_ctx->settings->cloud.enableV2Content) &&
+                         tonie_cloud_access_allowed(tonieInfo);
+    if (tonieInfo->json._source_type == CT_SOURCE_NATIVE_COLLECTION)
+    {
+        error = serve_native_collection_tb1(connection, uri, client_ctx,
+                                            tonieInfo, ruid, api);
+        freeTonieInfo(tonieInfo);
+        return error;
+    }
     if (tonieInfo->json._source_type == CT_SOURCE_STREAM)
     {
         char *streamFileRel = &tonieInfo->json._streamFile[osStrlen(client_ctx->settings->internal.datadirfull)];
@@ -1079,62 +1582,6 @@ error_t handleCloudContentExt(HttpConnection *connection, const char_t *uri, con
             TRACE_INFO("Found incomplete TAF, streaming...\r\n");
         }
 
-        if (api == V3_CHAPTER)
-        {
-            const char_t *chapter_pos = osStrstr(uri, "teddycloud_");
-            if (chapter_pos != NULL)
-            {
-                char chapter_id_str[3];
-                osStrncpy(chapter_id_str, chapter_pos + 11, 2);
-                chapter_id_str[2] = '\0';
-                int chapter_id = atoi(chapter_id_str);
-                
-                TonieboxAudioFileHeader *tafHeader = tonieInfo->tafHeader;
-                if (tafHeader != NULL && chapter_id < tafHeader->n_track_page_nums)
-                {
-                    uint32_t start_block = tafHeader->track_page_nums[chapter_id];
-                    uint32_t end_block = 0;
-                    if (chapter_id + 1 < tafHeader->n_track_page_nums)
-                    {
-                        end_block = tafHeader->track_page_nums[chapter_id + 1];
-                    }
-                    else
-                    {
-                        end_block = tafHeader->num_bytes / 4096;
-                    }
-                    
-                    connection->private.client_ctx.taf_chapter_split = true;
-                    connection->private.client_ctx.taf_chapter_start_offset = 4096 + start_block * 4096;
-                    connection->private.client_ctx.taf_chapter_end_offset = 4096 + end_block * 4096;
-                    
-                    if (chapter_id > 0)
-                    {
-                        connection->private.client_ctx.taf_chapter_header_size = 512;
-                    }
-                    else
-                    {
-                        connection->private.client_ctx.taf_chapter_header_size = 0;
-                    }
-                    
-                    TRACE_INFO("Splitting TAF for chapter %d: start=%u, end=%u, header_size=%u\n",
-                               chapter_id,
-                               connection->private.client_ctx.taf_chapter_start_offset,
-                               connection->private.client_ctx.taf_chapter_end_offset,
-                               connection->private.client_ctx.taf_chapter_header_size);
-                }
-            }
-        }
-
-        if (api == V3_CHAPTER && !connection->private.client_ctx.taf_chapter_split)
-        {
-            TRACE_WARNING(" >> Invalid chapter ID requested for %s\n", uri);
-            httpPrepareHeader(connection, NULL, 0);
-            connection->response.statusCode = 404;
-            error_t response_error = httpWriteResponse(connection, NULL, 0, false);
-            freeTonieInfo(tonieInfo);
-            return response_error;
-        }
-
         size_t dataPathLen = osStrlen(client_ctx->settings->internal.datadirfull);
         if (osStrncmp(tonieInfo->contentPath, client_ctx->settings->internal.datadirfull, dataPathLen) == 0)
         {
@@ -1318,6 +1765,7 @@ static const char *content_source_type_name(ct_source_t source_type)
         case CT_SOURCE_TAP_STREAM: return "tap_stream";
         case CT_SOURCE_TAP_CACHED: return "tap_cached";
         case CT_SOURCE_STREAM: return "stream";
+        case CT_SOURCE_NATIVE_COLLECTION: return "native_collection";
         default: return "unknown";
     }
 }
@@ -1343,42 +1791,6 @@ typedef struct
     char date_buffer_box[32];
     char date_buffer_server[32];
 } freshness_decision_t;
-
-static bool_t freshness_is_hex_string(const char *value, size_t len)
-{
-    if (value == NULL || osStrlen(value) != len)
-    {
-        return FALSE;
-    }
-
-    for (size_t i = 0; i < len; i++)
-    {
-        char c = value[i];
-        if (!((c >= '0' && c <= '9') ||
-              (c >= 'a' && c <= 'f') ||
-              (c >= 'A' && c <= 'F')))
-        {
-            return FALSE;
-        }
-    }
-    return TRUE;
-}
-
-static bool_t freshness_ruid_to_uid(const char *ruid, uint64_t *uid)
-{
-    if (!freshness_is_hex_string(ruid, 16) || uid == NULL)
-    {
-        return FALSE;
-    }
-
-    *uid = bswap_64(strtoull(ruid, NULL, 16));
-    return TRUE;
-}
-
-static void freshness_uid_to_ruid(uint64_t uid, char ruid[17])
-{
-    osSnprintf(ruid, 17, "%016" PRIX64, bswap_64(uid));
-}
 
 static bool_t freshness_uid_array_contains(const uint64_t *items, size_t len, uint64_t uid)
 {
@@ -1519,6 +1931,44 @@ static bool_t freshness_response_add_uid(TonieFreshnessCheckResponse *freshResp,
     return TRUE;
 }
 
+static bool_t freshness_cloud_request_add(TonieFreshnessCheckRequest *request,
+                                          size_t capacity,
+                                          uint64_t uid,
+                                          uint32_t version)
+{
+    if (request == NULL || request->tonie_infos == NULL ||
+        request->n_tonie_infos >= capacity)
+    {
+        return FALSE;
+    }
+
+    TonieFCInfo *info = osAllocMem(sizeof(*info));
+    if (info == NULL)
+    {
+        return FALSE;
+    }
+    tonie_fcinfo__init(info);
+    info->uid = uid;
+    info->audio_id = version;
+    request->tonie_infos[request->n_tonie_infos++] = info;
+    return TRUE;
+}
+
+static void freshness_cloud_request_free(TonieFreshnessCheckRequest *request)
+{
+    if (request == NULL)
+    {
+        return;
+    }
+    for (size_t i = 0; i < request->n_tonie_infos; i++)
+    {
+        osFreeMem(request->tonie_infos[i]);
+    }
+    osFreeMem(request->tonie_infos);
+    request->tonie_infos = NULL;
+    request->n_tonie_infos = 0;
+}
+
 static bool_t freshness_cache_add_uid(settings_t *settings, uint64_t uid, bool_t *added)
 {
     bool_t ok = freshness_settings_array_add_uid(settings, "internal.freshnessCache", uid, added);
@@ -1596,11 +2046,10 @@ static bool_t freshness_cache_remove_uid(settings_t *settings, uint64_t uid)
         return FALSE;
     }
 
-    if (!freshness_settings_array_remove_uid(settings, "internal.freshnessCache", uid))
-    {
-        return FALSE;
-    }
-    freshness_cache_remove_source_changed_uid(settings, uid);
+    bool_t cache_removed = freshness_settings_array_remove_uid(
+        settings, "internal.freshnessCache", uid);
+    bool_t source_marker_removed = freshness_cache_remove_source_changed_uid(
+        settings, uid);
 
     size_t freshnessCacheLen = 0;
     settings_get_u64_array_id("internal.freshnessCache", settings->internal.overlayNumber, &freshnessCacheLen);
@@ -1608,13 +2057,13 @@ static bool_t freshness_cache_remove_uid(settings_t *settings, uint64_t uid)
     {
         settings_set_bool_id("internal.freshnessCacheChanged", false, settings->internal.overlayNumber);
     }
-    return TRUE;
+    return cache_removed || source_marker_removed;
 }
 
 static void freshness_clear_cache_after_v3_request(settings_t *settings, const char *ruid)
 {
     uint64_t uid = 0;
-    if (settings == NULL || !freshness_ruid_to_uid(ruid, &uid))
+    if (settings == NULL || !tb2_ruid_to_uid(ruid, &uid))
     {
         return;
     }
@@ -1635,9 +2084,9 @@ static void freshness_clear_cache_after_content_request(client_ctx_t *client_ctx
     {
         return;
     }
-    if (api == V3_CONTENT_META && freshness_source_changed_contains_ruid(client_ctx->settings, ruid))
+    if (freshness_source_changed_contains_ruid(client_ctx->settings, ruid))
     {
-        TRACE_INFO("Keeping V3 freshness source-change entry for rUID %s until chapter request\r\n", ruid);
+        TRACE_DEBUG("Keeping V3 freshness source-change entry for rUID %s until successful content generation completion\r\n", ruid);
         return;
     }
 
@@ -1747,6 +2196,12 @@ static bool_t freshness_get_natural_server_audio_id(tonie_info_t *tonieInfo, uin
         return FALSE;
     }
 
+    if (tonieInfo->json._source_type == CT_SOURCE_NATIVE_COLLECTION)
+    {
+        return v3_native_library_source_audio_id(tonieInfo->json.source,
+                                                  audio_id);
+    }
+
     bool_t tap_freshness = (tonieInfo->json._source_type == CT_SOURCE_TAP_STREAM || tonieInfo->json._source_type == CT_SOURCE_TAP_CACHED) &&
                            tonieInfo->json._tap._valid;
     tonie_audio_playlist_t *tap = tap_freshness ? &tonieInfo->json._tap : NULL;
@@ -1780,88 +2235,8 @@ static void freshness_forced_version_clear(settings_t *settings)
     settings_set_u64_array_id("internal.v3ForcedVersionBaseAudioIds", NULL, 0, settings->internal.overlayNumber);
 }
 
-static bool_t freshness_forced_version_remove(settings_t *settings, uint64_t uid)
-{
-    if (settings == NULL)
-    {
-        return FALSE;
-    }
-
-    size_t uidLen = 0;
-    size_t versionLen = 0;
-    size_t baseLen = 0;
-    uint64_t *uids = settings_get_u64_array_id("internal.v3ForcedVersionUids", settings->internal.overlayNumber, &uidLen);
-    uint64_t *versions = settings_get_u64_array_id("internal.v3ForcedVersions", settings->internal.overlayNumber, &versionLen);
-    uint64_t *baseAudioIds = settings_get_u64_array_id("internal.v3ForcedVersionBaseAudioIds", settings->internal.overlayNumber, &baseLen);
-    if (uidLen == 0)
-    {
-        return FALSE;
-    }
-    if (uids == NULL || versions == NULL || baseAudioIds == NULL || uidLen != versionLen || uidLen != baseLen)
-    {
-        freshness_forced_version_clear(settings);
-        return FALSE;
-    }
-
-    size_t removeIndex = uidLen;
-    for (size_t i = 0; i < uidLen; i++)
-    {
-        if (uids[i] == uid)
-        {
-            removeIndex = i;
-            break;
-        }
-    }
-    if (removeIndex == uidLen)
-    {
-        return FALSE;
-    }
-
-    if (uidLen <= 1)
-    {
-        freshness_forced_version_clear(settings);
-        return TRUE;
-    }
-
-    uint64_t *updatedUids = osAllocMem(sizeof(uint64_t) * (uidLen - 1));
-    uint64_t *updatedVersions = osAllocMem(sizeof(uint64_t) * (uidLen - 1));
-    uint64_t *updatedBases = osAllocMem(sizeof(uint64_t) * (uidLen - 1));
-    if (updatedUids == NULL || updatedVersions == NULL || updatedBases == NULL)
-    {
-        osFreeMem(updatedUids);
-        osFreeMem(updatedVersions);
-        osFreeMem(updatedBases);
-        TRACE_ERROR("Could not allocate V3 forced-version removal\r\n");
-        return FALSE;
-    }
-
-    size_t target = 0;
-    for (size_t i = 0; i < uidLen; i++)
-    {
-        if (i == removeIndex)
-        {
-            continue;
-        }
-        updatedUids[target] = uids[i];
-        updatedVersions[target] = versions[i];
-        updatedBases[target] = baseAudioIds[i];
-        target++;
-    }
-
-    bool_t ok = settings_set_u64_array_id("internal.v3ForcedVersionUids", updatedUids, target, settings->internal.overlayNumber) &&
-                settings_set_u64_array_id("internal.v3ForcedVersions", updatedVersions, target, settings->internal.overlayNumber) &&
-                settings_set_u64_array_id("internal.v3ForcedVersionBaseAudioIds", updatedBases, target, settings->internal.overlayNumber);
-    osFreeMem(updatedUids);
-    osFreeMem(updatedVersions);
-    osFreeMem(updatedBases);
-    if (!ok)
-    {
-        freshness_forced_version_clear(settings);
-    }
-    return ok;
-}
-
-static bool_t freshness_forced_version_find(settings_t *settings, uint64_t uid, uint32_t naturalServerAudioId, uint32_t *forcedAudioId)
+static bool_t freshness_forced_version_get(settings_t *settings, uint64_t uid,
+                                           uint32_t *forcedAudioId, uint32_t *baseAudioId)
 {
     if (settings == NULL || forcedAudioId == NULL)
     {
@@ -1891,17 +2266,20 @@ static bool_t freshness_forced_version_find(settings_t *settings, uint64_t uid, 
             continue;
         }
 
-        uint32_t baseAudioId = (uint32_t)baseAudioIds[i];
-        if (freshness_audio_id_compare_value(baseAudioId, NULL, NULL) != freshness_audio_id_compare_value(naturalServerAudioId, NULL, NULL))
-        {
-            freshness_forced_version_remove(settings, uid);
-            return FALSE;
-        }
-
         *forcedAudioId = (uint32_t)versions[i];
+        if (baseAudioId != NULL)
+        {
+            *baseAudioId = (uint32_t)baseAudioIds[i];
+        }
         return TRUE;
     }
     return FALSE;
+}
+
+static bool_t freshness_forced_version_find(settings_t *settings, uint64_t uid,
+                                            uint32_t *forcedAudioId)
+{
+    return freshness_forced_version_get(settings, uid, forcedAudioId, NULL);
 }
 
 static bool_t freshness_forced_version_set(settings_t *settings, uint64_t uid, uint32_t forcedAudioId, uint32_t baseAudioId)
@@ -1977,17 +2355,62 @@ static bool_t freshness_forced_version_set(settings_t *settings, uint64_t uid, u
     return ok;
 }
 
-static uint32_t freshness_new_forced_version(uint32_t naturalServerAudioId, uint32_t boxAudioId)
+static uint32_t freshness_version_hash_bytes(uint32_t hash, const void *data,
+                                             size_t length)
 {
-    uint32_t forcedAudioId = (uint32_t)time(NULL);
-    uint32_t naturalCompare = freshness_audio_id_compare_value(naturalServerAudioId, NULL, NULL);
-    uint32_t boxCompare = freshness_audio_id_compare_value(boxAudioId, NULL, NULL);
-    uint32_t minimum = naturalCompare > boxCompare ? naturalCompare : boxCompare;
-    if (forcedAudioId <= minimum && minimum < UINT32_MAX)
+    const uint8_t *bytes = data;
+    for (size_t i = 0; i < length; i++)
     {
-        forcedAudioId = minimum + 1;
+        hash ^= bytes[i];
+        hash *= 16777619U;
     }
-    return forcedAudioId;
+    return hash;
+}
+
+static uint32_t freshness_version_hash_u32(uint32_t hash, uint32_t value)
+{
+    const uint8_t bytes[] = {
+        (uint8_t)(value >> 24),
+        (uint8_t)(value >> 16),
+        (uint8_t)(value >> 8),
+        (uint8_t)value,
+    };
+    return freshness_version_hash_bytes(hash, bytes, sizeof(bytes));
+}
+
+static bool_t freshness_new_forced_version(const contentJson_t *content,
+                                           const char *ruid,
+                                           uint32_t naturalServerAudioId,
+                                           bool_t boxAudioIdKnown,
+                                           uint32_t boxAudioId,
+                                           bool_t previousVersionKnown,
+                                           uint32_t previousVersion,
+                                           uint32_t *forcedAudioId)
+{
+    if (forcedAudioId == NULL)
+    {
+        return FALSE;
+    }
+
+    uint32_t source_revision = content != NULL ? content->source_revision : 0;
+    const char *source = content != NULL && content->source != NULL
+                             ? content->source
+                             : "";
+    uint32_t candidate = 2166136261U;
+    candidate = freshness_version_hash_bytes(candidate, ruid, osStrlen(ruid));
+    candidate = freshness_version_hash_u32(candidate, source_revision);
+    candidate = freshness_version_hash_bytes(candidate, source, osStrlen(source));
+    candidate = freshness_version_hash_u32(candidate, naturalServerAudioId);
+
+    while (candidate == 0 || candidate == naturalServerAudioId ||
+           (boxAudioIdKnown && candidate == boxAudioId) ||
+           (previousVersionKnown && candidate == previousVersion))
+    {
+        candidate++;
+    }
+
+    *forcedAudioId = candidate;
+    return TRUE;
 }
 
 static bool_t freshness_get_effective_server_audio_id(settings_t *settings, tonie_info_t *tonieInfo, uint64_t uid, uint32_t *audio_id, bool_t *tap_has_audio_id, bool_t *forced)
@@ -1997,13 +2420,8 @@ static bool_t freshness_get_effective_server_audio_id(settings_t *settings, toni
     {
         *forced = FALSE;
     }
-    if (!freshness_get_natural_server_audio_id(tonieInfo, &naturalAudioId, tap_has_audio_id))
-    {
-        return FALSE;
-    }
-
     uint32_t forcedAudioId = 0;
-    if (freshness_forced_version_find(settings, uid, naturalAudioId, &forcedAudioId))
+    if (freshness_forced_version_find(settings, uid, &forcedAudioId))
     {
         *audio_id = forcedAudioId;
         if (forced != NULL)
@@ -2013,41 +2431,59 @@ static bool_t freshness_get_effective_server_audio_id(settings_t *settings, toni
         return TRUE;
     }
 
+    if (!freshness_get_natural_server_audio_id(tonieInfo, &naturalAudioId, tap_has_audio_id))
+    {
+        return FALSE;
+    }
+
     *audio_id = naturalAudioId;
     return TRUE;
 }
 
-static bool_t freshness_maybe_set_forced_version(settings_t *settings, tonie_info_t *tonieInfo, uint64_t uid, uint32_t boxAudioId)
+static bool_t freshness_set_forced_version_for_source_change(settings_t *settings,
+                                                             tonie_info_t *tonieInfo,
+                                                             uint64_t uid,
+                                                             bool_t boxAudioIdKnown,
+                                                             uint32_t boxAudioId)
 {
     uint32_t naturalAudioId = 0;
-    if (!freshness_get_natural_server_audio_id(tonieInfo, &naturalAudioId, NULL))
+    freshness_get_natural_server_audio_id(tonieInfo, &naturalAudioId, NULL);
+
+    uint32_t previousForcedAudioId = 0;
+    bool_t previousVersionKnown = freshness_forced_version_get(settings, uid,
+                                                               &previousForcedAudioId,
+                                                               NULL);
+    uint32_t newForcedAudioId = 0;
+    char canonicalRuid[TB2_RUID_SIZE];
+    tb2_ruid_from_uid(uid, canonicalRuid);
+    if (!freshness_new_forced_version(tonieInfo != NULL ? &tonieInfo->json : NULL,
+                                      canonicalRuid,
+                                      naturalAudioId,
+                                      boxAudioIdKnown,
+                                      boxAudioId,
+                                      previousVersionKnown,
+                                      previousForcedAudioId,
+                                      &newForcedAudioId))
     {
-        freshness_forced_version_remove(settings, uid);
         return FALSE;
     }
 
-    uint32_t activeAudioId = naturalAudioId;
-    uint32_t forcedAudioId = 0;
-    if (freshness_forced_version_find(settings, uid, naturalAudioId, &forcedAudioId))
+    bool_t stored = freshness_forced_version_set(settings, uid, newForcedAudioId,
+                                                  naturalAudioId);
+    if (stored)
     {
-        activeAudioId = forcedAudioId;
+        TRACE_INFO("Assigned deterministic V3 content version rUID=%s revision=%" PRIu32 " natural=%" PRIu32 " effective=%" PRIu32 "\r\n",
+                   canonicalRuid,
+                   tonieInfo != NULL ? tonieInfo->json.source_revision : 0,
+                   naturalAudioId, newForcedAudioId);
     }
-
-    if (freshness_audio_id_compare_value(naturalAudioId, NULL, NULL) != freshness_audio_id_compare_value(boxAudioId, NULL, NULL) &&
-        freshness_audio_id_compare_value(activeAudioId, NULL, NULL) != freshness_audio_id_compare_value(boxAudioId, NULL, NULL))
-    {
-        freshness_forced_version_remove(settings, uid);
-        return FALSE;
-    }
-
-    uint32_t newForcedAudioId = freshness_new_forced_version(naturalAudioId, boxAudioId);
-    return freshness_forced_version_set(settings, uid, newForcedAudioId, naturalAudioId);
+    return stored;
 }
 
 static bool_t freshness_source_changed_contains_ruid(settings_t *settings, const char *ruid)
 {
     uint64_t uid = 0;
-    return freshness_ruid_to_uid(ruid, &uid) && freshness_cache_source_changed_contains(settings, uid);
+    return tb2_ruid_to_uid(ruid, &uid) && freshness_cache_source_changed_contains(settings, uid);
 }
 
 static const char *freshness_v3_resume_behavior(settings_t *settings, contentJson_t *content_json, const char *ruid)
@@ -2063,12 +2499,97 @@ static uint32_t freshness_v3_content_meta_version(settings_t *settings, tonie_in
 {
     uint64_t uid = 0;
     uint32_t effectiveAudioId = fallbackAudioId;
-    if (freshness_ruid_to_uid(ruid, &uid) &&
-        freshness_get_effective_server_audio_id(settings, tonieInfo, uid, &effectiveAudioId, NULL, NULL))
+    if (!tb2_ruid_to_uid(ruid, &uid))
     {
+        return fallbackAudioId;
+    }
+
+    bool_t forced = FALSE;
+    bool_t available = freshness_get_effective_server_audio_id(
+        settings, tonieInfo, uid, &effectiveAudioId, NULL, &forced);
+    if (!forced && freshness_cache_source_changed_contains(settings, uid))
+    {
+        uint32_t boxAudioId = 0;
+        bool_t boxAudioIdKnown = freshness_inventory_find_uid(settings, uid,
+                                                               &boxAudioId);
+        if (!freshness_set_forced_version_for_source_change(settings,
+                                                            tonieInfo,
+                                                            uid,
+                                                            boxAudioIdKnown,
+                                                            boxAudioId) ||
+            !freshness_get_effective_server_audio_id(settings, tonieInfo, uid,
+                                                     &effectiveAudioId, NULL,
+                                                     NULL))
+        {
+            char canonicalRuid[17];
+            tb2_ruid_from_uid(uid, canonicalRuid);
+            TRACE_ERROR("Could not allocate the pending V3 content version for rUID %s\r\n",
+                        canonicalRuid);
+            return 0;
+        }
         return effectiveAudioId;
     }
-    return fallbackAudioId;
+    return available ? effectiveAudioId : fallbackAudioId;
+}
+
+static bool_t freshness_confirm_source_change_after_chapter(client_ctx_t *client_ctx,
+                                                            const char *ruid,
+                                                            uint32_t version,
+                                                            bool_t private_source,
+                                                            const char *chapter_name)
+{
+    if (client_ctx == NULL || client_ctx->settings == NULL ||
+        !freshness_source_changed_contains_ruid(client_ctx->settings, ruid))
+    {
+        return FALSE;
+    }
+
+    char canonical_ruid[TB2_RUID_SIZE];
+    uint64_t uid = 0;
+    if (!tb2_ruid_canonicalize(ruid, canonical_ruid) ||
+        !tb2_ruid_to_uid(canonical_ruid, &uid))
+    {
+        return FALSE;
+    }
+
+    tonie_info_t *current = getTonieInfoFromRuid(canonical_ruid, false,
+                                                  client_ctx->settings);
+    if (current == NULL)
+    {
+        return FALSE;
+    }
+    bool_t source_configured = current->json.source != NULL &&
+                               current->json.source[0] != '\0';
+    bool_t matches = source_configured == private_source;
+    if (matches && private_source)
+    {
+        uint32_t natural_version = 0;
+        freshness_get_natural_server_audio_id(current, &natural_version, NULL);
+        matches = freshness_v3_content_meta_version(client_ctx->settings,
+                                                     current,
+                                                     canonical_ruid,
+                                                     natural_version) == version;
+    }
+    freeTonieInfo(current);
+
+    if (!matches)
+    {
+        TRACE_DEBUG("Keeping V3 source-change marker for rUID %s: chapter %s version=%" PRIu32 " no longer matches current source\r\n",
+                    canonical_ruid, chapter_name != NULL ? chapter_name : "(unknown)",
+                    version);
+        return FALSE;
+    }
+
+    if (!freshness_cache_remove_uid(client_ctx->settings, uid))
+    {
+        return FALSE;
+    }
+    TRACE_INFO("Completed V3 source change overlay=%u rUID=%s version=%" PRIu32 " chapter=%s source=%s\r\n",
+               (unsigned)client_ctx->settings->internal.overlayNumber,
+               canonical_ruid, version,
+               chapter_name != NULL ? chapter_name : "(unknown)",
+               private_source ? "private" : "original");
+    return TRUE;
 }
 
 static void freshness_evaluate_tonie(settings_t *settings, tonie_info_t *tonieInfo, uint64_t uid, uint32_t boxAudioIdRaw, bool_t force_stale, bool_t log_details, freshness_decision_t *decision)
@@ -2076,7 +2597,42 @@ static void freshness_evaluate_tonie(settings_t *settings, tonie_info_t *tonieIn
     osMemset(decision, 0, sizeof(*decision));
     decision->boxAudioId = freshness_audio_id_compare_value(boxAudioIdRaw, &decision->custom_box, decision->date_buffer_box);
 
-    if (tonieInfo == NULL || settings == NULL)
+    if (settings == NULL)
+    {
+        decision->should_mark_freshness = force_stale;
+        return;
+    }
+
+    bool_t source_configured = tonieInfo->json.source != NULL &&
+                               tonieInfo->json.source[0] != '\0';
+    if (settings->toniebox.boxGeneration == GENERATION_TB2 && !source_configured)
+    {
+        char canonicalRuid[TB2_RUID_SIZE];
+        uint32_t cachedVersion = 0;
+        tb2_ruid_from_uid(uid, canonicalRuid);
+        if (settings->cloud.cacheContentV3 &&
+            v3_native_cache_active_version(settings->internal.cachedirfull,
+                                           settings->internal.overlayNumber,
+                                           canonicalRuid, &cachedVersion))
+        {
+            decision->serverAudioId = cachedVersion;
+            decision->effectiveServerAudioIdRaw = cachedVersion;
+            decision->naturalServerAudioIdRaw = cachedVersion;
+            decision->serverAudioIdAvailable = TRUE;
+        }
+        decision->should_mark_freshness = force_stale ||
+                                          (decision->serverAudioIdAvailable &&
+                                           boxAudioIdRaw != cachedVersion);
+        if (log_details)
+        {
+            TRACE_INFO("  uid: %016" PRIX64 ", TB2 original source, box version=%08" PRIX32 ", cached TONIES version=%s\r\n",
+                       uid, boxAudioIdRaw,
+                       decision->serverAudioIdAvailable ? "available" : "not available");
+        }
+        return;
+    }
+
+    if (tonieInfo == NULL)
     {
         decision->should_mark_freshness = force_stale;
         return;
@@ -2093,7 +2649,7 @@ static void freshness_evaluate_tonie(settings_t *settings, tonie_info_t *tonieIn
         uint32_t effectiveServerAudioId = naturalServerAudioId;
         uint32_t forcedServerAudioId = 0;
         decision->naturalServerAudioIdRaw = naturalServerAudioId;
-        if (freshness_forced_version_find(settings, uid, naturalServerAudioId, &forcedServerAudioId))
+        if (freshness_forced_version_find(settings, uid, &forcedServerAudioId))
         {
             effectiveServerAudioId = forcedServerAudioId;
             decision->forced_server_audio_id = TRUE;
@@ -2103,16 +2659,26 @@ static void freshness_evaluate_tonie(settings_t *settings, tonie_info_t *tonieIn
         decision->serverAudioId = freshness_audio_id_compare_value(effectiveServerAudioId, &decision->custom_server, decision->date_buffer_server);
         decision->serverAudioIdAvailable = TRUE;
 
-        if (tap_has_audio_id)
+        const bool_t use_tb1_audio_id_policy =
+            settings->toniebox.boxGeneration != GENERATION_TB2;
+        if (!use_tb1_audio_id_policy)
+        {
+            tonieInfo->updated = boxAudioIdRaw != effectiveServerAudioId;
+        }
+        else if (tap_has_audio_id)
         {
             tonieInfo->updated = decision->boxAudioId != decision->serverAudioId;
         }
         else
         {
             tonieInfo->updated = decision->boxAudioId < decision->serverAudioId;
-            tonieInfo->updated = tonieInfo->updated || (settings->cloud.updateOnLowerAudioId && (decision->boxAudioId > decision->serverAudioId));
+            tonieInfo->updated = tonieInfo->updated ||
+                                 (use_tb1_audio_id_policy &&
+                                  settings->cloud.updateOnLowerAudioId &&
+                                  decision->boxAudioId > decision->serverAudioId);
         }
-        if (settings->cloud.prioCustomContent && !settings->cloud.updateOnLowerAudioId)
+        if (use_tb1_audio_id_policy && settings->cloud.prioCustomContent &&
+            !settings->cloud.updateOnLowerAudioId)
         {
             if (decision->custom_box && !decision->custom_server)
             {
@@ -2139,7 +2705,56 @@ static void freshness_evaluate_tonie(settings_t *settings, tonie_info_t *tonieIn
 
     decision->stable_cached_tap = tap_is_stable_cached_playlist(tonieInfo);
     decision->tap_dynamic_freshness = tap_should_force_dynamic_freshness(tonieInfo);
-    decision->tap_final_needs_rebuild = tap_has_audio_id &&
+    if (settings->toniebox.boxGeneration == GENERATION_TB2 && tap_freshness)
+    {
+        char tap_ruid[TB2_RUID_SIZE];
+        v3_local_tap_state_t tap_state;
+        tb2_ruid_from_uid(uid, tap_ruid);
+        bool_t tap_state_valid = v3_local_tap_state_load(
+                                     settings->internal.cachedirfull,
+                                     settings->internal.overlayNumber,
+                                     tap_ruid, &tap_state) == NO_ERROR &&
+                                 tap_state.valid;
+        bool_t descriptor_valid = FALSE;
+        if (tap_state_valid)
+        {
+            v3_local_content_generation_t stored_generation;
+            osMemset(&stored_generation, 0, sizeof(stored_generation));
+            descriptor_valid = v3_local_content_generation_load(
+                                   settings->internal.cachedirfull,
+                                   settings->internal.overlayNumber,
+                                   tap_ruid,
+                                   tap_state.prepared_version,
+                                   &stored_generation) == NO_ERROR &&
+                               stored_generation.source_kind == V3_LOCAL_CONTENT_SOURCE_TAP;
+            v3_local_content_generation_free(&stored_generation);
+        }
+        bool_t revision_changed = !tap_state_valid ||
+                                  tap_state.tap_audio_id != (uint32_t)tap->audio_id ||
+                                  tap_state.shuffle_mode != tap->shuffle;
+        bool_t playback_confirmation_pending = tap_state_valid &&
+                                               tap_state.playing_version !=
+                                                   tap_state.prepared_version;
+        decision->tap_dynamic_freshness = revision_changed ||
+                                          !descriptor_valid ||
+                                          (tap_state_valid && tap_state.regeneration_pending) ||
+                                          playback_confirmation_pending;
+        if (tap_state_valid)
+        {
+            decision->naturalServerAudioIdRaw = tap_state.prepared_version;
+            decision->effectiveServerAudioIdRaw = tap_state.prepared_version;
+            decision->serverAudioId = freshness_audio_id_compare_value(
+                tap_state.prepared_version,
+                &decision->custom_server,
+                decision->date_buffer_server);
+            decision->serverAudioIdAvailable = TRUE;
+            decision->forced_server_audio_id = FALSE;
+            tonieInfo->updated = boxAudioIdRaw != tap_state.prepared_version;
+        }
+    }
+    decision->tap_final_needs_rebuild =
+                                        settings->toniebox.boxGeneration != GENERATION_TB2 &&
+                                        tap_has_audio_id &&
                                         tap->shuffle == TAP_SHUFFLE_NONE &&
                                         (!tonieInfo->valid ||
                                          tonieInfo->tafHeader == NULL ||
@@ -2215,7 +2830,7 @@ static void freshness_evaluate_tonie(settings_t *settings, tonie_info_t *tonieIn
     }
 }
 
-void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckRequest *freshReq, TonieFreshnessCheckResponse *freshResp, TonieFreshnessCheckRequest *freshReqCloud, size_t *freshnessCacheLenOut)
+void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckRequest *freshReq, TonieFreshnessCheckResponse *freshResp, TonieFreshnessCheckRequest *freshReqCloud, size_t *freshnessCacheLenOut, bool_t allow_cloud_override)
 {
     settings_t *settings = client_ctx->settings;
     TRACE_INFO("Found %" PRIuSIZE " tonies:\n", freshReq->n_tonie_infos);
@@ -2248,6 +2863,12 @@ void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckReques
 
     for (size_t i = 0; i < freshnessCacheLen; i++)
     {
+        char cached_ruid[TB2_RUID_SIZE];
+        tb2_ruid_from_uid(freshnessCache[i], cached_ruid);
+        if (tb2_ruid_classify(cached_ruid) == TB2_RUID_SYSTEM)
+        {
+            continue;
+        }
         bool_t requested = FALSE;
         for (size_t j = 0; j < freshReq->n_tonie_infos; j++)
         {
@@ -2274,6 +2895,33 @@ void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckReques
     for (size_t i = 0; i < freshReq->n_tonie_infos; i++)
     {
         uint64_t uid = freshReq->tonie_infos[i]->uid;
+        bool_t duplicate = FALSE;
+        for (size_t previous = 0; previous < i; previous++)
+        {
+            if (freshReq->tonie_infos[previous]->uid == uid)
+            {
+                duplicate = TRUE;
+                break;
+            }
+        }
+        if (duplicate)
+        {
+            continue;
+        }
+        char canonical_ruid[TB2_RUID_SIZE];
+        tb2_ruid_from_uid(uid, canonical_ruid);
+        if (tb2_ruid_classify(canonical_ruid) == TB2_RUID_SYSTEM)
+        {
+            if (!freshness_cloud_request_add(freshReqCloud,
+                                             freshReq->n_tonie_infos,
+                                             uid,
+                                             freshReq->tonie_infos[i]->audio_id))
+            {
+                TRACE_ERROR("Could not add TB2 system rUID %s to freshness cloud request\r\n",
+                            canonical_ruid);
+            }
+            continue;
+        }
         bool_t cache_stale = freshness_uid_array_contains(freshnessCache, freshnessCacheLen, uid);
         bool_t source_changed_stale = cache_stale && freshness_cache_source_changed_contains(settings, uid);
         tonie_info_t *tonieInfo = getTonieInfoFromUid(uid, false, settings);
@@ -2284,7 +2932,7 @@ void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckReques
         if (cache_stale && !source_changed_stale && !decision.should_mark_freshness)
         {
             char cruid[17];
-            freshness_uid_to_ruid(uid, cruid);
+            tb2_ruid_from_uid(uid, cruid);
             TRACE_INFO("Accepted V3 freshness inventory for rUID %s, clearing pending freshness update\r\n", cruid);
             if (boxCorrectedUids != NULL)
             {
@@ -2297,14 +2945,37 @@ void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckReques
             decision.should_mark_freshness = TRUE;
         }
 
-        if (!tonieInfo->json.nocloud)
+        bool_t private_source = tonieInfo != NULL &&
+                                tonieInfo->json.source != NULL &&
+                                tonieInfo->json.source[0] != '\0';
+        bool_t forward_to_cloud;
+        if (allow_cloud_override && settings->toniebox.boxGeneration == GENERATION_TB2)
         {
-            freshReqCloud->tonie_infos[freshReqCloud->n_tonie_infos] = freshReq->tonie_infos[i];
-            if (decision.serverAudioIdAvailable)
+            forward_to_cloud = !private_source &&
+                               tb2_tonie_cloud_access_allowed(settings,
+                                                              canonical_ruid,
+                                                              tonieInfo);
+        }
+        else
+        {
+            forward_to_cloud = tonieInfo != NULL &&
+                               (!tonieInfo->json.nocloud ||
+                                (allow_cloud_override &&
+                                 tonieInfo->json.cloud_override));
+        }
+        if (forward_to_cloud)
+        {
+            uint32_t cloud_version = decision.serverAudioIdAvailable
+                                         ? decision.serverAudioId
+                                         : freshReq->tonie_infos[i]->audio_id;
+            if (!freshness_cloud_request_add(freshReqCloud,
+                                             freshReq->n_tonie_infos,
+                                             uid,
+                                             cloud_version))
             {
-                freshReqCloud->tonie_infos[freshReqCloud->n_tonie_infos]->audio_id = decision.serverAudioId;
+                TRACE_ERROR("Could not add rUID %s to freshness cloud request\r\n",
+                            canonical_ruid);
             }
-            freshReqCloud->n_tonie_infos++;
         }
 
         if (decision.should_mark_freshness)
@@ -2321,65 +2992,198 @@ void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckReques
     free(boxCorrectedUids);
 }
 
-void freshness_mark_content_mapping_changed(const char *ruid, bool_t source_changed)
+static bool_t freshness_mark_content_mapping_changed_for_overlay(settings_t *settings,
+                                                                 uint64_t uid,
+                                                                 bool_t source_changed,
+                                                                 bool_t require_inventory)
 {
+    if (settings == NULL || !settings->internal.config_used ||
+        settings->internal.overlayNumber == 0 ||
+        settings->toniebox.boxGeneration != GENERATION_TB2)
+    {
+        return FALSE;
+    }
+
+    uint32_t boxAudioId = 0;
+    bool_t inventory_available = freshness_inventory_find_uid(settings, uid, &boxAudioId);
+    if (!inventory_available && (require_inventory || !source_changed))
+    {
+        return FALSE;
+    }
+
+    tonie_info_t *tonieInfo = (inventory_available || source_changed)
+                                  ? getTonieInfoFromUid(uid, false, settings)
+                                  : NULL;
+    bool_t forced_version_set = FALSE;
+    bool_t should_mark_freshness = source_changed;
+    if (source_changed)
+    {
+        char canonicalRuid[TB2_RUID_SIZE];
+        tb2_ruid_from_uid(uid, canonicalRuid);
+        v3_native_cache_invalidate(settings->internal.cachedirfull,
+                                   settings->internal.overlayNumber,
+                                   canonicalRuid);
+        if (tonieInfo != NULL && tonieInfo->json.cloud_ruid != NULL &&
+            osStrcasecmp(tonieInfo->json.cloud_ruid, canonicalRuid))
+        {
+            v3_native_cache_invalidate(settings->internal.cachedirfull,
+                                       settings->internal.overlayNumber,
+                                       tonieInfo->json.cloud_ruid);
+        }
+        forced_version_set = freshness_set_forced_version_for_source_change(
+            settings, tonieInfo, uid, inventory_available, boxAudioId);
+    }
+    if (inventory_available)
+    {
+        freshness_decision_t decision;
+        freshness_evaluate_tonie(settings, tonieInfo, uid, boxAudioId, FALSE, FALSE,
+                                 &decision);
+        should_mark_freshness = should_mark_freshness || decision.should_mark_freshness;
+    }
+
+    bool_t queued = FALSE;
+    if (should_mark_freshness && freshness_cache_add_uid(settings, uid, NULL))
+    {
+        if (source_changed)
+        {
+            freshness_cache_add_source_changed_uid(settings, uid);
+        }
+
+        char cruid[17];
+        tb2_ruid_from_uid(uid, cruid);
+        TRACE_INFO("Marked rUID %s for V3 freshness update on overlay %s (%s, inventory=%s)\r\n",
+                   cruid,
+                   settings->commonName,
+                   forced_version_set ? "source changed, forced version" :
+                       (source_changed ? "source changed" : "freshness comparison"),
+                   inventory_available ? "present" : "absent");
+        mqtt_server_publish_fresh_tonie_for_overlay(settings->internal.overlayNumber, uid);
+        queued = TRUE;
+    }
+
+    if (tonieInfo != NULL)
+    {
+        freeTonieInfo(tonieInfo);
+    }
+    return queued;
+}
+
+void freshness_mark_content_mapping_changed(settings_t *target_settings,
+                                             const char *ruid,
+                                             bool_t source_changed)
+{
+    if (tb2_ruid_classify(ruid) == TB2_RUID_SYSTEM)
+    {
+        TRACE_DEBUG("Ignoring local content mapping update for TB2 system rUID %s\r\n",
+                    ruid);
+        return;
+    }
     uint64_t uid = 0;
-    if (!freshness_ruid_to_uid(ruid, &uid))
+    if (!tb2_ruid_to_uid(ruid, &uid))
     {
         TRACE_WARNING("Could not process V3 freshness update for invalid rUID %s\r\n", ruid ? ruid : "(null)");
         return;
     }
 
+    if (target_settings != NULL && target_settings->internal.overlayNumber > 0)
+    {
+        freshness_mark_content_mapping_changed_for_overlay(target_settings, uid,
+                                                            source_changed, FALSE);
+        return;
+    }
+
     for (uint8_t overlay_id = 1; overlay_id < MAX_OVERLAYS; overlay_id++)
     {
-        settings_t *settings = get_settings_id(overlay_id);
-        if (settings == NULL || !settings->internal.config_used)
-        {
-            continue;
-        }
+        freshness_mark_content_mapping_changed_for_overlay(get_settings_id(overlay_id), uid,
+                                                            source_changed, TRUE);
+    }
+}
 
-        uint32_t boxAudioId = 0;
-        if (!freshness_inventory_find_uid(settings, uid, &boxAudioId))
-        {
-            continue;
-        }
+void v3_tap_playback_observe(settings_t *settings,
+                             const char *previous_ruid,
+                             const char *current_ruid,
+                             bool_t content_version_valid,
+                             uint32_t content_version)
+{
+    if (settings == NULL || settings->toniebox.boxGeneration != GENERATION_TB2)
+    {
+        return;
+    }
 
-        tonie_info_t *tonieInfo = getTonieInfoFromUid(uid, false, settings);
-        bool_t forced_version_set = FALSE;
-        if (source_changed)
+    char previous[TB2_RUID_SIZE];
+    char current[TB2_RUID_SIZE];
+    bool_t previous_valid = tb2_ruid_canonicalize(previous_ruid, previous);
+    bool_t current_valid = tb2_ruid_canonicalize(current_ruid, current);
+    bool_t cycle_ended = previous_valid &&
+                         (!current_valid || osStrcasecmp(previous, current) != 0);
+    if (cycle_ended)
+    {
+        tonie_info_t *previous_info = getTonieInfoFromRuid(previous, false, settings);
+        v3_local_tap_state_t state;
+        if (v3_source_is_tap(previous_info) &&
+            v3_local_tap_state_load(settings->internal.cachedirfull,
+                                    settings->internal.overlayNumber,
+                                    previous, &state) == NO_ERROR &&
+            state.valid && state.shuffle_mode != TAP_SHUFFLE_NONE)
         {
-            forced_version_set = freshness_maybe_set_forced_version(settings, tonieInfo, uid, boxAudioId);
-        }
-        freshness_decision_t decision;
-        freshness_evaluate_tonie(settings, tonieInfo, uid, boxAudioId, FALSE, FALSE, &decision);
-
-        if (source_changed || decision.should_mark_freshness)
-        {
-            if (freshness_cache_add_uid(settings, uid, NULL))
+            state.regeneration_pending = TRUE;
+            state.desired_version = 0;
+            if (v3_local_tap_state_save(settings->internal.cachedirfull,
+                                        settings->internal.overlayNumber,
+                                        previous, &state) == NO_ERROR)
             {
-                if (source_changed)
+                uint64_t uid = 0;
+                if (tb2_ruid_to_uid(previous, &uid) &&
+                    freshness_cache_add_uid(settings, uid, NULL))
                 {
-                    freshness_cache_add_source_changed_uid(settings, uid);
+                    mqtt_server_publish_fresh_tonie_for_overlay(
+                        settings->internal.overlayNumber, uid);
                 }
-                else
-                {
-                    freshness_cache_remove_source_changed_uid(settings, uid);
-                }
-
-                char cruid[17];
-                freshness_uid_to_ruid(uid, cruid);
-                TRACE_INFO("Marked rUID %s for V3 freshness update on overlay %s (%s)\r\n",
-                           cruid,
-                           settings->commonName,
-                           forced_version_set ? "source changed, forced version" : (source_changed ? "source changed" : "freshness comparison"));
-                mqtt_server_publish_fresh_tonies_for_overlay(overlay_id);
+                TRACE_INFO("TB2 TAP playback cycle ended overlay=%u rUID=%s; next selection pending\r\n",
+                           (unsigned)settings->internal.overlayNumber,
+                           previous);
             }
         }
-
-        if (tonieInfo != NULL)
+        if (previous_info != NULL)
         {
-            freeTonieInfo(tonieInfo);
+            freeTonieInfo(previous_info);
         }
+    }
+
+    if (!current_valid || !content_version_valid || content_version == 0)
+    {
+        return;
+    }
+
+    tonie_info_t *current_info = getTonieInfoFromRuid(current, false, settings);
+    v3_local_tap_state_t state;
+    if (v3_source_is_tap(current_info) &&
+        v3_local_tap_state_load(settings->internal.cachedirfull,
+                                settings->internal.overlayNumber,
+                                current, &state) == NO_ERROR &&
+        state.valid &&
+        (content_version == state.prepared_version ||
+         content_version == state.previous_version))
+    {
+        state.playing_version = content_version;
+        if (v3_local_tap_state_save(settings->internal.cachedirfull,
+                                    settings->internal.overlayNumber,
+                                    current, &state) == NO_ERROR &&
+            content_version == state.prepared_version)
+        {
+            uint64_t uid = 0;
+            if (tb2_ruid_to_uid(current, &uid))
+            {
+                freshness_cache_remove_uid(settings, uid);
+            }
+            TRACE_INFO("Confirmed TB2 TAP playback overlay=%u rUID=%s version=%" PRIu32 "\r\n",
+                       (unsigned)settings->internal.overlayNumber,
+                       current, content_version);
+        }
+    }
+    if (current_info != NULL)
+    {
+        freeTonieInfo(current_info);
     }
 }
 
@@ -2418,7 +3222,7 @@ error_t handleCloudFreshnessCheck(HttpConnection *connection, const char_t *uri,
             TonieFreshnessCheckRequest freshReqCloud = TONIE_FRESHNESS_CHECK_REQUEST__INIT;
             size_t freshnessCacheLen = 0;
 
-            process_freshness_check(client_ctx, freshReq, &freshResp, &freshReqCloud, &freshnessCacheLen);
+            process_freshness_check(client_ctx, freshReq, &freshResp, &freshReqCloud, &freshnessCacheLen, FALSE);
 
             if (settings->cloud.enabled && settings->cloud.enableV1FreshnessCheck)
             {
@@ -2432,7 +3236,7 @@ error_t handleCloudFreshnessCheck(HttpConnection *connection, const char_t *uri,
                 if (!cloud_request_post(NULL, 0, "/v1/freshness-check", queryString, data, dataLen, NULL, &cbr))
                 {
                     tonie_freshness_check_request__free_unpacked(freshReq, NULL);
-                    osFreeMem(freshReqCloud.tonie_infos);
+                    freshness_cloud_request_free(&freshReqCloud);
                     osFreeMem(freshResp.tonie_marked);
                     return NO_ERROR;
                 }
@@ -2449,7 +3253,7 @@ error_t handleCloudFreshnessCheck(HttpConnection *connection, const char_t *uri,
 
             size_t dataLen = tonie_freshness_check_response__get_packed_size(&freshResp);
             tonie_freshness_check_response__pack(&freshResp, (uint8_t *)data);
-            osFreeMem(freshReqCloud.tonie_infos);
+            freshness_cloud_request_free(&freshReqCloud);
             osFreeMem(freshResp.tonie_marked);
             TRACE_INFO("Freshness check response: size=%" PRIuSIZE ", content=%s\n", dataLen, data);
 
@@ -2460,6 +3264,162 @@ error_t handleCloudFreshnessCheck(HttpConnection *connection, const char_t *uri,
         return NO_ERROR;
     }
     return NO_ERROR;
+}
+
+typedef struct
+{
+    /* Must stay first: cloud_request reads every callback context as cbr_ctx_t. */
+    cbr_ctx_t request;
+    TonieFreshnessCheckResponse *local_response;
+    const TonieFreshnessCheckRequest *cloud_request;
+    size_t response_capacity;
+    uint8_t *data;
+    size_t length;
+    uint32_t status_code;
+    bool_t complete;
+    bool_t failed;
+} v3_freshness_cloud_ctx_t;
+
+static void v3_freshness_cloud_response(void *source, HttpClientContext *cloud)
+{
+    v3_freshness_cloud_ctx_t *context = source;
+    context->status_code = cloud->statusCode;
+}
+
+static void v3_freshness_cloud_header(void *source, HttpClientContext *cloud,
+                                      const char *header, const char *value)
+{
+    (void)source;
+    (void)cloud;
+    (void)header;
+    (void)value;
+}
+
+static void v3_freshness_cloud_body(void *source, HttpClientContext *cloud,
+                                    const char *payload, size_t length,
+                                    error_t error)
+{
+    v3_freshness_cloud_ctx_t *context = source;
+    (void)cloud;
+    if (length > 0 && !context->failed)
+    {
+        if (length > BODY_BUFFER_SIZE ||
+            context->length > BODY_BUFFER_SIZE - length)
+        {
+            context->failed = TRUE;
+        }
+        else
+        {
+            uint8_t *updated = osAllocMem(context->length + length);
+            if (updated == NULL)
+            {
+                context->failed = TRUE;
+            }
+            else
+            {
+                if (context->length > 0)
+                {
+                    osMemcpy(updated, context->data, context->length);
+                }
+                osMemcpy(updated + context->length, payload, length);
+                osFreeMem(context->data);
+                context->data = updated;
+                context->length += length;
+            }
+        }
+    }
+    if (error == ERROR_END_OF_STREAM)
+    {
+        context->complete = TRUE;
+    }
+    else if (error != NO_ERROR)
+    {
+        context->failed = TRUE;
+    }
+}
+
+static void v3_freshness_cloud_disconnect(void *source, HttpClientContext *cloud)
+{
+    (void)source;
+    (void)cloud;
+}
+
+static bool_t v3_freshness_cloud_requested(const TonieFreshnessCheckRequest *request,
+                                           uint64_t uid)
+{
+    if (request == NULL)
+    {
+        return FALSE;
+    }
+    for (size_t i = 0; i < request->n_tonie_infos; i++)
+    {
+        if (request->tonie_infos[i] != NULL &&
+            request->tonie_infos[i]->uid == uid)
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static bool_t v3_freshness_merge_cloud_response(v3_freshness_cloud_ctx_t *context)
+{
+    if (context == NULL || context->status_code != 200 || !context->complete ||
+        context->failed || context->data == NULL || context->length == 0)
+    {
+        return FALSE;
+    }
+
+    const char *parse_end = NULL;
+    cJSON *root = cJSON_ParseWithLengthOpts((const char *)context->data,
+                                            context->length,
+                                            &parse_end, 0);
+    while (parse_end != NULL &&
+           parse_end < (const char *)context->data + context->length &&
+           isspace((unsigned char)*parse_end))
+    {
+        parse_end++;
+    }
+    cJSON *items = root != NULL
+                       ? cJSON_GetObjectItemCaseSensitive(root, "items")
+                       : NULL;
+    if (root == NULL ||
+        parse_end != (const char *)context->data + context->length ||
+        !cJSON_IsArray(items))
+    {
+        cJSON_Delete(root);
+        return FALSE;
+    }
+
+    size_t merged = 0;
+    cJSON *item = NULL;
+    cJSON_ArrayForEach(item, items)
+    {
+        char canonical_ruid[TB2_RUID_SIZE];
+        uint64_t uid = 0;
+        if (!cJSON_IsString(item) || item->valuestring == NULL ||
+            !tb2_ruid_canonicalize(item->valuestring, canonical_ruid) ||
+            !tb2_ruid_to_uid(canonical_ruid, &uid) ||
+            !v3_freshness_cloud_requested(context->cloud_request, uid))
+        {
+            TRACE_WARNING("Ignoring unexpected TONIES V3 freshness item %s\r\n",
+                          cJSON_IsString(item) && item->valuestring != NULL
+                              ? item->valuestring
+                              : "(invalid)");
+            continue;
+        }
+        size_t before = context->local_response->n_tonie_marked;
+        if (freshness_response_add_uid(context->local_response,
+                                       context->response_capacity, uid) &&
+            context->local_response->n_tonie_marked > before)
+        {
+            merged++;
+        }
+    }
+    cJSON_Delete(root);
+    TRACE_INFO("Merged %" PRIuSIZE " TONIES V3 freshness items with local decisions\r\n",
+               merged);
+    return TRUE;
 }
 
 error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
@@ -2523,24 +3483,39 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
     
     int i = 0;
     while (item && i < count) {
+        uint64_t uid = 0;
+        char canonical_ruid[TB2_RUID_SIZE];
+        if (item->string == NULL || !cJSON_IsNumber(item) ||
+            item->valuedouble < 0 || item->valuedouble > UINT32_MAX ||
+            (double)(uint32_t)item->valuedouble != item->valuedouble ||
+            !tb2_ruid_canonicalize(item->string, canonical_ruid) ||
+            !tb2_ruid_to_uid(canonical_ruid, &uid))
+        {
+            TRACE_WARNING("Ignoring invalid V3 freshness entry %s\r\n",
+                          item->string != NULL ? item->string : "(null)");
+            item = item->next;
+            continue;
+        }
+
+        bool_t duplicate = FALSE;
+        for (int previous = 0; previous < i; previous++)
+        {
+            if (fcInfos[previous].uid == uid)
+            {
+                fcInfos[previous].audio_id = (uint32_t)item->valuedouble;
+                duplicate = TRUE;
+                break;
+            }
+        }
+        if (duplicate)
+        {
+            item = item->next;
+            continue;
+        }
+
         tonie_fcinfo__init(&fcInfos[i]);
-        
-        char ruidStr[17];
-        osStrncpy(ruidStr, item->string, 16);
-        ruidStr[16] = '\0';
-        
-        char uidStr[17];
-        for (int j = 0; j < 8; j++) {
-            uidStr[j*2] = ruidStr[14 - j*2];
-            uidStr[j*2 + 1] = ruidStr[15 - j*2];
-        }
-        uidStr[16] = '\0';
-        
-        fcInfos[i].uid = strtoull(uidStr, NULL, 16);
-        
-        if (cJSON_IsNumber(item)) {
-            fcInfos[i].audio_id = (uint32_t)item->valuedouble;
-        }
+        fcInfos[i].uid = uid;
+        fcInfos[i].audio_id = (uint32_t)item->valuedouble;
         freshReq.tonie_infos[i] = &fcInfos[i];
         item = item->next;
         i++;
@@ -2552,55 +3527,76 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
     TonieFreshnessCheckRequest freshReqCloud = TONIE_FRESHNESS_CHECK_REQUEST__INIT;
     size_t freshnessCacheLen = 0;
 
-    process_freshness_check(client_ctx, &freshReq, &freshResp, &freshReqCloud, &freshnessCacheLen);
+    process_freshness_check(client_ctx, &freshReq, &freshResp, &freshReqCloud, &freshnessCacheLen, TRUE);
     
-    if (client_ctx->settings->cloud.tb2_v3_enabled && client_ctx->settings->cloud.enableV3FreshnessCheck)
+    if (client_ctx->settings->cloud.tb2_v3_enabled &&
+        client_ctx->settings->cloud.enableV3FreshnessCheck &&
+        freshReqCloud.n_tonie_infos > 0)
     {
         cJSON *cloudReqJson = cJSON_CreateObject();
         cJSON *cloudContentObj = cJSON_CreateObject();
-        cJSON_AddItemToObject(cloudReqJson, "content", cloudContentObj);
-        
-        for (size_t k = 0; k < freshReqCloud.n_tonie_infos; k++) {
-            char ruidStr[17];
-            char uidStr[17];
-            osSprintf(uidStr, "%016" PRIX64, freshReqCloud.tonie_infos[k]->uid);
-            for (int j = 0; j < 8; j++) {
-                ruidStr[j*2] = uidStr[14 - j*2];
-                ruidStr[j*2 + 1] = uidStr[15 - j*2];
-            }
-            ruidStr[16] = '\0';
-            
-            cJSON_AddNumberToObject(cloudContentObj, ruidStr, freshReqCloud.tonie_infos[k]->audio_id);
-        }
-        
-        char *cloud_req_str = cJSON_PrintUnformatted(cloudReqJson);
-        size_t cloud_req_len = osStrlen(cloud_req_str);
-        
-        cbr_ctx_t ctx;
-        req_cbr_t cbr = getCloudCbr(connection, uri, queryString, V3_FRESHNESS_CHECK, &ctx, client_ctx);
-        ctx.customData = (void *)&freshResp;
-        ctx.customDataLen = freshReq.n_tonie_infos + freshnessCacheLen;
-        
-        if (!cloud_request_tb2_post(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, (const uint8_t *)cloud_req_str, cloud_req_len, NULL, &cbr))
+        cJSON *cloudContentMap = NULL;
+        char *cloud_req_str = NULL;
+        bool_t cloud_map_complete = TRUE;
+        if (cloudReqJson != NULL && cloudContentObj != NULL &&
+            cJSON_AddItemToObject(cloudReqJson, "content", cloudContentObj))
         {
-            free(cloud_req_str);
-            cJSON_Delete(cloudReqJson);
-            free(fcInfos);
-            free(freshReq.tonie_infos);
-            if (freshReqCloud.tonie_infos) free(freshReqCloud.tonie_infos);
-            if (freshResp.tonie_marked) free(freshResp.tonie_marked);
-            cJSON_Delete(inputJson);
-            return NO_ERROR;
+            cloudContentMap = cloudContentObj;
+            cloudContentObj = NULL;
+            for (size_t k = 0; k < freshReqCloud.n_tonie_infos; k++)
+            {
+                char ruidStr[TB2_RUID_SIZE];
+                tb2_ruid_from_uid(freshReqCloud.tonie_infos[k]->uid, ruidStr);
+                if (cJSON_AddNumberToObject(
+                        cloudContentMap,
+                        ruidStr,
+                        freshReqCloud.tonie_infos[k]->audio_id) == NULL)
+                {
+                    TRACE_ERROR("Could not build TONIES V3 freshness map\r\n");
+                    cloud_map_complete = FALSE;
+                    break;
+                }
+            }
+            if (cloud_map_complete)
+            {
+                cloud_req_str = cJSON_PrintUnformatted(cloudReqJson);
+            }
         }
-        
-        free(cloud_req_str);
+        cJSON_Delete(cloudContentObj);
+
+        if (cloud_req_str != NULL)
+        {
+            v3_freshness_cloud_ctx_t cloud_context = {
+                .local_response = &freshResp,
+                .cloud_request = &freshReqCloud,
+                .response_capacity = freshReq.n_tonie_infos + freshnessCacheLen,
+            };
+            fillBaseCtx(connection, uri, queryString, V3_FRESHNESS_CHECK,
+                        &cloud_context.request, client_ctx);
+            req_cbr_t cbr = {
+                .ctx = &cloud_context,
+                .response = v3_freshness_cloud_response,
+                .header = v3_freshness_cloud_header,
+                .body = v3_freshness_cloud_body,
+                .disconnect = v3_freshness_cloud_disconnect,
+            };
+            error_t cloud_error = cloud_request_tb2_post(
+                client_ctx->settings->cloud.remote_hostname_tb2, 0, uri,
+                queryString, (const uint8_t *)cloud_req_str,
+                osStrlen(cloud_req_str), NULL, &cbr);
+            if (cloud_error != NO_ERROR ||
+                !v3_freshness_merge_cloud_response(&cloud_context))
+            {
+                TRACE_WARNING("TONIES V3 freshness unavailable or incomplete; using local decisions only\r\n");
+            }
+            osFreeMem(cloud_context.data);
+            cJSON_free(cloud_req_str);
+        }
+        else
+        {
+            TRACE_ERROR("Could not serialize TONIES V3 freshness request; using local decisions only\r\n");
+        }
         cJSON_Delete(cloudReqJson);
-        free(fcInfos);
-        free(freshReq.tonie_infos);
-        if (freshReqCloud.tonie_infos) free(freshReqCloud.tonie_infos);
-        if (freshResp.tonie_marked) free(freshResp.tonie_marked);
-        cJSON_Delete(inputJson);
-        return NO_ERROR;
     }
 
     TRACE_INFO("Setting freshnessCache with %" PRIuSIZE " entries\r\n", freshResp.n_tonie_marked);
@@ -2643,7 +3639,7 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
     
     free(fcInfos);
     free(freshReq.tonie_infos);
-    if (freshReqCloud.tonie_infos) free(freshReqCloud.tonie_infos);
+    freshness_cloud_request_free(&freshReqCloud);
     if (freshResp.tonie_marked) free(freshResp.tonie_marked);
     
     cJSON_Delete(inputJson);
@@ -2746,60 +3742,751 @@ error_t handleCloudSetupStatusV3(HttpConnection *connection, const char_t *uri, 
     return httpWriteResponse(connection, (uint8_t *)response_json, dataLen, false);
 }
 
-static error_t sendLocalContentMetaV3(HttpConnection *connection, const char *ruid, uint32_t version, uint32_t fileSize, const char *resumeBehavior, const char *tonieSalesId)
+#define V3_CHAPTER_URI_PREFIX "/v3/chapter/"
+#define V3_CHAPTER_URI_PREFIX_LENGTH 12U
+#define V3_LOCAL_CHAPTER_PREFIX "teddycloud_"
+#define V3_LOCAL_CHAPTER_PREFIX_LENGTH 11U
+#define V3_LOCAL_CHAPTER_MIME_URI "/v3/chapter/content.ogg"
+#define V3_LOCAL_CHAPTER_MAX_AGE 31536000U
+#define V3_LOCAL_CHAPTER_HASH_PREFIX_LENGTH 20U
+#define V3_LOCAL_CHAPTER_LEGACY_NAME_LENGTH 30U
+#define V3_LOCAL_CHAPTER_HASHED_NAME_LENGTH 56U
+
+typedef enum
 {
-    cJSON *respJson = cJSON_CreateObject();
-    if (respJson == NULL)
+    V3_LOCAL_CHAPTER_INVALID = 0,
+    V3_LOCAL_CHAPTER_LEGACY,
+    V3_LOCAL_CHAPTER_HASHED,
+} v3_local_chapter_format_t;
+
+typedef struct
+{
+    v3_local_chapter_format_t format;
+    size_t chapter_index;
+    size_t ruid_uri_offset;
+    char hash_prefix[V3_LOCAL_CHAPTER_HASH_PREFIX_LENGTH + 1];
+    char ruid[V3_LOCAL_CONTENT_RUID_SIZE];
+} v3_local_chapter_request_t;
+
+static bool_t v3_local_is_hex_string(const char *value, size_t length, bool_t lowercase_only)
+{
+    if (value == NULL)
     {
-        return ERROR_OUT_OF_MEMORY;
+        return FALSE;
     }
 
-    if (cJSON_AddNumberToObject(respJson, "version", version) == NULL ||
+    for (size_t i = 0; i < length; i++)
+    {
+        unsigned char current = (unsigned char)value[i];
+        if (!isxdigit(current) || (lowercase_only && current >= 'A' && current <= 'F'))
+        {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static bool_t v3_local_parse_chapter_request(const char *uri, v3_local_chapter_request_t *request)
+{
+    if (uri == NULL || request == NULL ||
+        osStrncmp(uri, V3_CHAPTER_URI_PREFIX, V3_CHAPTER_URI_PREFIX_LENGTH) != 0)
+    {
+        return FALSE;
+    }
+
+    osMemset(request, 0, sizeof(*request));
+    const char *name = uri + V3_CHAPTER_URI_PREFIX_LENGTH;
+    if (osStrncmp(name, V3_LOCAL_CHAPTER_PREFIX, V3_LOCAL_CHAPTER_PREFIX_LENGTH) != 0)
+    {
+        return FALSE;
+    }
+
+    size_t name_length = osStrlen(name);
+    if (name_length == V3_LOCAL_CHAPTER_HASHED_NAME_LENGTH)
+    {
+        const size_t hash_offset = V3_LOCAL_CHAPTER_PREFIX_LENGTH;
+        const size_t index_offset = hash_offset + V3_LOCAL_CHAPTER_HASH_PREFIX_LENGTH + 1;
+        const size_t ruid_offset = index_offset + 3;
+        const size_t suffix_offset = ruid_offset + V3_LOCAL_CONTENT_RUID_HEX_LENGTH;
+
+        if (name[index_offset - 1] != '_' || name[index_offset + 2] != '_' ||
+            osStrcmp(name + suffix_offset, ".opus") != 0 ||
+            !v3_local_is_hex_string(name + hash_offset, V3_LOCAL_CHAPTER_HASH_PREFIX_LENGTH, TRUE) ||
+            !isdigit((unsigned char)name[index_offset]) ||
+            !isdigit((unsigned char)name[index_offset + 1]) ||
+            !tb2_ruid_canonicalize(name + ruid_offset, request->ruid))
+        {
+            return FALSE;
+        }
+
+        request->format = V3_LOCAL_CHAPTER_HASHED;
+        request->chapter_index = (size_t)(name[index_offset] - '0') * 10U +
+                                 (size_t)(name[index_offset + 1] - '0');
+        request->ruid_uri_offset = V3_CHAPTER_URI_PREFIX_LENGTH + ruid_offset;
+        osMemcpy(request->hash_prefix, name + hash_offset, V3_LOCAL_CHAPTER_HASH_PREFIX_LENGTH);
+        request->hash_prefix[V3_LOCAL_CHAPTER_HASH_PREFIX_LENGTH] = '\0';
+        return TRUE;
+    }
+
+    if (name_length == V3_LOCAL_CHAPTER_LEGACY_NAME_LENGTH)
+    {
+        const size_t index_offset = V3_LOCAL_CHAPTER_PREFIX_LENGTH;
+        const size_t ruid_offset = index_offset + 3;
+        if (!isdigit((unsigned char)name[index_offset]) ||
+            !isdigit((unsigned char)name[index_offset + 1]) ||
+            name[index_offset + 2] != '_' ||
+            !tb2_ruid_canonicalize(name + ruid_offset, request->ruid))
+        {
+            return FALSE;
+        }
+
+        request->format = V3_LOCAL_CHAPTER_LEGACY;
+        request->chapter_index = (size_t)(name[index_offset] - '0') * 10U +
+                                 (size_t)(name[index_offset + 1] - '0');
+        request->ruid_uri_offset = V3_CHAPTER_URI_PREFIX_LENGTH + ruid_offset;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static bool_t v3_local_hashed_uid_add(settings_t *settings, const char *ruid)
+{
+    uint64_t uid = 0;
+    return tb2_ruid_to_uid(ruid, &uid) &&
+           freshness_settings_array_add_uid(settings, "internal.v3HashedChapterUids", uid, NULL);
+}
+
+static error_t v3_local_write_empty_status(HttpConnection *connection, uint16_t status_code)
+{
+    httpPrepareHeader(connection, NULL, 0);
+    connection->response.statusCode = status_code;
+    return httpWriteResponse(connection, NULL, 0, false);
+}
+
+static error_t v3_local_reject_legacy_range(HttpConnection *connection, uint32_t file_size)
+{
+    httpPrepareHeader(connection, NULL, 0);
+    if (connection->response.contentRange == NULL)
+    {
+        connection->response.contentRange = osAllocMem(64);
+        if (connection->response.contentRange == NULL)
+        {
+            return ERROR_OUT_OF_MEMORY;
+        }
+    }
+    osSnprintf((char *)connection->response.contentRange,
+               64,
+               "bytes */%" PRIu32,
+               file_size);
+    connection->response.statusCode = 416;
+    connection->response.contentLength = 0;
+    return httpWriteResponse(connection, NULL, 0, false);
+}
+
+static bool_t v3_source_is_tap(const tonie_info_t *tonieInfo)
+{
+    return tonieInfo != NULL && tonieInfo->json._tap._valid &&
+           (tonieInfo->json._source_type == CT_SOURCE_TAP_STREAM ||
+            tonieInfo->json._source_type == CT_SOURCE_TAP_CACHED);
+}
+
+static bool_t v3_hex_digest_parse(
+    const char hex[V3_NATIVE_LIBRARY_HASH_HEX_SIZE],
+    uint8_t digest[SHA256_DIGEST_SIZE])
+{
+    if (hex == NULL || osStrlen(hex) != SHA256_DIGEST_SIZE * 2U)
+    {
+        return FALSE;
+    }
+    for (size_t i = 0; i < SHA256_DIGEST_SIZE; i++)
+    {
+        unsigned char high = (unsigned char)hex[i * 2U];
+        unsigned char low = (unsigned char)hex[i * 2U + 1U];
+        if (!isxdigit(high) || !isxdigit(low))
+        {
+            return FALSE;
+        }
+        high = (unsigned char)(isdigit(high) ? high - '0'
+                                              : tolower(high) - 'a' + 10);
+        low = (unsigned char)(isdigit(low) ? low - '0'
+                                            : tolower(low) - 'a' + 10);
+        digest[i] = (uint8_t)((high << 4) | low);
+    }
+    return TRUE;
+}
+
+static error_t v3_native_collection_generation_load(
+    settings_t *settings,
+    const char *source,
+    const char *ruid,
+    uint32_t effective_version,
+    v3_local_content_generation_t *generation)
+{
+    if (settings == NULL || source == NULL || generation == NULL ||
+        effective_version == 0)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    char canonical_ruid[V3_LOCAL_CONTENT_RUID_SIZE];
+    if (!tb2_ruid_canonicalize(ruid, canonical_ruid))
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    v3_native_library_collection_t collection;
+    error_t error = v3_native_library_collection_load(
+        settings->internal.librarydirfull, source, FALSE, &collection);
+    if (error != NO_ERROR)
+    {
+        return error;
+    }
+
+    osMemset(generation, 0, sizeof(*generation));
+    generation->chapters = osAllocMem(
+        sizeof(*generation->chapters) * collection.chapter_count);
+    if (generation->chapters == NULL)
+    {
+        v3_native_library_collection_free(&collection);
+        return ERROR_OUT_OF_MEMORY;
+    }
+    osMemset(generation->chapters, 0,
+             sizeof(*generation->chapters) * collection.chapter_count);
+    generation->chapter_count = collection.chapter_count;
+    generation->overlay_id = settings->internal.overlayNumber;
+    generation->effective_version = effective_version;
+    generation->source_kind = V3_LOCAL_CONTENT_SOURCE_NATIVE_COLLECTION;
+    osStrcpy(generation->ruid, canonical_ruid);
+    generation->source_path = strdup(source);
+    generation->title = custom_asprintf("Native collection %.12s",
+                                        collection.content_hash);
+    if (generation->source_path == NULL || generation->title == NULL)
+    {
+        error = ERROR_OUT_OF_MEMORY;
+    }
+
+    for (size_t i = 0; error == NO_ERROR && i < collection.chapter_count; i++)
+    {
+        const v3_native_library_collection_chapter_t *stored =
+            &collection.chapters[i];
+        v3_local_content_chapter_t *chapter = &generation->chapters[i];
+        int name_length = osSnprintf(
+            chapter->name, sizeof(chapter->name),
+            "teddycloud_%.20s_%02" PRIuSIZE "_%s.opus",
+            stored->sha256, stored->index, canonical_ruid);
+        if (name_length <= 0 || (size_t)name_length >= sizeof(chapter->name) ||
+            !v3_hex_digest_parse(stored->sha256, chapter->sha256))
+        {
+            error = ERROR_INVALID_FILE;
+            break;
+        }
+        chapter->index = stored->index;
+        chapter->source_index = stored->index;
+        chapter->file_size = stored->file_size;
+        osStrcpy(chapter->sha256_hex, stored->sha256);
+        chapter->path = strdup(stored->path);
+        chapter->title = strdup(stored->original_name);
+        if (chapter->path == NULL || chapter->title == NULL)
+        {
+            error = ERROR_OUT_OF_MEMORY;
+        }
+    }
+
+    v3_native_library_collection_free(&collection);
+    if (error != NO_ERROR)
+    {
+        v3_local_content_generation_free(generation);
+    }
+    return error;
+}
+
+static char *v3_tap_display_name(const char *preferred, const char *path,
+                                 const char *fallback)
+{
+    const char *begin = preferred != NULL ? preferred : "";
+    while (*begin != '\0' && isspace((unsigned char)*begin))
+    {
+        begin++;
+    }
+    const char *end = begin + osStrlen(begin);
+    while (end > begin && isspace((unsigned char)end[-1]))
+    {
+        end--;
+    }
+
+    if (end == begin)
+    {
+        begin = path != NULL ? path : "";
+        const char *slash = strrchr(begin, '/');
+        const char *backslash = strrchr(begin, '\\');
+        if (slash != NULL || backslash != NULL)
+        {
+            const char *last = slash == NULL ? backslash
+                                             : (backslash == NULL || slash > backslash ? slash : backslash);
+            begin = last + 1;
+        }
+        end = begin + osStrlen(begin);
+        const char *dot = strrchr(begin, '.');
+        if (dot != NULL && dot > begin)
+        {
+            end = dot;
+        }
+    }
+    if (end == begin)
+    {
+        begin = fallback;
+        end = begin + osStrlen(begin);
+    }
+
+    size_t length = (size_t)(end - begin);
+    if (length > V3_LOCAL_CONTENT_TITLE_MAX)
+    {
+        length = V3_LOCAL_CONTENT_TITLE_MAX;
+    }
+    char *value = osAllocMem(length + 1);
+    if (value != NULL)
+    {
+        osMemcpy(value, begin, length);
+        value[length] = '\0';
+    }
+    return value;
+}
+
+static bool_t v3_tap_attach_metadata(v3_local_content_generation_t *generation,
+                                     const tonie_info_t *tonieInfo,
+                                     const tonie_info_t *snapshotInfo,
+                                     const size_t *runtime_indices,
+                                     size_t runtime_files_count,
+                                     uint32_t selection_generation)
+{
+    if (generation == NULL || tonieInfo == NULL || snapshotInfo == NULL ||
+        runtime_indices == NULL || !v3_source_is_tap(tonieInfo) ||
+        generation->chapter_count != runtime_files_count)
+    {
+        return FALSE;
+    }
+
+    const tonie_audio_playlist_t *tap = &tonieInfo->json._tap;
+    generation->source_kind = V3_LOCAL_CONTENT_SOURCE_TAP;
+    generation->source_path = strdup(tonieInfo->json.source != NULL
+                                         ? tonieInfo->json.source
+                                         : "");
+    generation->title = v3_tap_display_name(tap->name,
+                                            tonieInfo->json.source,
+                                            "Playlist");
+    generation->tap_audio_id = (uint32_t)tap->audio_id;
+    generation->shuffle_mode = tap->shuffle;
+    generation->selection_generation = selection_generation;
+    if (generation->source_path == NULL || generation->title == NULL)
+    {
+        return FALSE;
+    }
+
+    const track_positions_t *positions = &snapshotInfo->additional.track_positions;
+    bool_t durations_available = positions->pos != NULL &&
+                                 positions->count == generation->chapter_count &&
+                                 positions->total_seconds > 0;
+    uint32_t chapter_start = 0;
+    for (size_t i = 0; i < generation->chapter_count; i++)
+    {
+        size_t source_index = runtime_indices[i];
+        if (source_index >= tap->filesCount)
+        {
+            return FALSE;
+        }
+        char fallback[32];
+        osSnprintf(fallback, sizeof(fallback), "Chapter %" PRIuSIZE, i + 1);
+        generation->chapters[i].source_index = source_index;
+        generation->chapters[i].title = v3_tap_display_name(
+            tap->files[source_index].name,
+            tap->files[source_index].filepath,
+            fallback);
+        if (generation->chapters[i].title == NULL)
+        {
+            return FALSE;
+        }
+        if (durations_available)
+        {
+            uint32_t chapter_end = i + 1 < generation->chapter_count
+                                       ? positions->pos[i + 1]
+                                       : positions->total_seconds;
+            if (chapter_end < chapter_start)
+            {
+                return FALSE;
+            }
+            generation->chapters[i].duration_seconds = chapter_end - chapter_start;
+            chapter_start = chapter_end;
+        }
+    }
+    return TRUE;
+}
+
+static error_t v3_tap_prepare_generation(settings_t *settings,
+                                         tonie_info_t *tonieInfo,
+                                         const char *ruid,
+                                         size_t *runtime_indices,
+                                         size_t runtime_files_count,
+                                         uint32_t selection_generation,
+                                         v3_local_content_generation_t *generation)
+{
+    tonie_audio_playlist_t *tap = &tonieInfo->json._tap;
+    if (!v3_source_is_tap(tonieInfo) || tap->_filepath_resolved == NULL)
+    {
+        return ERROR_INVALID_FILE;
+    }
+
+    error_t error = tap_target_lock(tap->_filepath_resolved);
+    if (error != NO_ERROR)
+    {
+        return error;
+    }
+
+    const char *final_taf_path = tap->_filepath_resolved;
+    if (tonieInfo->json._source_type != CT_SOURCE_TAP_CACHED ||
+        !tap_final_cache_is_current(tap))
+    {
+        error = tap_materialize_final_snapshot_selected(tap,
+                                                        runtime_indices,
+                                                        runtime_files_count,
+                                                        &final_taf_path);
+    }
+
+    tonie_info_t *snapshotInfo = NULL;
+    if (error == NO_ERROR)
+    {
+        snapshotInfo = getTonieInfoV2(final_taf_path, false,
+                                      settings->core.tap_taf_validation,
+                                      settings);
+        if (snapshotInfo == NULL || !snapshotInfo->exists || !snapshotInfo->valid ||
+            snapshotInfo->tafHeader == NULL)
+        {
+            error = ERROR_INVALID_FILE;
+        }
+    }
+    if (error == NO_ERROR)
+    {
+        error = v3_local_content_prepare_tap(final_taf_path,
+                                             snapshotInfo->tafHeader,
+                                             settings->internal.cachedirfull,
+                                             ruid,
+                                             generation);
+    }
+    if (error == NO_ERROR &&
+        !v3_tap_attach_metadata(generation, tonieInfo, snapshotInfo,
+                                runtime_indices, runtime_files_count,
+                                selection_generation))
+    {
+        error = ERROR_INVALID_FILE;
+    }
+    if (snapshotInfo != NULL)
+    {
+        freeTonieInfo(snapshotInfo);
+    }
+    tap_target_unlock(tap->_filepath_resolved);
+    return error;
+}
+
+static error_t v3_local_prepare_generation_from_source(settings_t *settings,
+                                                       tonie_info_t *tonieInfo,
+                                                       const char *ruid,
+                                                       v3_local_content_generation_t *generation)
+{
+    if (settings == NULL || tonieInfo == NULL || generation == NULL)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    if (tonieInfo->json._source_type == CT_SOURCE_TAF_INCOMPLETE ||
+        !tonieInfo->exists || !tonieInfo->valid || tonieInfo->tafHeader == NULL)
+    {
+        return ERROR_INVALID_FILE;
+    }
+
+    return v3_local_content_prepare(tonieInfo->contentPath,
+                                    tonieInfo->tafHeader,
+                                    settings->internal.cachedirfull,
+                                    ruid,
+                                    generation);
+}
+
+static error_t v3_local_load_or_prepare_generation(settings_t *settings,
+                                                   tonie_info_t *tonieInfo,
+                                                   const char *ruid,
+                                                   uint32_t effective_version,
+                                                   bool_t persist,
+                                                   v3_local_content_generation_t *generation)
+{
+    if (persist)
+    {
+        error_t load_error = v3_local_content_generation_load(settings->internal.cachedirfull,
+                                                              settings->internal.overlayNumber,
+                                                              ruid,
+                                                              effective_version,
+                                                              generation);
+        if (load_error == NO_ERROR)
+        {
+            TRACE_DEBUG("Loaded V3 local generation overlay=%u rUID=%s version=%" PRIu32 " chapters=%" PRIuSIZE "\r\n",
+                        (unsigned)settings->internal.overlayNumber,
+                        generation->ruid,
+                        effective_version,
+                        generation->chapter_count);
+            return NO_ERROR;
+        }
+        TRACE_DEBUG("Preparing V3 local generation overlay=%u rUID=%s version=%" PRIu32 ": %s\r\n",
+                    (unsigned)settings->internal.overlayNumber,
+                    ruid,
+                    effective_version,
+                    error2text(load_error));
+    }
+
+    error_t error = v3_local_prepare_generation_from_source(settings,
+                                                            tonieInfo,
+                                                            ruid,
+                                                            generation);
+    if (error == NO_ERROR && persist)
+    {
+        error = v3_local_content_generation_save(settings->internal.cachedirfull,
+                                                 settings->internal.overlayNumber,
+                                                 effective_version,
+                                                 generation);
+    }
+    return error;
+}
+
+static uint32_t v3_tap_next_version(const v3_local_tap_state_t *state,
+                                    uint32_t tap_audio_id,
+                                    bool_t box_version_known,
+                                    uint32_t box_version)
+{
+    uint32_t maximum = tap_audio_id;
+    if (state != NULL && state->valid)
+    {
+        if (state->prepared_version > maximum) maximum = state->prepared_version;
+        if (state->playing_version > maximum) maximum = state->playing_version;
+        if (state->previous_version > maximum) maximum = state->previous_version;
+    }
+    if (box_version_known && box_version > maximum)
+    {
+        maximum = box_version;
+    }
+    if (maximum < UINT32_MAX)
+    {
+        return maximum + 1U;
+    }
+
+    uint32_t candidate = 1;
+    while (candidate == tap_audio_id ||
+           (box_version_known && candidate == box_version) ||
+           (state != NULL && state->valid &&
+            (candidate == state->prepared_version ||
+             candidate == state->playing_version ||
+             candidate == state->previous_version)))
+    {
+        candidate++;
+    }
+    return candidate;
+}
+
+static error_t v3_tap_load_or_prepare_generation(settings_t *settings,
+                                                 tonie_info_t *tonieInfo,
+                                                 const char *ruid,
+                                                 uint32_t static_version,
+                                                 v3_local_content_generation_t *generation,
+                                                 uint32_t *effective_version)
+{
+    if (settings == NULL || !v3_source_is_tap(tonieInfo) ||
+        generation == NULL || effective_version == NULL)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    tonie_audio_playlist_t *tap = &tonieInfo->json._tap;
+    v3_local_tap_state_t state;
+    bool_t state_valid = v3_local_tap_state_load(
+                             settings->internal.cachedirfull,
+                             settings->internal.overlayNumber,
+                             ruid, &state) == NO_ERROR && state.valid;
+    bool_t revision_changed = !state_valid ||
+                              state.tap_audio_id != (uint32_t)tap->audio_id ||
+                              state.shuffle_mode != tap->shuffle;
+    bool_t descriptor_missing = TRUE;
+    if (state_valid && !revision_changed && !state.regeneration_pending)
+    {
+        error_t load_error = v3_local_content_generation_load(
+            settings->internal.cachedirfull,
+            settings->internal.overlayNumber,
+            ruid, state.prepared_version, generation);
+        if (load_error == NO_ERROR &&
+            generation->source_kind == V3_LOCAL_CONTENT_SOURCE_TAP &&
+            generation->tap_audio_id == state.tap_audio_id &&
+            generation->shuffle_mode == state.shuffle_mode)
+        {
+            *effective_version = state.prepared_version;
+            return NO_ERROR;
+        }
+        v3_local_content_generation_free(generation);
+        descriptor_missing = TRUE;
+    }
+
+    uint64_t uid = 0;
+    uint32_t box_version = 0;
+    bool_t uid_valid = tb2_ruid_to_uid(ruid, &uid);
+    bool_t box_version_known = uid_valid &&
+                               freshness_inventory_find_uid(settings, uid,
+                                                            &box_version);
+    uint32_t desired_version = static_version;
+    if (tap->shuffle != TAP_SHUFFLE_NONE)
+    {
+        desired_version = state_valid && state.regeneration_pending &&
+                                  state.desired_version != 0 &&
+                                  state.desired_version != state.prepared_version
+                              ? state.desired_version
+                              : v3_tap_next_version(state_valid ? &state : NULL,
+                                                    (uint32_t)tap->audio_id,
+                                                    box_version_known,
+                                                    box_version);
+    }
+    else if (desired_version == 0 ||
+             (state_valid && desired_version == state.prepared_version &&
+              (revision_changed || descriptor_missing)))
+    {
+        desired_version = v3_tap_next_version(state_valid ? &state : NULL,
+                                              (uint32_t)tap->audio_id,
+                                              box_version_known,
+                                              box_version);
+    }
+    if (desired_version == 0)
+    {
+        return ERROR_FAILURE;
+    }
+
+    if (state_valid)
+    {
+        state.desired_version = desired_version;
+        state.regeneration_pending = TRUE;
+        if (v3_local_tap_state_save(settings->internal.cachedirfull,
+                                    settings->internal.overlayNumber,
+                                    ruid, &state) != NO_ERROR)
+        {
+            return ERROR_FAILURE;
+        }
+    }
+
+    size_t *runtime_indices = NULL;
+    size_t runtime_files_count = 0;
+    error_t error = tap_prepare_runtime_indices(tap, &runtime_indices,
+                                                &runtime_files_count);
+    uint32_t selection_generation = state_valid
+                                        ? (state.selection_generation == UINT32_MAX
+                                               ? 1U
+                                               : state.selection_generation + 1U)
+                                        : 1U;
+    if (error == NO_ERROR)
+    {
+        error = v3_tap_prepare_generation(settings, tonieInfo, ruid,
+                                          runtime_indices,
+                                          runtime_files_count,
+                                          selection_generation,
+                                          generation);
+    }
+    tap_free_runtime_indices(runtime_indices);
+    if (error == NO_ERROR)
+    {
+        error = v3_local_content_generation_save(
+            settings->internal.cachedirfull,
+            settings->internal.overlayNumber,
+            desired_version, generation);
+    }
+    if (error != NO_ERROR)
+    {
+        v3_local_content_generation_free(generation);
+        return error;
+    }
+
+    v3_local_tap_state_t updated = state_valid ? state : (v3_local_tap_state_t){0};
+    updated.valid = TRUE;
+    updated.tap_audio_id = (uint32_t)tap->audio_id;
+    updated.shuffle_mode = tap->shuffle;
+    updated.selection_generation = selection_generation;
+    updated.desired_version = desired_version;
+    updated.previous_version = state_valid ? state.prepared_version : 0;
+    updated.prepared_version = desired_version;
+    updated.regeneration_pending = FALSE;
+    error = v3_local_tap_state_save(settings->internal.cachedirfull,
+                                    settings->internal.overlayNumber,
+                                    ruid, &updated);
+    if (error != NO_ERROR)
+    {
+        v3_local_content_generation_free(generation);
+        return error;
+    }
+
+    *effective_version = desired_version;
+    if (uid_valid)
+    {
+        bool_t added = FALSE;
+        if (freshness_cache_add_uid(settings, uid, &added) && added)
+        {
+            mqtt_server_publish_fresh_tonie_for_overlay(
+                settings->internal.overlayNumber, uid);
+        }
+    }
+    TRACE_INFO("Prepared TB2 TAP generation overlay=%u rUID=%s version=%" PRIu32
+               " selection=%" PRIu32 " shuffle=%u chapters=%" PRIuSIZE "\r\n",
+               (unsigned)settings->internal.overlayNumber, ruid,
+               desired_version, selection_generation,
+               (unsigned)tap->shuffle, generation->chapter_count);
+    return NO_ERROR;
+}
+
+static error_t sendLocalContentMetaV3(HttpConnection *connection,
+                                      settings_t *settings,
+                                      const char *ruid,
+                                      uint32_t version,
+                                      const char *resumeBehavior,
+                                      const char *tonieSalesId,
+                                      const v3_local_content_generation_t *generation)
+{
+    cJSON *respJson = cJSON_CreateObject();
+    cJSON *contentArray = NULL;
+    if (respJson == NULL ||
+        cJSON_AddNumberToObject(respJson, "version", version) == NULL ||
         cJSON_AddStringToObject(respJson, "contentType", "content_tonie") == NULL ||
         cJSON_AddStringToObject(respJson, "tonieType", "content") == NULL ||
         cJSON_AddStringToObject(respJson, "resumeBehavior", resumeBehavior) == NULL ||
-        cJSON_AddStringToObject(respJson, "tonieSalesId", tonieSalesId ? tonieSalesId : "") == NULL)
+        cJSON_AddStringToObject(respJson, "tonieSalesId", tonieSalesId ? tonieSalesId : "") == NULL ||
+        (contentArray = cJSON_AddArrayToObject(respJson, "content")) == NULL)
     {
         cJSON_Delete(respJson);
         return ERROR_OUT_OF_MEMORY;
     }
 
-    cJSON *contentArray = cJSON_CreateArray();
-    if (contentArray == NULL || !cJSON_AddItemToObject(respJson, "content", contentArray))
+    for (size_t i = 0; i < generation->chapter_count; i++)
     {
-        cJSON_Delete(contentArray);
-        cJSON_Delete(respJson);
-        return ERROR_OUT_OF_MEMORY;
-    }
-
-    cJSON *contentItem = cJSON_CreateObject();
-    if (contentItem == NULL || !cJSON_AddItemToArray(contentArray, contentItem))
-    {
-        cJSON_Delete(contentItem);
-        cJSON_Delete(respJson);
-        return ERROR_OUT_OF_MEMORY;
-    }
-
-    char name[64];
-    osSprintf(name, "teddycloud_00_%s", ruid);
-    if (cJSON_AddStringToObject(contentItem, "type", "audio") == NULL ||
-        cJSON_AddStringToObject(contentItem, "name", name) == NULL ||
-        cJSON_AddStringToObject(contentItem, "auth", "") == NULL)
-    {
-        cJSON_Delete(respJson);
-        return ERROR_OUT_OF_MEMORY;
-    }
-    cJSON *analytics = cJSON_CreateObject();
-    if (analytics == NULL || !cJSON_AddItemToObject(contentItem, "analytics", analytics))
-    {
-        cJSON_Delete(analytics);
-        cJSON_Delete(respJson);
-        return ERROR_OUT_OF_MEMORY;
-    }
-    if (cJSON_AddNumberToObject(contentItem, "fileSize", (double)fileSize) == NULL)
-    {
-        cJSON_Delete(respJson);
-        return ERROR_OUT_OF_MEMORY;
+        const v3_local_content_chapter_t *chapter = &generation->chapters[i];
+        cJSON *contentItem = cJSON_CreateObject();
+        cJSON *analytics = NULL;
+        if (contentItem == NULL ||
+            cJSON_AddStringToObject(contentItem, "type", "audio") == NULL ||
+            cJSON_AddStringToObject(contentItem, "name", chapter->name) == NULL ||
+            cJSON_AddStringToObject(contentItem, "auth", "") == NULL ||
+            (analytics = cJSON_AddObjectToObject(contentItem, "analytics")) == NULL ||
+            cJSON_AddNumberToObject(contentItem, "fileSize", (double)chapter->file_size) == NULL ||
+            !cJSON_AddItemToArray(contentArray, contentItem))
+        {
+            cJSON_Delete(contentItem);
+            cJSON_Delete(respJson);
+            return ERROR_OUT_OF_MEMORY;
+        }
+        (void)analytics;
+        TRACE_INFO("V3 local generation overlay=%u rUID=%s version=%" PRIu32 " chapter=%" PRIuSIZE " name=%s bytes=%" PRIu32 "\r\n",
+                   (unsigned)settings->internal.overlayNumber,
+                   generation->ruid,
+                   version,
+                   chapter->index,
+                   chapter->name,
+                   chapter->file_size);
     }
 
     char *response_json = cJSON_PrintUnformatted(respJson);
@@ -2812,12 +4499,459 @@ static error_t sendLocalContentMetaV3(HttpConnection *connection, const char *ru
     size_t dataLen = osStrlen(response_json);
     TRACE_INFO("V3 Content Meta response: size=%" PRIuSIZE ", content=%s\n", dataLen, response_json);
 
+    connection->response.noCache = true;
     httpPrepareHeader(connection, "application/json; charset=utf-8", dataLen);
     error_t error = httpWriteResponse(connection, (uint8_t *)response_json, dataLen, false);
 
-    free(response_json);
+    cJSON_free(response_json);
     cJSON_Delete(respJson);
+    if (error == NO_ERROR && !v3_local_hashed_uid_add(settings, ruid))
+    {
+        TRACE_WARNING("Could not persist V3 hashed chapter transition for rUID %s\r\n", ruid);
+    }
     return error;
+}
+
+typedef enum
+{
+    V3_MANUAL_DOWNLOAD_GENERATION,
+    V3_MANUAL_DOWNLOAD_POLICY,
+    V3_MANUAL_DOWNLOAD_AUTH,
+    V3_MANUAL_DOWNLOAD_MANIFEST,
+    V3_MANUAL_DOWNLOAD_CHAPTER,
+    V3_MANUAL_DOWNLOAD_ACTIVATION,
+    V3_MANUAL_DOWNLOAD_COMPLETE,
+} v3_manual_download_stage_t;
+
+static const char *v3_manual_download_stage_name(v3_manual_download_stage_t stage)
+{
+    switch (stage)
+    {
+    case V3_MANUAL_DOWNLOAD_GENERATION:
+        return "generation";
+    case V3_MANUAL_DOWNLOAD_POLICY:
+        return "policy";
+    case V3_MANUAL_DOWNLOAD_AUTH:
+        return "auth";
+    case V3_MANUAL_DOWNLOAD_MANIFEST:
+        return "manifest";
+    case V3_MANUAL_DOWNLOAD_CHAPTER:
+        return "chapter";
+    case V3_MANUAL_DOWNLOAD_ACTIVATION:
+        return "activation";
+    case V3_MANUAL_DOWNLOAD_COMPLETE:
+        return "complete";
+    default:
+        return "unknown";
+    }
+}
+
+static uint_t v3_manual_download_http_status(v3_manual_download_stage_t stage)
+{
+    switch (stage)
+    {
+    case V3_MANUAL_DOWNLOAD_AUTH:
+        return 401;
+    case V3_MANUAL_DOWNLOAD_POLICY:
+        return 403;
+    case V3_MANUAL_DOWNLOAD_GENERATION:
+        return 400;
+    case V3_MANUAL_DOWNLOAD_MANIFEST:
+    case V3_MANUAL_DOWNLOAD_CHAPTER:
+        return 502;
+    case V3_MANUAL_DOWNLOAD_ACTIVATION:
+        return 500;
+    case V3_MANUAL_DOWNLOAD_COMPLETE:
+    default:
+        return 200;
+    }
+}
+
+static const char *v3_manual_download_message(v3_manual_download_stage_t stage,
+                                              error_t error,
+                                              uint32_t upstream_status)
+{
+    if (stage == V3_MANUAL_DOWNLOAD_GENERATION)
+    {
+        return "Selected overlay is not a TB2";
+    }
+    if (stage == V3_MANUAL_DOWNLOAD_POLICY)
+    {
+        return "TB2 cloud access is blocked for this RUID";
+    }
+    if (stage == V3_MANUAL_DOWNLOAD_AUTH)
+    {
+        return upstream_status == 401 || upstream_status == 403
+                   ? "TONIES rejected the stored TB2 content authentication"
+                   : "Stored TB2 content authentication is missing or invalid";
+    }
+    if (stage == V3_MANUAL_DOWNLOAD_MANIFEST)
+    {
+        if (error == ERROR_ACCESS_DENIED && upstream_status == 0)
+        {
+            return "TB2 V3 cloud path is disabled";
+        }
+        if (error == ERROR_INVALID_NAME)
+        {
+            return "TONIES V3 content-meta contains an invalid chapter name";
+        }
+        return "TONIES V3 content-meta download or staging failed";
+    }
+    if (stage == V3_MANUAL_DOWNLOAD_CHAPTER)
+    {
+        return upstream_status == 404
+                   ? "A referenced TONIES V3 chapter is missing"
+                   : "TONIES V3 chapter download or staging failed";
+    }
+    if (stage == V3_MANUAL_DOWNLOAD_ACTIVATION)
+    {
+        return "The complete TB2 V3 cache version could not be activated";
+    }
+    return error2text(error);
+}
+
+static error_t v3_manual_download_write_result(HttpConnection *connection,
+                                               v3_manual_download_stage_t stage,
+                                               const char *message,
+                                               const char *ruid,
+                                               const char *chapter,
+                                               uint32_t upstream_status,
+                                               uint32_t version,
+                                               size_t completed,
+                                               size_t total)
+{
+    cJSON *response = cJSON_CreateObject();
+    if (response == NULL ||
+        cJSON_AddBoolToObject(response, "success",
+                              stage == V3_MANUAL_DOWNLOAD_COMPLETE) == NULL ||
+        cJSON_AddStringToObject(response, "stage",
+                                v3_manual_download_stage_name(stage)) == NULL ||
+        cJSON_AddStringToObject(response, "message",
+                                message != NULL ? message : "") == NULL ||
+        cJSON_AddStringToObject(response, "ruid", ruid != NULL ? ruid : "") == NULL ||
+        cJSON_AddNumberToObject(response, "upstreamStatus", upstream_status) == NULL ||
+        cJSON_AddNumberToObject(response, "version", version) == NULL ||
+        cJSON_AddNumberToObject(response, "chaptersCompleted", completed) == NULL ||
+        cJSON_AddNumberToObject(response, "chaptersTotal", total) == NULL ||
+        (chapter != NULL &&
+         cJSON_AddStringToObject(response, "chapter", chapter) == NULL))
+    {
+        cJSON_Delete(response);
+        return ERROR_OUT_OF_MEMORY;
+    }
+
+    char *body = cJSON_PrintUnformatted(response);
+    cJSON_Delete(response);
+    if (body == NULL)
+    {
+        return ERROR_OUT_OF_MEMORY;
+    }
+
+    connection->response.statusCode = v3_manual_download_http_status(stage);
+    connection->response.noCache = TRUE;
+    size_t length = osStrlen(body);
+    httpPrepareHeader(connection, "application/json; charset=utf-8", length);
+    error_t error = httpWriteResponse(connection, (uint8_t *)body, length, false);
+    cJSON_free(body);
+    return error;
+}
+
+static void v3_manual_download_restore_active_route(settings_t *settings,
+                                                    const char *ruid)
+{
+    uint8_t *manifest = NULL;
+    size_t manifest_length = 0;
+    uint32_t version = 0;
+    if (v3_native_cache_read_active_manifest(settings->internal.cachedirfull,
+                                             settings->internal.overlayNumber,
+                                             ruid, &manifest, &manifest_length,
+                                             &version) == NO_ERROR)
+    {
+        TRACE_DEBUG("Restored active TB2 V3 cache route overlay=%u rUID=%s version=%" PRIu32 " after manual download failure\r\n",
+                    (unsigned)settings->internal.overlayNumber, ruid, version);
+    }
+    osFreeMem(manifest);
+}
+
+static error_t v3_manual_download_fail(HttpConnection *connection,
+                                       settings_t *settings,
+                                       v3_manual_download_stage_t stage,
+                                       error_t error,
+                                       const char *ruid,
+                                       const char *chapter,
+                                       uint32_t upstream_status,
+                                       uint32_t version,
+                                       size_t completed,
+                                       size_t total,
+                                       bool_t restore_active)
+{
+    if (restore_active)
+    {
+        v3_manual_download_restore_active_route(settings, ruid);
+    }
+    TRACE_ERROR("TB2 manual content download failed stage=%s overlay=%u rUID=%s chapter=%s upstream=%" PRIu32 " error=%s\r\n",
+                v3_manual_download_stage_name(stage),
+                (unsigned)settings->internal.overlayNumber,
+                ruid != NULL ? ruid : "",
+                chapter != NULL ? chapter : "",
+                upstream_status,
+                error2text(error));
+    return v3_manual_download_write_result(
+        connection, stage,
+        v3_manual_download_message(stage, error, upstream_status), ruid,
+        chapter, upstream_status, version, completed, total);
+}
+
+error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *ruid,
+                                     const contentJson_t *content,
+                                     client_ctx_t *client_ctx)
+{
+    char canonical_ruid[TB2_RUID_SIZE];
+    settings_t *settings = client_ctx != NULL ? client_ctx->settings : NULL;
+    if (connection == NULL || settings == NULL)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+    if (settings->toniebox.boxGeneration != GENERATION_TB2 ||
+        !tb2_ruid_canonicalize(ruid, canonical_ruid))
+    {
+        return v3_manual_download_fail(connection, settings,
+                                       V3_MANUAL_DOWNLOAD_GENERATION,
+                                       ERROR_INVALID_PARAMETER, ruid, NULL, 0,
+                                       0, 0, 0, FALSE);
+    }
+    if (!settings->cloud.tb2_v3_enabled)
+    {
+        return v3_manual_download_fail(connection, settings,
+                                       V3_MANUAL_DOWNLOAD_MANIFEST,
+                                       ERROR_ACCESS_DENIED, canonical_ruid,
+                                       NULL, 0, 0, 0, 0, FALSE);
+    }
+
+    tb2_nocloud_policy_t policy;
+    if (!tb2_nocloud_policy_from_content(settings, canonical_ruid, content,
+                                         &policy) ||
+        tb2_nocloud_policy_blocks_upstream(&policy))
+    {
+        return v3_manual_download_fail(connection, settings,
+                                       V3_MANUAL_DOWNLOAD_POLICY,
+                                       ERROR_ACCESS_DENIED, canonical_ruid,
+                                       NULL, 0, 0, 0, 0, FALSE);
+    }
+
+    const uint8_t *stored_auth = content != NULL && content->_has_cloud_auth &&
+                                         content->cloud_auth != NULL &&
+                                         content->cloud_auth_len == TONIE_AUTH_TOKEN_LENGTH
+                                     ? content->cloud_auth
+                                     : NULL;
+    tb2_content_identity_t identity;
+    if (!tb2_content_identity_resolve(canonical_ruid, stored_auth, content,
+                                      &identity) ||
+        identity.auth == NULL || identity.auth_len != TONIE_AUTH_TOKEN_LENGTH)
+    {
+        return v3_manual_download_fail(connection, settings,
+                                       V3_MANUAL_DOWNLOAD_AUTH,
+                                       ERROR_AUTH_REQUIRED, canonical_ruid,
+                                       NULL, 0, 0, 0, 0, FALSE);
+    }
+
+    char *meta_uri = custom_asprintf("/v3/content-meta/%s", identity.ruid);
+    if (meta_uri == NULL)
+    {
+        return v3_manual_download_fail(connection, settings,
+                                       V3_MANUAL_DOWNLOAD_MANIFEST,
+                                       ERROR_OUT_OF_MEMORY, canonical_ruid,
+                                       NULL, 0, 0, 0, 0, FALSE);
+    }
+
+    v3_native_meta_cbr_t meta;
+    osMemset(&meta, 0, sizeof(meta));
+    meta.cache_error = ERROR_IN_PROGRESS;
+    fillBaseCtx(NULL, meta_uri, "", V3_CONTENT_META, &meta.passthrough,
+                client_ctx);
+    v3_native_cache_meta_capture_init(&meta.cache,
+                                      settings->internal.cachedirfull,
+                                      settings->internal.overlayNumber,
+                                      canonical_ruid);
+    if (meta.cache.failed)
+    {
+        v3_native_cache_meta_capture_abort(&meta.cache);
+        osFreeMem(meta_uri);
+        return v3_manual_download_fail(connection, settings,
+                                       V3_MANUAL_DOWNLOAD_MANIFEST,
+                                       ERROR_OUT_OF_MEMORY, canonical_ruid,
+                                       NULL, 0, 0, 0, 0, TRUE);
+    }
+    req_cbr_t meta_cbr = {
+        .ctx = &meta,
+        .response = v3_native_meta_response,
+        .header = v3_native_meta_header,
+        .body = v3_native_meta_body,
+        .disconnect = v3_native_meta_disconnect,
+    };
+    TRACE_INFO("Starting TB2 manual content download overlay=%u rUID=%s upstreamRUID=%s\r\n",
+               (unsigned)settings->internal.overlayNumber, canonical_ruid,
+               identity.ruid);
+    error_t request_error = cloud_request_tb2_get(
+        settings->cloud.remote_hostname_tb2, 0, meta_uri, "", identity.auth,
+        &meta_cbr);
+    osFreeMem(meta_uri);
+
+    v3_manual_download_stage_t meta_stage =
+        meta.cache.status_code == 401 || meta.cache.status_code == 403
+            ? V3_MANUAL_DOWNLOAD_AUTH
+            : V3_MANUAL_DOWNLOAD_MANIFEST;
+    if (request_error != NO_ERROR || meta.cache.status_code != 200 ||
+        !meta.finished || meta.cache_error != NO_ERROR)
+    {
+        error_t error = request_error != NO_ERROR
+                            ? request_error
+                            : (meta.cache_error != NO_ERROR
+                                   ? meta.cache_error
+                                   : ERROR_INVALID_RESPONSE);
+        uint32_t status_code = meta.cache.status_code;
+        v3_native_cache_meta_capture_abort(&meta.cache);
+        return v3_manual_download_fail(connection, settings, meta_stage, error,
+                                       canonical_ruid, NULL, status_code, 0,
+                                       0, 0, TRUE);
+    }
+
+    uint32_t meta_status = meta.cache.status_code;
+    v3_native_cache_download_plan_t plan;
+    error_t plan_error = v3_native_cache_download_plan_get(
+        settings->internal.overlayNumber, canonical_ruid, &plan);
+    v3_native_cache_meta_capture_abort(&meta.cache);
+    if (plan_error != NO_ERROR)
+    {
+        v3_manual_download_stage_t stage = plan_error == ERROR_AUTH_REQUIRED
+                                               ? V3_MANUAL_DOWNLOAD_AUTH
+                                               : V3_MANUAL_DOWNLOAD_MANIFEST;
+        return v3_manual_download_fail(connection, settings, stage, plan_error,
+                                       canonical_ruid, NULL, meta_status,
+                                       0, 0, 0, TRUE);
+    }
+
+    size_t completed = 0;
+    for (size_t i = 0; i < plan.chapter_count; i++)
+    {
+        const v3_native_cache_download_chapter_t *chapter = &plan.chapters[i];
+        v3_native_cache_chapter_capture_t capture;
+        char *serve_path = NULL;
+        v3_native_cache_chapter_action_t action =
+            v3_native_cache_chapter_prepare(settings->internal.cachedirfull,
+                                            settings->internal.overlayNumber,
+                                            chapter->name, &capture,
+                                            &serve_path);
+        if (action == V3_NATIVE_CHAPTER_SERVE)
+        {
+            osFreeMem(serve_path);
+            completed++;
+            continue;
+        }
+        if (action != V3_NATIVE_CHAPTER_CAPTURE)
+        {
+            v3_native_cache_chapter_abort(&capture);
+            error_t response_error = v3_manual_download_fail(
+                connection, settings, V3_MANUAL_DOWNLOAD_CHAPTER,
+                ERROR_UNEXPECTED_STATE, canonical_ruid, chapter->name, 0,
+                plan.version, completed, plan.chapter_count, TRUE);
+            v3_native_cache_download_plan_free(&plan);
+            return response_error;
+        }
+
+        char *chapter_uri = custom_asprintf("/v3/chapter/%s", chapter->name);
+        char *chapter_query = custom_asprintf("auth=%s", chapter->auth);
+        if (chapter_uri == NULL || chapter_query == NULL)
+        {
+            osFreeMem(chapter_uri);
+            osFreeMem(chapter_query);
+            v3_native_cache_chapter_abort(&capture);
+            error_t response_error = v3_manual_download_fail(
+                connection, settings, V3_MANUAL_DOWNLOAD_CHAPTER,
+                ERROR_OUT_OF_MEMORY, canonical_ruid, chapter->name, 0,
+                plan.version, completed, plan.chapter_count, TRUE);
+            v3_native_cache_download_plan_free(&plan);
+            return response_error;
+        }
+
+        v3_native_chapter_cbr_t chapter_context;
+        osMemset(&chapter_context, 0, sizeof(chapter_context));
+        chapter_context.cache = capture;
+        chapter_context.cache_enabled = TRUE;
+        chapter_context.cache_error = ERROR_IN_PROGRESS;
+        osMemset(&capture, 0, sizeof(capture));
+        fillBaseCtx(NULL, chapter_uri, chapter_query, V3_CHAPTER,
+                    &chapter_context.passthrough, client_ctx);
+        req_cbr_t chapter_cbr = {
+            .ctx = &chapter_context,
+            .response = v3_native_chapter_response,
+            .header = v3_native_chapter_header,
+            .body = v3_native_chapter_body,
+            .disconnect = v3_native_chapter_disconnect,
+        };
+        TRACE_INFO("Downloading TB2 V3 chapter overlay=%u rUID=%s version=%" PRIu32 " chapter=%" PRIuSIZE "/%" PRIuSIZE " name=%s bytes=%" PRIu32 "\r\n",
+                   (unsigned)settings->internal.overlayNumber,
+                   canonical_ruid, plan.version, i + 1U, plan.chapter_count,
+                   chapter->name, chapter->file_size);
+        request_error = cloud_request_tb2_get(
+            settings->cloud.remote_hostname_tb2, 0, chapter_uri,
+            chapter_query, identity.auth, &chapter_cbr);
+        osFreeMem(chapter_uri);
+        osFreeMem(chapter_query);
+
+        uint32_t chapter_status = chapter_context.status_code;
+        error_t chapter_error = request_error != NO_ERROR
+                                    ? request_error
+                                    : (chapter_context.cache_error != NO_ERROR
+                                           ? chapter_context.cache_error
+                                           : ERROR_INVALID_RESPONSE);
+        bool_t chapter_success = request_error == NO_ERROR &&
+                                 chapter_context.status_code == 200 &&
+                                 chapter_context.finished &&
+                                 chapter_context.cache_error == NO_ERROR;
+        v3_native_cache_chapter_abort(&chapter_context.cache);
+        if (!chapter_success)
+        {
+            v3_manual_download_stage_t failure_stage =
+                chapter_status == 401 || chapter_status == 403
+                    ? V3_MANUAL_DOWNLOAD_AUTH
+                    : V3_MANUAL_DOWNLOAD_CHAPTER;
+            error_t response_error = v3_manual_download_fail(
+                connection, settings, failure_stage, chapter_error,
+                canonical_ruid, chapter->name, chapter_status, plan.version,
+                completed, plan.chapter_count, TRUE);
+            v3_native_cache_download_plan_free(&plan);
+            return response_error;
+        }
+        completed++;
+    }
+
+    uint32_t active_version = 0;
+    bool_t activated = v3_native_cache_active_version(
+                           settings->internal.cachedirfull,
+                           settings->internal.overlayNumber,
+                           canonical_ruid, &active_version) &&
+                       active_version == plan.version;
+    uint32_t version = plan.version;
+    size_t total = plan.chapter_count;
+    v3_native_cache_download_plan_free(&plan);
+    if (!activated)
+    {
+        return v3_manual_download_fail(connection, settings,
+                                       V3_MANUAL_DOWNLOAD_ACTIVATION,
+                                       ERROR_UNEXPECTED_STATE, canonical_ruid,
+                                       NULL, 0, version, completed, total,
+                                       TRUE);
+    }
+
+    TRACE_INFO("Completed TB2 manual content download overlay=%u rUID=%s version=%" PRIu32 " chapters=%" PRIuSIZE "\r\n",
+               (unsigned)settings->internal.overlayNumber, canonical_ruid,
+               version, total);
+    return v3_manual_download_write_result(connection,
+                                           V3_MANUAL_DOWNLOAD_COMPLETE,
+                                           "TB2 V3 cache version activated",
+                                           canonical_ruid, NULL, 200, version,
+                                           completed, total);
 }
 
 error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
@@ -2829,188 +4963,294 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
     TRACE_INFO("V3 Content Meta request: %s\n", uri);
 
     #define RUID_URI_CONTENT_META_BEGIN 17
+    char canonical_ruid[TB2_RUID_SIZE];
+    if (osStrlen(uri) != RUID_URI_CONTENT_META_BEGIN + TB2_RUID_HEX_LENGTH ||
+        !tb2_ruid_canonicalize(&uri[RUID_URI_CONTENT_META_BEGIN],
+                               canonical_ruid))
+    {
+        return v3_local_write_empty_status(connection, 404);
+    }
+    char canonical_uri[RUID_URI_CONTENT_META_BEGIN + TB2_RUID_SIZE];
+    osStrcpy(canonical_uri, uri);
+    osMemcpy(&canonical_uri[RUID_URI_CONTENT_META_BEGIN], canonical_ruid,
+             TB2_RUID_HEX_LENGTH);
     char ruid[17];
     error_t error = NO_ERROR;
     bool_t tonie_marked = false;
     bool noPassword = false;
 
-    tonie_info_t *tonieInfo = getTonieInfoForRequest(connection, uri, RUID_URI_CONTENT_META_BEGIN, queryString, client_ctx, noPassword, ruid, &tonie_marked, &error);
+    tonie_info_t *tonieInfo = getTonieInfoForRequest(connection, canonical_uri,
+                                                     RUID_URI_CONTENT_META_BEGIN,
+                                                     queryString, client_ctx,
+                                                     noPassword, ruid,
+                                                     &tonie_marked, &error);
 
     if (tonieInfo == NULL)
     {
         return error;
     }
-    uint8_t *token = connection->private.authentication_token;
+    osStrcpy(ruid, canonical_ruid);
+    bool_t cloud_access_allowed = tb2_tonie_cloud_access_allowed(
+        client_ctx->settings, ruid, tonieInfo);
 
-    bool_t skip_tmp_content_meta = FALSE;
-    if (tonieInfo->json._source_type == CT_SOURCE_TAP_STREAM)
+    bool_t source_configured = tonieInfo->json.source != NULL &&
+                               tonieInfo->json.source[0] != '\0';
+    uint64_t uid = 0;
+    bool_t uid_valid = tb2_ruid_to_uid(ruid, &uid);
+    bool_t cache_stale = uid_valid &&
+                         freshness_settings_array_contains(client_ctx->settings,
+                                                           "internal.freshnessCache",
+                                                           uid);
+    uint32_t active_cache_version = 0;
+    bool_t active_cache_version_known = v3_native_cache_active_version(
+        client_ctx->settings->internal.cachedirfull,
+        client_ctx->settings->internal.overlayNumber, ruid,
+        &active_cache_version);
+    char active_cache_version_text[16];
+    if (active_cache_version_known)
     {
-        tonie_audio_playlist_t *tap = &tonieInfo->json._tap;
-        const char *resumeBehavior = freshness_v3_resume_behavior(client_ctx->settings, &tonieInfo->json, ruid);
-        const char *tonieSalesId = tonieInfo->json.tonie_model ? tonieInfo->json.tonie_model : "";
-        uint32_t contentVersion = freshness_v3_content_meta_version(client_ctx->settings, tonieInfo, ruid, (uint32_t)tap->audio_id);
-
-        if (tap->_valid && tap->shuffle == TAP_SHUFFLE_NONE && tap->_filepath_resolved != NULL)
+        osSnprintf(active_cache_version_text, sizeof(active_cache_version_text),
+                   "%" PRIu32, active_cache_version);
+    }
+    else
+    {
+        osStrcpy(active_cache_version_text, "none");
+    }
+    if (!source_configured && client_ctx->settings->cloud.cacheContentV3 &&
+        !cache_stale)
+    {
+        uint8_t *manifest = NULL;
+        size_t manifest_length = 0;
+        uint32_t manifest_version = 0;
+        if (v3_native_cache_read_active_manifest(
+                client_ctx->settings->internal.cachedirfull,
+                client_ctx->settings->internal.overlayNumber, ruid,
+                &manifest, &manifest_length, &manifest_version) == NO_ERROR)
         {
-            skip_tmp_content_meta = TRUE;
-            if (tap_final_cache_is_current(tap))
-            {
-                uint32_t fileSize = 0;
-                fsGetFileSize(tap->_filepath_resolved, &fileSize);
-                if (fileSize > TONIEFILE_FRAME_SIZE)
-                {
-                    fileSize -= TONIEFILE_FRAME_SIZE;
-                }
-                else
-                {
-                    fileSize = 0;
-                }
-
-                error = sendLocalContentMetaV3(connection, ruid, contentVersion, fileSize, resumeBehavior, tonieSalesId);
-                if (error == NO_ERROR)
-                {
-                    freshness_clear_cache_after_content_request(client_ctx, V3_CONTENT_META, ruid);
-                }
-                freeTonieInfo(tonieInfo);
-                return error;
-            }
-
-            toniefile_live_header_t live_header;
-            uint32_t predicted_taf_size = 0;
-            size_t *runtime_indices = NULL;
-            size_t runtime_files_count = 0;
-
-            if (tap_prepare_runtime_indices(tap, &runtime_indices, &runtime_files_count) == NO_ERROR &&
-                tap_predict_taf_live_header(tap, runtime_indices, runtime_files_count, &live_header, &predicted_taf_size) == NO_ERROR &&
-                predicted_taf_size > TONIEFILE_FRAME_SIZE &&
-                live_header.payload_size > 0)
-            {
-                tap_free_runtime_indices(runtime_indices);
-                error = sendLocalContentMetaV3(connection, ruid, contentVersion, live_header.payload_size, resumeBehavior, tonieSalesId);
-                if (error == NO_ERROR)
-                {
-                    freshness_clear_cache_after_content_request(client_ctx, V3_CONTENT_META, ruid);
-                }
-                freeTonieInfo(tonieInfo);
-                return error;
-            }
-            tap_free_runtime_indices(runtime_indices);
+            v3_native_import_library_if_enabled(client_ctx, ruid);
+            TRACE_INFO("TB2 V3 content route source=original-cache cache=hit overlay=%u rUID=%s"
+                       " effectiveVersion=%" PRIu32 " activeVersion=%" PRIu32
+                       " requestedVersion=unknown nocloud=%s action=local\r\n",
+                       (unsigned)client_ctx->settings->internal.overlayNumber,
+                       ruid, manifest_version, manifest_version,
+                       cloud_access_allowed ? "false" : "true");
+            connection->response.keepAlive = true;
+            connection->response.noCache = true;
+            httpPrepareHeader(connection, "application/json", manifest_length);
+            error = httpWriteResponse(connection, manifest, manifest_length, false);
+            osFreeMem(manifest);
+            freeTonieInfo(tonieInfo);
+            return error;
         }
+        osFreeMem(manifest);
     }
 
-    if (!skip_tmp_content_meta && tonieInfo->exists && tonieInfo->valid)
+    bool_t local_candidate = source_configured &&
+                             (tonieInfo->json._source_type == CT_SOURCE_NATIVE_COLLECTION ||
+                              tonieInfo->json._source_type == CT_SOURCE_TAP_STREAM ||
+                              (tonieInfo->exists && tonieInfo->valid &&
+                               tonieInfo->json._source_type != CT_SOURCE_TAF_INCOMPLETE));
+    if (local_candidate)
     {
-        cJSON *respJson = cJSON_CreateObject();
-        uint32_t contentVersion = freshness_v3_content_meta_version(client_ctx->settings, tonieInfo, ruid, tonieInfo->tafHeader->audio_id);
-        cJSON_AddNumberToObject(respJson, "version", contentVersion);
-        cJSON_AddStringToObject(respJson, "contentType", "content_tonie");
-        cJSON_AddStringToObject(respJson, "tonieType", "content");
-        cJSON_AddStringToObject(respJson, "resumeBehavior", freshness_v3_resume_behavior(client_ctx->settings, &tonieInfo->json, ruid));
-        cJSON_AddStringToObject(respJson, "tonieSalesId", tonieInfo->json.tonie_model ? tonieInfo->json.tonie_model : "");
-
-        cJSON *contentArray = cJSON_CreateArray();
-        cJSON_AddItemToObject(respJson, "content", contentArray);
-
-        int n_chapters = tonieInfo->tafHeader->n_track_page_nums;
-        if (n_chapters == 0)
+        bool_t tap_source = v3_source_is_tap(tonieInfo);
+        uint32_t naturalVersion = 0;
+        v3_local_content_generation_t generation;
+        osMemset(&generation, 0, sizeof(generation));
+        freshness_get_natural_server_audio_id(tonieInfo, &naturalVersion, NULL);
+        uint32_t contentVersion = freshness_v3_content_meta_version(client_ctx->settings,
+                                                                    tonieInfo,
+                                                                    ruid,
+                                                                    naturalVersion);
+        uint32_t forcedVersion = 0;
+        bool_t forced = uid_valid &&
+                        freshness_forced_version_find(client_ctx->settings,
+                                                      uid, &forcedVersion) &&
+                        forcedVersion == contentVersion;
+        if (tonieInfo->json._source_type == CT_SOURCE_NATIVE_COLLECTION)
         {
-            n_chapters = 1;
+            error = contentVersion == 0
+                        ? ERROR_FAILURE
+                        : v3_native_collection_generation_load(
+                              client_ctx->settings,
+                              tonieInfo->json.source,
+                              ruid,
+                              contentVersion,
+                              &generation);
         }
-
-        uint32_t total_audio_bytes = 0;
-        uint32_t ogg_headers_size = 0;
-        if (n_chapters > 1)
+        else if (tap_source)
         {
-            ogg_headers_size = 512;
-            total_audio_bytes = tonieInfo->tafHeader->num_bytes;
+            error = v3_tap_load_or_prepare_generation(client_ctx->settings,
+                                                      tonieInfo,
+                                                      ruid,
+                                                      contentVersion,
+                                                      &generation,
+                                                      &contentVersion);
         }
-
-        for (int i = 0; i < n_chapters; i++)
+        else
         {
-            cJSON *contentItem = cJSON_CreateObject();
-            cJSON_AddItemToArray(contentArray, contentItem);
-
-            cJSON_AddStringToObject(contentItem, "type", "audio");
-            char name[64];
-            osSprintf(name, "teddycloud_%02d_%s", i, ruid);
-            cJSON_AddStringToObject(contentItem, "name", name);
-            cJSON_AddStringToObject(contentItem, "auth", "");
-            cJSON_AddItemToObject(contentItem, "analytics", cJSON_CreateObject());
-
-            uint32_t fileSize = 0;
-            if (n_chapters == 1)
-            {
-                fsGetFileSize(tonieInfo->contentPath, &fileSize);
-                if (fileSize > 4096)
-                {
-                    fileSize -= 4096;
-                }
-                else
-                {
-                    fileSize = 0;
-                }
-            }
-            else
-            {
-                uint32_t start_block = tonieInfo->tafHeader->track_page_nums[i];
-                uint32_t end_block = 0;
-                if (i + 1 < n_chapters)
-                {
-                    end_block = tonieInfo->tafHeader->track_page_nums[i + 1];
-                }
-                else
-                {
-                    end_block = total_audio_bytes / 4096;
-                }
-
-                if (i == 0)
-                {
-                    fileSize = (end_block - start_block) * 4096;
-                }
-                else
-                {
-                    fileSize = ogg_headers_size + (end_block - start_block) * 4096;
-                }
-            }
-            cJSON_AddNumberToObject(contentItem, "fileSize", (double)fileSize);
+            error = contentVersion == 0
+                        ? ERROR_FAILURE
+                        : v3_local_load_or_prepare_generation(client_ctx->settings,
+                                                              tonieInfo,
+                                                              ruid,
+                                                              contentVersion,
+                                                              TRUE,
+                                                              &generation);
         }
-
-        char *response_json = cJSON_PrintUnformatted(respJson);
-        size_t dataLen = osStrlen(response_json);
-
-        TRACE_INFO("V3 Content Meta response: size=%" PRIuSIZE ", content=%s\n", dataLen, response_json);
-
-        httpPrepareHeader(connection, "application/json; charset=utf-8", dataLen);
-        error = httpWriteResponse(connection, (uint8_t *)response_json, dataLen, false);
-
-        free(response_json);
-        cJSON_Delete(respJson);
+        TRACE_INFO("TB2 V3 content route source=private cache=bypass overlay=%u rUID=%s"
+                   " effectiveVersion=%" PRIu32 " activeVersion=%s"
+                   " requestedVersion=unknown versionKind=%s nocloud=%s action=local\r\n",
+                   (unsigned)client_ctx->settings->internal.overlayNumber,
+                   ruid, contentVersion, active_cache_version_text,
+                   tonieInfo->json._source_type == CT_SOURCE_NATIVE_COLLECTION
+                       ? "native-collection"
+                       : tap_source ? (tonieInfo->json._tap.shuffle == TAP_SHUFFLE_NONE
+                                     ? "tap-static" : "tap-dynamic")
+                              : (forced ? "forced" : "natural"),
+                   cloud_access_allowed ? "false" : "true");
         if (error == NO_ERROR)
         {
-            freshness_clear_cache_after_content_request(client_ctx, V3_CONTENT_META, ruid);
-        }
-        freeTonieInfo(tonieInfo);
-        return error;
-    }
-    if (client_ctx->settings->cloud.tb2_v3_enabled && client_ctx->settings->cloud.enableV3ContentMeta)
-    {
-        if (tonieInfo->json.cloud_override)
-        {
-            token = tonieInfo->json.cloud_auth;
-            char msg[TONIE_AUTH_TOKEN_LENGTH * 2 + 1] = {0};
-            convertTokenBytesToString(token, msg, client_ctx->settings->log.logFullAuth);
-            osMemcpy((char_t *)&uri[RUID_URI_CONTENT_META_BEGIN], tonieInfo->json.cloud_ruid, osStrlen(tonieInfo->json.cloud_ruid));
-            TRACE_INFO("Serve cloud from alternative rUID %s, auth %s\r\n", tonieInfo->json.cloud_ruid, msg);
+            connection->response.keepAlive = true;
+            error = sendLocalContentMetaV3(connection,
+                                           client_ctx->settings,
+                                           ruid,
+                                           contentVersion,
+                                           freshness_v3_resume_behavior(client_ctx->settings,
+                                                                        &tonieInfo->json,
+                                                                        ruid),
+                                           tonieInfo->json.tonie_model,
+                                           &generation);
+            if (error == NO_ERROR && !tap_source)
+            {
+                freshness_clear_cache_after_content_request(client_ctx,
+                                                            V3_CONTENT_META,
+                                                            ruid);
+            }
+            v3_local_content_generation_free(&generation);
+            freeTonieInfo(tonieInfo);
+            return error;
         }
 
-        cbr_ctx_t ctx;
-        req_cbr_t cbr = getCloudCbr(connection, uri, queryString, V3_CONTENT_META, &ctx, client_ctx);
-        if (!cloud_request_tb2_get(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, token, &cbr))
+        v3_local_content_generation_free(&generation);
+        TRACE_ERROR("Could not prepare complete V3 local generation for rUID %s: %s\r\n",
+                    ruid,
+                    error2text(error));
+        if (source_configured || !cloud_access_allowed)
+        {
+            freeTonieInfo(tonieInfo);
+            httpPrepareHeader(connection, NULL, 0);
+            connection->response.statusCode = 500;
+            return httpWriteResponse(connection, NULL, 0, false);
+        }
+        TRACE_WARNING("Falling back to TONIES after local V3 generation failure for rUID %s\r\n",
+                      ruid);
+    }
+    else if (source_configured)
+    {
+        TRACE_ERROR("Configured V3 source for rUID %s is unavailable or invalid; refusing TONIES fallback\r\n",
+                    ruid);
+        freeTonieInfo(tonieInfo);
+        return v3_local_write_empty_status(connection, 500);
+    }
+    if (client_ctx->settings->cloud.tb2_v3_enabled &&
+        client_ctx->settings->cloud.enableV3ContentMeta &&
+        cloud_access_allowed)
+    {
+        TRACE_INFO("TB2 V3 content route source=original-upstream cache=%s overlay=%u rUID=%s"
+                   " effectiveVersion=unknown activeVersion=%s requestedVersion=unknown"
+                   " nocloud=false action=upstream\r\n",
+                   client_ctx->settings->cloud.cacheContentV3
+                       ? (cache_stale ? "stale" : "miss")
+                       : "disabled",
+                   (unsigned)client_ctx->settings->internal.overlayNumber,
+                   ruid, active_cache_version_text);
+        tb2_content_identity_t identity;
+        if (!tb2_content_identity_resolve(
+                ruid, connection->private.authentication_token,
+                &tonieInfo->json, &identity))
+        {
+            TRACE_ERROR("Could not resolve TB2 content identity for rUID %s overlay=%u\r\n",
+                        ruid,
+                        (unsigned int)client_ctx->settings->internal.overlayNumber);
+            freeTonieInfo(tonieInfo);
+            return v3_local_write_empty_status(connection, 500);
+        }
+
+        char *upstream_uri = strdup(canonical_uri);
+        if (upstream_uri == NULL)
+        {
+            freeTonieInfo(tonieInfo);
+            return ERROR_OUT_OF_MEMORY;
+        }
+        osMemcpy(&upstream_uri[RUID_URI_CONTENT_META_BEGIN], identity.ruid,
+                 TB2_RUID_HEX_LENGTH);
+        if (identity.overridden)
+        {
+            char msg[TONIE_AUTH_TOKEN_LENGTH * 2 + 1] = {0};
+            convertTokenBytesToString(identity.auth, msg,
+                                      client_ctx->settings->log.logFullAuth);
+            TRACE_INFO("Serve TB2 cloud content from canonical alternative rUID %s, auth %s\r\n",
+                       identity.ruid, msg);
+        }
+
+        v3_native_meta_cbr_t cache_ctx;
+        bool_t cache_enabled = client_ctx->settings->cloud.cacheContentV3;
+        req_cbr_t cbr;
+        osMemset(&cache_ctx, 0, sizeof(cache_ctx));
+        fillBaseCtx(connection, upstream_uri, queryString, V3_CONTENT_META,
+                    &cache_ctx.passthrough, client_ctx);
+        if (cache_enabled)
+        {
+            v3_native_cache_meta_capture_init(
+                &cache_ctx.cache, client_ctx->settings->internal.cachedirfull,
+                client_ctx->settings->internal.overlayNumber, ruid);
+        }
+        else
+        {
+            v3_native_cache_meta_observe_init(
+                &cache_ctx.cache,
+                client_ctx->settings->internal.overlayNumber, ruid);
+        }
+        cbr = (req_cbr_t){
+            .ctx = &cache_ctx,
+            .response = v3_native_meta_response,
+            .header = v3_native_meta_header,
+            .body = v3_native_meta_body,
+            .disconnect = v3_native_meta_disconnect,
+        };
+        error_t request_error = cloud_request_tb2_get(
+            client_ctx->settings->cloud.remote_hostname_tb2, 0, upstream_uri,
+            queryString, identity.auth, &cbr);
+        v3_native_cache_meta_capture_abort(&cache_ctx.cache);
+        osFreeMem(upstream_uri);
+        if (!request_error)
         {
             freeTonieInfo(tonieInfo);
             return NO_ERROR;
         }
         freshness_clear_cache_after_content_request(client_ctx, V3_CONTENT_META, ruid);
+    }
+    else if (!cloud_access_allowed)
+    {
+        TRACE_INFO("TB2 V3 content route source=none cache=%s overlay=%u rUID=%s"
+                   " effectiveVersion=unknown activeVersion=%s requestedVersion=unknown"
+                   " nocloud=true action=local-404\r\n",
+                   client_ctx->settings->cloud.cacheContentV3
+                       ? (cache_stale ? "stale" : "miss")
+                       : "disabled",
+                   (unsigned)client_ctx->settings->internal.overlayNumber,
+                   ruid, active_cache_version_text);
+    }
+    else
+    {
+        TRACE_INFO("TB2 V3 content route source=none cache=%s overlay=%u rUID=%s"
+                   " effectiveVersion=unknown activeVersion=%s requestedVersion=unknown"
+                   " nocloud=false action=local-404 reason=v3-endpoint-disabled\r\n",
+                   client_ctx->settings->cloud.cacheContentV3
+                       ? (cache_stale ? "stale" : "miss")
+                       : "disabled",
+                   (unsigned)client_ctx->settings->internal.overlayNumber,
+                   ruid, active_cache_version_text);
     }
 
     freeTonieInfo(tonieInfo);
@@ -3028,35 +5268,426 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
 
     TRACE_INFO("V3 Chapter request: %s\n", uri);
 
-    // /v3/chapter/teddycloud_00_fa9c3e0d500304e0
-    // 012345678901234567890123456
-    //             ^ teddycloud_ at 12 (len 11)
-    //                        ^ 00_ at 23 (len 3)
-    //                           ^ ruid at 26
-    
-    if (osStrncmp(&uri[12], "teddycloud_", 11) == 0)
+    bool_t local_chapter = osStrncmp(uri,
+                                     V3_CHAPTER_URI_PREFIX,
+                                     V3_CHAPTER_URI_PREFIX_LENGTH) == 0 &&
+                           osStrncmp(uri + V3_CHAPTER_URI_PREFIX_LENGTH,
+                                     "teddycloud_",
+                                     V3_LOCAL_CHAPTER_PREFIX_LENGTH) == 0;
+    if (local_chapter)
     {
-        char chapter_id_str[3];
-        osStrncpy(chapter_id_str, &uri[12 + 11], 2);
-        chapter_id_str[2] = '\0';
-        int chapter_id = atoi(chapter_id_str);
-        TRACE_INFO(" >> local chapter_id=%d\n", chapter_id);
+        v3_local_chapter_request_t request;
+        if (!v3_local_parse_chapter_request(uri, &request))
+        {
+            TRACE_DEBUG("Rejecting malformed V3 local chapter URI %s\r\n", uri);
+            return v3_local_write_empty_status(connection, 404);
+        }
 
-        connection->private.client_ctx.skip_taf_header = true;
+        char requested_ruid[V3_LOCAL_CONTENT_RUID_SIZE];
+        error_t error = NO_ERROR;
+        bool_t tonie_marked = FALSE;
+        tonie_info_t *tonieInfo = getTonieInfoForRequest(connection,
+                                                         uri,
+                                                         (int)request.ruid_uri_offset,
+                                                         queryString,
+                                                         client_ctx,
+                                                         false,
+                                                         requested_ruid,
+                                                         &tonie_marked,
+                                                         &error);
+        if (tonieInfo == NULL)
+        {
+            return error;
+        }
+        if (osStrcasecmp(requested_ruid, request.ruid) != 0)
+        {
+            freeTonieInfo(tonieInfo);
+            return v3_local_write_empty_status(connection, 404);
+        }
+        bool_t source_configured = tonieInfo->json.source != NULL &&
+                                   tonieInfo->json.source[0] != '\0';
+        if (!source_configured)
+        {
+            TRACE_DEBUG("Rejecting stale V3 local chapter for rUID %s: private source is no longer selected\r\n",
+                        request.ruid);
+            freeTonieInfo(tonieInfo);
+            return v3_local_write_empty_status(connection, 404);
+        }
 
-        return handleCloudContentExt(connection, uri, queryString, client_ctx, false, 12 + 11 + 3, V3_CHAPTER);
+        uint32_t naturalVersion = 0;
+        bool_t tap_source = v3_source_is_tap(tonieInfo);
+        bool_t native_collection =
+            tonieInfo->json._source_type == CT_SOURCE_NATIVE_COLLECTION;
+        freshness_get_natural_server_audio_id(tonieInfo, &naturalVersion, NULL);
+        uint32_t effectiveVersion = freshness_v3_content_meta_version(client_ctx->settings,
+                                                                      tonieInfo,
+                                                                      request.ruid,
+                                                                      naturalVersion);
+        if (effectiveVersion == 0)
+        {
+            TRACE_DEBUG("Rejecting V3 local chapter for rUID %s: effective version unavailable\r\n",
+                        request.ruid);
+            freeTonieInfo(tonieInfo);
+            return v3_local_write_empty_status(connection, 404);
+        }
+
+        v3_local_content_generation_t generation;
+        osMemset(&generation, 0, sizeof(generation));
+        const v3_local_content_chapter_t *chapter = NULL;
+        uint32_t servedVersion = effectiveVersion;
+        if (native_collection && request.format == V3_LOCAL_CHAPTER_HASHED)
+        {
+            error = v3_native_collection_generation_load(
+                client_ctx->settings,
+                tonieInfo->json.source,
+                request.ruid,
+                effectiveVersion,
+                &generation);
+            if (error == NO_ERROR)
+            {
+                char canonical_name[V3_LOCAL_CONTENT_NAME_SIZE];
+                int name_length = osSnprintf(
+                    canonical_name, sizeof(canonical_name),
+                    "teddycloud_%s_%02" PRIuSIZE "_%s.opus",
+                    request.hash_prefix, request.chapter_index, request.ruid);
+                if (name_length > 0 &&
+                    (size_t)name_length < sizeof(canonical_name))
+                {
+                    chapter = v3_local_content_find_chapter(&generation,
+                                                            canonical_name);
+                }
+            }
+        }
+        else if (native_collection)
+        {
+            error = ERROR_NOT_FOUND;
+            TRACE_DEBUG("Rejecting legacy V3 chapter for native collection rUID %s\r\n",
+                        request.ruid);
+        }
+        else if (request.format == V3_LOCAL_CHAPTER_HASHED)
+        {
+            uint32_t versions[3] = {effectiveVersion, 0, 0};
+            size_t version_count = 1;
+            if (tap_source)
+            {
+                v3_local_tap_state_t tap_state;
+                if (v3_local_tap_state_load(client_ctx->settings->internal.cachedirfull,
+                                            client_ctx->settings->internal.overlayNumber,
+                                            request.ruid, &tap_state) == NO_ERROR &&
+                    tap_state.valid)
+                {
+                    versions[0] = tap_state.prepared_version;
+                    if (tap_state.playing_version != 0 &&
+                        tap_state.playing_version != versions[0])
+                    {
+                        versions[version_count++] = tap_state.playing_version;
+                    }
+                    if (tap_state.previous_version != 0 &&
+                        tap_state.previous_version != versions[0] &&
+                        (version_count < 2 ||
+                         tap_state.previous_version != versions[1]))
+                    {
+                        versions[version_count++] = tap_state.previous_version;
+                    }
+                }
+            }
+
+            char canonical_name[V3_LOCAL_CONTENT_NAME_SIZE];
+            int name_length = osSnprintf(canonical_name,
+                                         sizeof(canonical_name),
+                                         "teddycloud_%s_%02" PRIuSIZE "_%s.opus",
+                                         request.hash_prefix,
+                                         request.chapter_index,
+                                         request.ruid);
+            error = ERROR_NOT_FOUND;
+            for (size_t i = 0;
+                 name_length > 0 && (size_t)name_length < sizeof(canonical_name) &&
+                 i < version_count;
+                 i++)
+            {
+                error = v3_local_content_generation_load(
+                    client_ctx->settings->internal.cachedirfull,
+                    client_ctx->settings->internal.overlayNumber,
+                    request.ruid, versions[i], &generation);
+                if (error == NO_ERROR)
+                {
+                    chapter = v3_local_content_find_chapter(&generation,
+                                                            canonical_name);
+                    if (chapter != NULL)
+                    {
+                        servedVersion = versions[i];
+                        break;
+                    }
+                    v3_local_content_generation_free(&generation);
+                }
+            }
+        }
+        else
+        {
+            uint64_t uid = 0;
+            bool_t legacy_allowed = tb2_ruid_to_uid(request.ruid, &uid) &&
+                                    !freshness_settings_array_contains(client_ctx->settings,
+                                                                       "internal.v3HashedChapterUids",
+                                                                       uid) &&
+                                    !freshness_source_changed_contains_ruid(client_ctx->settings,
+                                                                            request.ruid);
+            if (legacy_allowed)
+            {
+                TRACE_DEBUG("Serving transitional V3 legacy chapter teddycloud_%02" PRIuSIZE "_%s\r\n",
+                            request.chapter_index,
+                            request.ruid);
+                error = v3_local_load_or_prepare_generation(client_ctx->settings,
+                                                            tonieInfo,
+                                                            request.ruid,
+                                                            effectiveVersion,
+                                                            FALSE,
+                                                            &generation);
+                if (error == NO_ERROR && request.chapter_index < generation.chapter_count)
+                {
+                    chapter = &generation.chapters[request.chapter_index];
+                }
+            }
+            else
+            {
+                error = ERROR_NOT_FOUND;
+                TRACE_DEBUG("Rejecting V3 legacy chapter for rUID %s: hash mode or source change active\r\n",
+                            request.ruid);
+            }
+        }
+
+        if (error != NO_ERROR || chapter == NULL)
+        {
+            TRACE_DEBUG("Rejecting stale or unknown V3 local chapter for rUID %s version=%" PRIu32 ": %s\r\n",
+                        request.ruid,
+                        servedVersion,
+                        error2text(error));
+            v3_local_content_generation_free(&generation);
+            freeTonieInfo(tonieInfo);
+            return v3_local_write_empty_status(connection, 404);
+        }
+
+        if (request.format == V3_LOCAL_CHAPTER_LEGACY && connection->request.Range.start > 0)
+        {
+            TRACE_DEBUG("Rejecting resumed V3 legacy chapter for rUID %s with 416 to prevent mixed .part bytes\r\n",
+                        request.ruid);
+            uint32_t file_size = chapter->file_size;
+            v3_local_content_generation_free(&generation);
+            freeTonieInfo(tonieInfo);
+            return v3_local_reject_legacy_range(connection, file_size);
+        }
+
+        TRACE_INFO("Serve V3 local chapter overlay=%u rUID=%s version=%" PRIu32 " chapter=%" PRIuSIZE " name=%s bytes=%" PRIu32 "\r\n",
+                   (unsigned)client_ctx->settings->internal.overlayNumber,
+                   request.ruid,
+                   servedVersion,
+                   chapter->index,
+                   chapter->name,
+                   chapter->file_size);
+        connection->response.keepAlive = true;
+        connection->response.maxAge = V3_LOCAL_CHAPTER_MAX_AGE;
+        error = httpSendResponseStreamUnsafe(connection,
+                                             V3_LOCAL_CHAPTER_MIME_URI,
+                                             chapter->path,
+                                             false);
+        if (error == NO_ERROR &&
+            (connection->response.statusCode == 200 ||
+             connection->response.statusCode == 206))
+        {
+            if (generation.source_kind != V3_LOCAL_CONTENT_SOURCE_TAP &&
+                !freshness_confirm_source_change_after_chapter(client_ctx,
+                                                               request.ruid,
+                                                               servedVersion,
+                                                               TRUE,
+                                                               chapter->name))
+            {
+                freshness_clear_cache_after_content_request(client_ctx,
+                                                            V3_CHAPTER,
+                                                            request.ruid);
+            }
+        }
+        else if (error != NO_ERROR)
+        {
+            TRACE_WARNING("Could not send V3 local chapter %s: %s\r\n",
+                          chapter->name,
+                          error2text(error));
+        }
+        v3_local_content_generation_free(&generation);
+        freeTonieInfo(tonieInfo);
+        return error;
+    }
+
+    v3_native_cache_chapter_capture_t native_capture;
+    osMemset(&native_capture, 0, sizeof(native_capture));
+    v3_native_cache_chapter_action_t native_action = V3_NATIVE_CHAPTER_BYPASS;
+    char *native_path = NULL;
+    const char *native_name = osStrncmp(uri, V3_CHAPTER_URI_PREFIX,
+                                        V3_CHAPTER_URI_PREFIX_LENGTH) == 0
+                                  ? uri + V3_CHAPTER_URI_PREFIX_LENGTH
+                                  : NULL;
+    if (native_name != NULL)
+    {
+        native_action = v3_native_cache_chapter_prepare(
+            client_ctx->settings->internal.cachedirfull,
+            client_ctx->settings->internal.overlayNumber, native_name,
+            &native_capture, &native_path);
+        if (native_action == V3_NATIVE_CHAPTER_SERVE)
+        {
+            uint32_t active_version = 0;
+            bool_t active_version_known = v3_native_cache_active_version(
+                client_ctx->settings->internal.cachedirfull,
+                client_ctx->settings->internal.overlayNumber,
+                native_capture.ruid, &active_version);
+            char active_version_text[16];
+            if (active_version_known)
+            {
+                osSnprintf(active_version_text, sizeof(active_version_text),
+                           "%" PRIu32, active_version);
+            }
+            else
+            {
+                osStrcpy(active_version_text, "unknown");
+            }
+            tb2_nocloud_policy_t cache_policy;
+            const char *nocloud_state = "unknown";
+            if (tb2_nocloud_policy_resolve(client_ctx->settings,
+                                           native_capture.ruid,
+                                           &cache_policy))
+            {
+                nocloud_state = tb2_nocloud_policy_blocks_upstream(&cache_policy)
+                                    ? "true"
+                                    : "false";
+            }
+            TRACE_INFO("TB2 V3 chapter route source=original-cache cache=hit overlay=%u"
+                       " rUID=%s activeVersion=%s requestedVersion=%" PRIu32
+                       " name=%s nocloud=%s action=local\r\n",
+                       (unsigned)client_ctx->settings->internal.overlayNumber,
+                       native_capture.ruid, active_version_text,
+                       native_capture.version, native_name, nocloud_state);
+            if (active_version_known && active_version != native_capture.version)
+            {
+                TRACE_WARNING("TB2 V3 chapter cache version mismatch overlay=%u rUID=%s"
+                              " activeVersion=%" PRIu32 " requestedVersion=%" PRIu32
+                              " action=local routeState=version-mismatch\r\n",
+                              (unsigned)client_ctx->settings->internal.overlayNumber,
+                              native_capture.ruid, active_version,
+                              native_capture.version);
+            }
+            connection->response.keepAlive = true;
+            connection->response.noCache = true;
+            error_t cache_error = httpSendResponseStreamUnsafe(connection,
+                                                               V3_LOCAL_CHAPTER_MIME_URI,
+                                                               native_path, false);
+            if (cache_error == NO_ERROR &&
+                (connection->response.statusCode == 200 ||
+                 connection->response.statusCode == 206) &&
+                v3_native_cache_route_matches(
+                    client_ctx->settings->internal.overlayNumber,
+                    native_capture.ruid, native_capture.version, native_name))
+            {
+                freshness_confirm_source_change_after_chapter(
+                    client_ctx, native_capture.ruid, native_capture.version,
+                    FALSE, native_name);
+            }
+            osFreeMem(native_path);
+            return cache_error;
+        }
+        if (native_action == V3_NATIVE_CHAPTER_REJECT)
+        {
+            TRACE_WARNING("Rejecting inconsistent TB2 V3 cache chapter mapping overlay=%u name=%s\r\n",
+                          (unsigned)client_ctx->settings->internal.overlayNumber,
+                          native_name);
+            return v3_local_write_empty_status(connection, 500);
+        }
+        if (native_action == V3_NATIVE_CHAPTER_CAPTURE ||
+            native_action == V3_NATIVE_CHAPTER_FORWARD)
+        {
+            char route_ruid[TB2_RUID_SIZE];
+            osStrcpy(route_ruid, native_capture.ruid);
+            tonie_info_t *route_info = getTonieInfoFromRuid(
+                route_ruid, false, client_ctx->settings);
+            bool_t cloud_allowed = route_info != NULL &&
+                                   tb2_tonie_cloud_access_allowed(
+                                       client_ctx->settings, route_ruid,
+                                       route_info);
+            if (route_info != NULL)
+            {
+                freeTonieInfo(route_info);
+            }
+            if (!cloud_allowed)
+            {
+                TRACE_INFO("Rejecting TONIES V3 chapter fallback for NoCloud rUID %s name=%s\r\n",
+                           route_ruid, native_name);
+                v3_native_cache_chapter_abort(&native_capture);
+                return v3_local_write_empty_status(connection, 404);
+            }
+        }
+        else if (native_action == V3_NATIVE_CHAPTER_BYPASS)
+        {
+            TRACE_DEBUG("Rejecting V3 chapter without current content-meta route overlay=%u name=%s\r\n",
+                        (unsigned)client_ctx->settings->internal.overlayNumber,
+                        native_name);
+            return v3_local_write_empty_status(connection, 404);
+        }
     }
 
     if (client_ctx->settings->cloud.tb2_v3_enabled && client_ctx->settings->cloud.enableV3Chapter)
     {
         cbr_ctx_t ctx;
-        req_cbr_t cbr = getCloudCbr(connection, uri, queryString, V3_CHAPTER, &ctx, client_ctx);
+        v3_native_chapter_cbr_t cache_ctx;
+        req_cbr_t cbr;
+        if (native_action == V3_NATIVE_CHAPTER_CAPTURE ||
+            native_action == V3_NATIVE_CHAPTER_FORWARD)
+        {
+            osMemset(&cache_ctx, 0, sizeof(cache_ctx));
+            cache_ctx.cache = native_capture;
+            cache_ctx.cache_enabled = native_action == V3_NATIVE_CHAPTER_CAPTURE;
+            osMemset(&native_capture, 0, sizeof(native_capture));
+            fillBaseCtx(connection, uri, queryString, V3_CHAPTER,
+                        &cache_ctx.passthrough, client_ctx);
+            cbr = (req_cbr_t){
+                .ctx = &cache_ctx,
+                .response = v3_native_chapter_response,
+                .header = v3_native_chapter_header,
+                .body = v3_native_chapter_body,
+                .disconnect = v3_native_chapter_disconnect,
+            };
+        }
+        else
+        {
+            cbr = getCloudCbr(connection, uri, queryString, V3_CHAPTER, &ctx,
+                              client_ctx);
+        }
         // Note: chapter uses a query parameter `auth=...` which is extracted in handler if we need it, but proxying it just passes URI+Query.
         // We will pass the authentication token if available, though for V3_CHAPTER it seems to use `?auth=XXX` anyway.
-        if (!cloud_request_tb2_get(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, NULL, &cbr))
+        error_t request_error = cloud_request_tb2_get(
+            client_ctx->settings->cloud.remote_hostname_tb2, 0, uri,
+            queryString, NULL, &cbr);
+        if (native_action == V3_NATIVE_CHAPTER_CAPTURE ||
+            native_action == V3_NATIVE_CHAPTER_FORWARD)
+        {
+            if (!request_error && cache_ctx.finished && cache_ctx.successful &&
+                v3_native_cache_route_matches(
+                    client_ctx->settings->internal.overlayNumber,
+                    cache_ctx.cache.ruid, cache_ctx.cache.version,
+                    cache_ctx.cache.name))
+            {
+                freshness_confirm_source_change_after_chapter(
+                    client_ctx, cache_ctx.cache.ruid,
+                    cache_ctx.cache.version, FALSE,
+                    cache_ctx.cache.name);
+            }
+            v3_native_cache_chapter_abort(&cache_ctx.cache);
+        }
+        if (!request_error)
         {
             return NO_ERROR;
         }
+    }
+
+    if (native_action == V3_NATIVE_CHAPTER_CAPTURE ||
+        native_action == V3_NATIVE_CHAPTER_FORWARD)
+    {
+        v3_native_cache_chapter_abort(&native_capture);
     }
 
     httpPrepareHeader(connection, NULL, 0);

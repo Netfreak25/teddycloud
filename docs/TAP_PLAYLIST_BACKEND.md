@@ -2,17 +2,25 @@
 
 This document describes the backend behavior for TAP playlist generation, streaming, cache validation and publish handling.
 
+Display metadata for directly assigned custom TAF files is separate from this TB1 TAP playlist subsystem and is documented in [CONTENT_PLAYLIST_METADATA.md](CONTENT_PLAYLIST_METADATA.md).
+
 ## Implementation overview
 
 The backend changes are grouped around one behavior: stable TAF-only TAP playlists should be generated fast, streamed from a growing `.taf.tmp`, published safely as a final `.taf`, and then stay valid across freshness checks.
 
 The main backend change is the TAF-only remux path. It avoids PCM decoding and Opus re-encoding, derives a complete final TAF header before streaming, writes Ogg pages with predictable block alignment, and allows the first download to be cache-safe.
 
+The same packet writer now also accepts the independent Ogg/Opus chapters of a
+native TB2 library collection. Only the reader offset differs: TAF playlist
+entries begin after the 4096-byte TAF header, while native chapters begin at
+byte zero. Page writing, Opus compatibility checks, SHA1, track positions,
+header prediction and replace-safe publication remain shared.
+
 The HTTP/cloud handling was changed so live TAP generation streams from `.taf.tmp`, keeps that temporary file alive until the response and generator are done, publishes the final file only after successful generation, and treats the TAP `audio_id` as the playlist version source.
 
-V3 freshness handling also keeps the latest reported box inventory per overlay. When a content JSON mapping changes, the backend can compare that stored box-side `audio_id` with the current server-side content version and queue an invalidation for the affected overlay before the next play request. A `source` change is treated as a content mapping change even when the effective `audio_id` stays the same. In that case V3 content-meta uses `alwaysReset`, and the overlay receives a temporary replacement version until the natural server version changes again.
+V3 freshness handling also keeps the latest reported box inventory per overlay. When a content JSON mapping changes, the backend can compare that stored box-side `audio_id` with the current server-side content version and queue an invalidation for the affected overlay before the next play request. A `source` change is treated as a content mapping change even when the natural `audio_id` stays the same. In that case V3 content-meta uses `alwaysReset`, and the overlay receives a deterministic replacement version tied to the persistent source revision. V3 freshness and content-meta share the same per-Tonie cloud policy. The automatic source lock cannot be bypassed upstream. The source-change marker survives content-meta and MQTT playback; only a successful current-generation chapter transfer clears it.
 
-The fallback path remains deliberately conservative. MP3 and non-TAF entries still use FFmpeg generation because their final SHA1, Ogg state and track pages are not known before encoding completes. For stable TAP playlists, the FFmpeg-generated final `.taf` still uses the TAP `audio_id` so the regenerated file can become current after the planned redownload.
+For the older progressive content path, the fallback remains deliberately conservative. MP3 and non-TAF entries still use FFmpeg generation because their final SHA1, Ogg state and track pages are not known before encoding completes. For stable TAP playlists, the FFmpeg-generated final `.taf` still uses the TAP `audio_id` so the regenerated file can become current after the planned redownload. The TB2 V3 path instead waits for this generation to finish and materializes the complete final TAF before returning content-meta.
 
 ## Code changes by file
 
@@ -30,8 +38,8 @@ The fallback path remains deliberately conservative. MP3 and non-TAF entries sti
 
 ### `include/tonie_audio_playlist.h`
 
-- What changed: extends the TAP model with `shuffle`, a backend-only random-candidate limit, runtime index helpers, live-header prediction and replace-safe publish APIs.
-- Why: the handler and generator need an explicit contract for dynamic playlists, selected runtime order, cache-safe prediction and final publish ownership.
+- What changed: extends the TAP model with `shuffle`, a backend-only random-candidate limit, runtime index helpers, live-header prediction, replace-safe publish APIs, synchronous final-snapshot materialization for V3 and the native-collection remux entry point.
+- Why: the handler and generator need an explicit contract for dynamic playlists, selected runtime order, cache-safe prediction and final publish ownership. V3 additionally needs a complete final TAF and must never treat a growing `.tmp` as a chapter source.
 - Why not another solution: mutating the saved playlist order or encoding all state into `stream_ctx_t` would mix persistent data, request-local state and global stream state.
 
 ### `include/handler_cloud.h`
@@ -42,9 +50,9 @@ The fallback path remains deliberately conservative. MP3 and non-TAF entries sti
 
 ### `include/mqtt_server.h`
 
-- What changed: exposes success-aware `fresh-tonies` publish helpers, including an overlay-based publisher.
-- Why: pro-active V3 invalidations are overlay decisions and must be delivered only to an active box connection for that overlay.
-- Why not another solution: broadcasting over the generic MQTT path would expose box-only commands to diagnostic subscribers and would not give reliable delivery feedback.
+- What changed: exposes overlay-wide and UID-specific `fresh-tonies` queue helpers.
+- Why: pro-active V3 invalidations are overlay decisions, while a content-mapping update must be able to requeue exactly the changed UID even if it was acknowledged earlier on the same MQTT connection.
+- Why not another solution: broadcasting over the generic MQTT path would expose box-only commands to diagnostic subscribers; requeueing the full overlay would resend unrelated Tonies.
 
 ### `include/settings.h`
 
@@ -78,33 +86,45 @@ The fallback path remains deliberately conservative. MP3 and non-TAF entries sti
 
 ### `src/handler_api.c`
 
-- What changed: after a successful `/content/json/set/<ruid>` save, the handler calls the internal V3 freshness trigger and marks whether the `source` changed.
-- Why: content assignment changes are the point where the server knows a box may still hold an older local copy.
-- Why not another solution: reacting to generic file uploads would create false positives for files that are not assigned to a rUID.
+- What changed: after a successful `/content/json/set/<ruid>` save, the handler advances the persistent source revision, maintains the automatic Source-NoCloud bit and calls the internal V3 freshness trigger only for a real source-string change. Native collection selections are fully validated before this state changes, and `fileIndexV2` annotates complete `by/contentHash` collection directories as one selectable source. The existing content-download action selects TB1 V1/V2 or the TB2 V3 download orchestrator from the requested overlay's box generation.
+- Why: content assignment is the point where the server can distinguish a new private generation from a repeated save. The overlay selected by the existing download URL is also the authoritative generation and credential scope for a manual download.
+- Why not another solution: deriving changes from TAF Audio-IDs misses same/lower/missing IDs; reacting to generic uploads creates false positives for unassigned files. A separate TB2 endpoint would duplicate the button/API contract and could select different overlay settings.
 
-### `src/handler_cloud.c`
+### `include/contentJson.h` and `src/contentJson.c`
 
-- What changed: owns TAP live streaming, per-target locking, prediction-based local `Content-Length`, generator lifecycle, handler-owned publish, freshness decisions, V3 content-meta protection and pro-active V3 freshness invalidation. The freshness comparison is shared by normal checks and content-mapping updates. V3 content-meta and freshness now use the same effective server version, including overlay-local replacement versions after source changes. Source-change invalidations keep their pending state through content-meta and are cleared after the first matching chapter request.
-- Why: the HTTP handler is the only component that knows when delivery has ended, when the generator has finished, when `.taf.tmp` can safely be published or deleted, and which server-side version should be compared with the box-reported inventory. Source changes can require a reset even when the natural `audio_id` is unchanged, and content-meta alone is not enough to prove that the following chapter was redownloaded.
-- Why not another solution: letting the generator publish immediately races with HTTP retry/range reads; marking every TAP as fresh causes redownload loops; serving stale finals ignores TAP `audio_id` changes. The predicted stream size is kept as a local per-request settings override so Cyclone remains unchanged. A separate pro-active comparison path would risk diverging from normal freshness semantics. Clearing the pending state at content-meta would allow a later ranged chapter request to reuse stale local bytes.
+- What changed: persist manual and source-derived NoCloud provenance plus `source_revision`; keep `nocloud` as their compatibility result. Canonical native collection URIs are classified as a distinct non-stream source and malformed native URIs fail closed instead of enabling live streaming.
+- Why: removing a source must clear its automatic lock without clearing an independent manual lock, and deterministic versions need restart-safe change identity.
+- Why not another solution: one boolean cannot recover provenance; a timestamp is neither deterministic nor reproducible.
 
-### `src/cyclone/cyclone_tcp/http/http_server.c`
+### `include/tb2_nocloud_policy.h` and `src/tb2_nocloud_policy.c`
 
-- What changed: rejects HTTP range requests whose start offset is outside the effective response length with `416` and `Content-Range: bytes */<length>`.
-- Why: V3 chapter responses can represent virtual slices, and old local offsets must not underflow `Content-Length` or resume from bytes that no longer belong to the current response.
-- Why not another solution: silently clamping to the end would look like a successful resume and could keep stale local data in place; moving the guard into each caller would duplicate range validation across normal files, TAP output and V3 chapter splits.
+- What changed: expose effective manual/source NoCloud policy and prevent a cloud identity override from bypassing the automatic private-source lock.
+- Why: MQTT, freshness and HTTPS must apply the same per-overlay RUID decision.
+- Why not another solution: separate endpoint-specific checks would drift and could leak private-content telemetry.
 
-### `src/cyclone/cyclone_tcp/http/http_server_misc.h`
+### `include/v3_native_cache.h` and `src/v3_native_cache.c`
 
-- What changed: adds the HTTP status phrase used for `416` responses.
-- Why: the range guard needs a valid status line for unsatisfiable resume requests.
-- Why not another solution: returning a generic client error would hide the exact range problem from clients and logs.
+- What changed: load a complete active original manifest byte-for-byte, expose its TONIES version, invalidate its active marker on source changes and retain the validated current content-meta route in memory even when native caching is disabled. The same parsed route can now provide a bounded manual-download plan with validated original chapter names, exact sizes and per-chapter auth tokens. It also validates canonical `lib://by/contentHash/.../library-entry.json` sources and their immutable chapter files.
+- Why: original content must retain TONIES names/version while private assignments and NoCloud need an exact RUID/version/name association before any chapter can be forwarded; unknown names fail closed until content-meta re-establishes that route. Manual downloads need the exact manifest order and auth while still using the normal capture and activation path.
+- Why not another solution: rebuilding the JSON changes the box-visible response; guessing a RUID from an opaque chapter name is unsafe; a separate route/parser/cachewriter would duplicate validation and eventually diverge from normal MITM caching.
+
+### `include/handler_cloud.h` and `src/handler_cloud.c`
+
+- What changed: owns TAP live streaming, per-target locking, prediction-based local `Content-Length`, generator lifecycle, handler-owned publish, freshness decisions, V3 content-meta protection and pro-active V3 freshness invalidation. The freshness comparison is shared by normal checks and content-mapping updates. V3 content-meta and freshness use the same effective server version and the provenance-aware NoCloud policy, including overlay-local deterministic replacement versions after source changes. The V3 freshness request remains one filtered content map: private and effective-NoCloud RUIDs stay local, complete active original-cache versions replace the box version, and the validated TONIES response is merged additively so local stale decisions win. For V3, a live TAP is synchronously materialized under the target lock before immutable Ogg/Opus chapters and the generation descriptor are created. Native library collections instead reference their already immutable chapter files directly and create target-RUID-specific V3 names. For TB1, the handler predicts, streams and replace-safely publishes one hash-keyed derived TAF from the same collection. Source-change invalidations remain pending through content-meta and MQTT playback and are completed only by a successful chapter from the still-current generation. A mapping change queues the exact affected UID for MQTT freshness delivery. The manual TB2 download resolves the shared certificate/content identity, fetches one manifest and its chapters sequentially through the same native-cache capture functions, restores the prior active route after failures and reports stage-specific JSON/log errors.
+- Why: the HTTP handler is the only component that owns target serialization, source selection, the effective overlay version and local-versus-TONIES routing. V3 requires an immutable complete generation before content-meta becomes visible; a growing `.taf.tmp` cannot provide that contract. Keeping manual orchestration here lets the existing TB2 TLS identity and cache callbacks remain authoritative.
+- Why not another solution: using `.tmp` directly can publish incomplete or changing chapter bytes; letting Meta and Chapter choose shuffle order independently can describe and serve different content; clearing freshness on content-meta, an error response or an unvalidated old chapter can acknowledge the wrong generation. A second downloader with its own files would bypass atomic activation and could damage or replace the previous active version after a partial transfer.
+
+### `tests/test_tb2_v3_manual_download_contract.py`
+
+- What changed: verifies generation dispatch, the unchanged TB1 calls, shared TB2 identity selection, reuse of all native-cache capture stages, bounded chapter auth, active-route restoration, stage-specific API errors and cache documentation.
+- Why: the manual action spans the API handler, cloud request callbacks and cache module, so its critical contract is the absence of a second writer and preservation of the previous active generation on every failure stage.
+- Why not another solution: a broad end-to-end cloud test would require live TONIES credentials and would be nondeterministic; the focused contract complements the existing native-cache filesystem tests without duplicating them.
 
 ### `src/mqtt_server.c`
 
-- What changed: `fresh-tonies` publishing now builds one JSON array of up to 50 deduplicated rUIDs, targets only active box connections whose certificate mapped to the same overlay and whose subscription matches the box command topic, checks write success, coalesces repeated invalidations in a short debounce window and keeps the publish pending while the affected rUID is the active TB2 playback rUID.
-- Why: the command is box-specific, pro-active TAP/content invalidations often arrive in bursts, and the changed flag should only be cleared after the later content request proves the box actually revalidated the stale item. Holding active playback avoids asking the box to invalidate the item it is currently using.
-- Why not another solution: individual per-UID publishes increase traffic and make partial delivery ambiguous; generic topic broadcast would also send box-only invalidations to external MQTT tools. Clearing on publish alone would still be too early because the box may not request the updated content immediately.
+- What changed: `fresh-tonies` publishing sends one `{"tonie":"<RUID>"}` object per deduplicated cache UID, sequentially with MQTT QoS 1. It waits for `PUBACK`, retries twice at five-second intervals with the same packet ID and `DUP=1`, and closes the connection after the third attempt times out. Playback remains observed as box status but no longer clears source-change state.
+- Why: the TB2 protocol expects one Tonie per message and reliable ordered delivery. MQTT acknowledgement and content activation are separate: `PUBACK` advances the connection queue, while a source-change entry remains pending for the successful content lifecycle.
+- Why not another solution: a QoS-0 array cannot prove partial delivery, and clearing on publish or `PUBACK` is too early because the box may not request the updated content. Generic topic broadcast would also send box-only invalidations to external MQTT tools.
 
 ### `src/settings.c`
 
@@ -120,8 +140,8 @@ The fallback path remains deliberately conservative. MP3 and non-TAF entries sti
 
 ### `src/tonie_audio_playlist.c`
 
-- What changed: implements TAP load validation, shuffle/runtime indices, TAF-only remux, live-header prediction, replace-safe publish and generator task lifecycle. Normal and shuffle-all playlists are limited by the runtime TAF source/chapter limit; shuffle-one playlists may load a larger candidate catalog because only one entry is selected for generation. The FFmpeg fallback passes the TAP `audio_id` into generated finals when the playlist has a stable non-zero version.
-- Why: TAF-only playlists need a fast path that can generate cache-safe bytes and metadata without FFmpeg re-encoding.
+- What changed: implements TAP load validation, shuffle/runtime indices, TAF-only remux, live-header prediction, replace-safe publish, generator task lifecycle and synchronous final-snapshot materialization. The Ogg packet reader can also start at byte zero for independent native-library Opus chapters, while using the same writer and header calculation. The snapshot API selects runtime indices once, generates a complete TAF, publishes it to the final path and returns only that final path. Normal and shuffle-all playlists are limited by the runtime TAF source/chapter limit; shuffle-one playlists may load a larger candidate catalog because only one entry is selected for generation. The FFmpeg fallback passes the TAP `audio_id` into generated finals when the playlist has a stable non-zero version.
+- Why: TAF-only playlists need a fast path that can generate cache-safe bytes and metadata without FFmpeg re-encoding. The V3 path additionally needs a complete, stable source before creating content-addressed chapters.
 - Why not another solution: raw payload concatenation does not produce a valid final stream; FFmpeg re-encoding is slower and cannot know exact first-download header values before encoding completes. Letting FFmpeg own the final `audio_id` is correct for generic conversion, but not for TAP because the `.tap` file defines the content version. Increasing the runtime source limit would exceed the current TAF chapter/source constraints, while keeping the loader limit at the runtime limit would unnecessarily block large shuffle-one catalogs.
 
 ### `src/toniefile.c`
@@ -139,9 +159,10 @@ A TAP playlist is treated as stable-cacheable only when all of these are true:
 - The final `.taf` exists.
 - The final `.taf` is valid.
 - The final `.taf` header `audio_id` matches the TAP `audio_id`.
-- No active freshness reason marks the UID as outdated.
 
 The TAP `audio_id` is the playlist version source. Changing it makes any final `.taf` with a different header `audio_id` stale.
+
+Freshness is evaluated separately from the server-side stable-cache decision. It can require a box redownload while the already generated final `.taf` remains valid and reusable on the server.
 
 `audio_id == 0`, `shuffle == 1` and `shuffle == 2` intentionally force rebuild and redownload behavior.
 
@@ -155,6 +176,106 @@ This path is the cache-safe first-download path for TAF-only playlists.
 
 If future per-entry volume handling is implemented, it cannot be applied by this remux fast path. Volume changes require audio processing and therefore must use a re-encode path, even for TAF-only playlists.
 
+## TB2 V3 snapshot and chapter cache
+
+The content-aware TB2 V3 path does not serve a growing TAP stream as a chapter source. When `getTonieInfo()` reports `CT_SOURCE_TAP_STREAM`, the V3 handler keeps the TAP target lock and synchronously creates one complete momentary final TAF:
+
+1. shuffle/runtime indices are selected once;
+2. the existing TAP generation path writes a complete temporary TAF;
+3. replace-safe publication moves that snapshot to the final TAP path;
+4. the final is reopened and validated;
+5. its chapters are remuxed into independent immutable Ogg/Opus objects.
+
+`CT_SOURCE_TAP_CACHED` already resolves to the complete final TAF and can skip the snapshot generation. In neither case is `<final>.tmp` passed to the V3 materializer or returned as a V3 source.
+
+### Generation-stable TB2 shuffle
+
+TB1 and TB2 continue to read the same `.tap` file. The TB2 V3 path selects
+the runtime indices once, passes that exact selection to the complete TAF
+snapshot, and stores the selected source indices with the immutable V3
+descriptor. The TAP editor exposes all three existing modes and advances the
+playlist `audio_id` only when title, target, shuffle, order, or files actually
+change. Editing keeps the original `.tap` filename.
+
+For `shuffle=0`, a prepared descriptor is reused until the TAP revision
+changes. For `shuffle=1` and `shuffle=2`, the MQTT playback observer marks a
+new selection pending only after a stop or a change to another rUID. Pausing,
+resuming, chapter changes, content-meta retries, chapter retries, and Range
+requests keep the prepared generation. There is deliberately no timeout-based
+reshuffle.
+
+The state is stored atomically below
+`v3-local/tap-state/<overlay>/<RUID>.json`. It records the TAP revision and
+shuffle mode, selection generation, desired/prepared version, the version
+actually reported by MQTT playback, the immediately previous version, and the
+pending flag. Dynamic generations choose a version above the TAP, known box,
+and retained generation versions. A failed preparation keeps the previous
+generation usable and leaves regeneration pending.
+
+TAP chapters use a position-independent Ogg serial only in this TB2 path.
+Therefore the same remuxed audio produces the same immutable object hash even
+if its shuffle position changes. Direct TAF content retains its existing serial
+scheme. The descriptor also freezes the resolved playlist title, chapter
+titles, original TAP indices, and real chapter durations so a later TAP edit
+cannot alter metadata for a generation that is still playing.
+
+Files involved in this extension:
+
+- `include/tonie_audio_playlist.h`, `src/tonie_audio_playlist.c`: selected-index
+  snapshot entry point plus the unchanged TB1 wrapper.
+- `include/v3_local_content.h`, `src/v3_local_content.c`: additive TAP metadata,
+  fixed TAP serial, immutable descriptors, and atomic per-rUID TAP state.
+- `include/handler_cloud.h`, `src/handler_cloud.c`: version choice, preparation,
+  freshness, playback confirmation, and three-generation chapter routing.
+- `src/mqtt_server.c`: forwards parsed playback transitions to the TAP observer;
+  MQTT transport and commands remain unchanged.
+- `teddycloud_web` TAP editor: exposes shuffle, bumps semantic revisions, and
+  overwrites the edited file.
+- `tests/test_tb2_v3_local_content_contract.py`: protects the focused contracts.
+
+### TB2 remote-control playlist metadata
+
+`/api/getTagInfo` accepts an optional `contentVersion`. For a TAP source the
+API loads exactly that immutable descriptor; without the parameter it selects
+the version last confirmed by MQTT playback and otherwise the prepared
+version. The returned `playlist` object is additive: direct custom TAFs report
+`kind=direct_taf`, while TAPs report `kind=tap` together with content version,
+shuffle mode, edit target, generation-frozen title, tracks, durations, and
+chapter count. A missing descriptor produces only a generic TAP fallback and
+never borrows original-Tonie track names.
+
+The TB2 card supplies the MQTT playback version whenever the RUID or version
+changes. Thus the card title, current chapter, total chapter count, drawer
+order, and durations all come from the same generation. Shuffle-one exposes
+one chapter; shuffle-all exposes the actual persisted order. TAP editing opens
+the existing editor for the original `.tap` path. Direct custom TAF metadata
+continues to use the inline playlist-title editor and its existing POST API.
+TB1 has no remote-control UI and is unaffected.
+
+Files involved in the remote-control metadata extension:
+
+- `src/handler_api.c`: adds playlist kinds, exact descriptor selection, TAP
+  fallback metadata, and the optional `contentVersion` query.
+- `teddycloud_web/src/api/apis/TeddyCloudApi.ts` and
+  `teddycloud_web/src/types/tonieTypes.ts`: expose the additive API fields and
+  versioned lookup without changing the direct-TAF save request.
+- `teddycloud_web/src/components/tonieboxes/tonieboxcard/TonieboxCard.tsx`:
+  reloads metadata when MQTT reports another content version.
+- `teddycloud_web/src/components/tonieboxes/tonieboxcard/live/`: resolves one
+  generation for card and drawer, shows the TAP shuffle mode, and separates
+  TAP navigation from direct-TAF inline editing.
+- `teddycloud_web/src/components/tonies/filebrowser/FileBrowser.tsx`: opens one
+  requested TAP in the existing editor and removes only the one-shot query
+  parameter.
+- `tests/test_content_playlist_contract.py`: protects version selection,
+  resolver priority, shuffle display, and edit routing.
+
+V3 chapter objects live below `<cachedir>/v3-local/<full-sha256>.opus`. A generation descriptor at `<cachedir>/v3-local/generations/<overlay>/<RUID>/<effective-version>.json` binds the complete ordered chapter set to one overlay, RUID and version. The protocol name uses the first 20 lowercase digest characters, chapter index and uppercase RUID; the object and descriptor retain the full digest.
+
+The V3 chapter remux copies Opus packets and creates a standalone Ogg stream for each chapter. It does not decode or re-encode audio. All chapter objects are completed before the generation descriptor is published.
+
+This synchronous snapshot is specific to the V3 local-content path. It does not replace the existing progressive TAP streaming behavior used by the older content path. The canonical storage, hash-name, legacy-gate, range and `.part` semantics are documented in [TB2_V3_CONTENT_CACHE.md](TB2_V3_CONTENT_CACHE.md).
+
 ## Freshness and versioning
 
 Freshness checks use the TAP `audio_id` as the effective server version for stable playlists. A box cache is current only when its cached version matches the TAP `audio_id` and the server-side final `.taf` is current.
@@ -163,7 +284,7 @@ Missing, invalid or stale final `.taf` files force the playlist back into the st
 
 ## FFmpeg fallback
 
-MP3 and non-TAF playlist entries intentionally fall back to FFmpeg generation. This remains functional, but it is not a cache-safe first-download path:
+MP3 and non-TAF playlist entries intentionally fall back to FFmpeg generation in the older progressive content path. This remains functional, but it is not a cache-safe first-download path:
 
 - exact final SHA1 is not known before encoding completes,
 - exact final track pages are not known before encoding completes,
@@ -175,6 +296,8 @@ For stable TAP playlists with `audio_id != 0`, this fallback writes the TAP `aud
 For TAP playlists with `audio_id == 0`, and for generic non-TAP FFmpeg streaming/conversion, the existing time-based FFmpeg `audio_id` behavior is preserved.
 
 This is a deliberate fallback until a reliable prediction or pre-generation strategy exists for non-TAF sources.
+
+TB2 V3 does not expose the progressive result while it is growing. It synchronously completes the FFmpeg-generated TAF first and only then prepares and advertises immutable V3 chapter objects.
 
 ## Duplicate TAP target paths
 
@@ -192,7 +315,7 @@ This belongs in tooling or UI validation: warn when multiple `.tap` files point 
 
 Dadong is the box confirmation sound after a successful content download. It is expected for stable TAF-only TAP downloads once freshness and cache state are correct.
 
-The backend streams the initial response from `.taf.tmp` and publishes the final `.taf` only after generation and HTTP delivery have ended.
+The older progressive content path streams the initial response from `.taf.tmp` and publishes the final `.taf` only after generation and HTTP delivery have ended. The TB2 V3 path instead materializes and publishes a complete snapshot before it advertises immutable chapter objects.
 
 If a stable TAF-only playlist finishes green but does not play Dadong, first check whether freshness still marks the UID as outdated or whether the final `.taf` header `audio_id` differs from the TAP `audio_id`.
 

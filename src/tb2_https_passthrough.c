@@ -129,7 +129,14 @@ static settings_t *tb2_settings_from_certificate(HttpConnection *connection)
         TRACE_DEBUG("TB2 HTTPS passthrough skipped: unsupported client certificate subject format\r\n");
         return NULL;
     }
-    osStringToLower(common_name);
+    char canonical_common_name[13];
+    if (!settings_canonicalize_box_id(common_name, canonical_common_name,
+                                      sizeof(canonical_common_name)))
+    {
+        TRACE_DEBUG("TB2 HTTPS passthrough skipped: invalid client certificate box ID\r\n");
+        return NULL;
+    }
+    osStrcpy(common_name, canonical_common_name);
 
     uint8_t overlay_id = get_overlay_id(common_name);
     bool_t tb2_issuer = osStrstr(issuer, "Toniebox Root CA") != NULL;
