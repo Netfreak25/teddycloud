@@ -31,6 +31,7 @@ test-client/
 fake-server-tb2/*
 /offline-packages/
 /privacy-scan/
+/ble-settings-poc/
 /AGENTS.md
 /.codex/
 /.claude/
