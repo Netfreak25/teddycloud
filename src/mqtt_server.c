@@ -3558,19 +3558,20 @@ void mqtt_server_task()
                 {
                     TRACE_ERROR("MQTT TLS connection rejected: failed to allocate TLS context\r\n");
                     mqtt_connection_close(conn, "TLS context allocation failed");
-                    return;
                 }
-
-                error_t tlsError = mqtt_server_tls_init(conn->tlsContext);
-                if (tlsError == NO_ERROR)
+                else
                 {
-                    tlsError = tlsSetSocket(conn->tlsContext, conn->socket);
-                }
-                if (tlsError != NO_ERROR)
-                {
-                    TRACE_ERROR("MQTT TLS connection rejected before MQTT parsing: %s (%d)\r\n",
-                                error2text(tlsError), (int)tlsError);
-                    mqtt_connection_close(conn, "TLS setup failed");
+                    error_t tlsError = mqtt_server_tls_init(conn->tlsContext);
+                    if (tlsError == NO_ERROR)
+                    {
+                        tlsError = tlsSetSocket(conn->tlsContext, conn->socket);
+                    }
+                    if (tlsError != NO_ERROR)
+                    {
+                        TRACE_ERROR("MQTT TLS connection rejected before MQTT parsing: %s (%d)\r\n",
+                                    error2text(tlsError), (int)tlsError);
+                        mqtt_connection_close(conn, "TLS setup failed");
+                    }
                 }
             }
             else
