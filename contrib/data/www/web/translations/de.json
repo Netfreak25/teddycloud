@@ -1661,8 +1661,8 @@
                 "description": "Schlafenszeit Licht-Ring Helligkeit in Prozent."
             },
             "toniebox2__scrubbing_enabled": {
-                "label": "Bereinigung",
-                "description": "Scrubbing aktivieren."
+                "label": "Vor-/Zurückspulen aktivieren",
+                "description": "Vor- und Zurückspulen durch Neigen der Toniebox aktivieren."
             },
             "toniebox2__slap_enabled": {
                 "label": "Schlagen zum Überspringen",
