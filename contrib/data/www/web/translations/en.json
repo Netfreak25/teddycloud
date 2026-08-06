@@ -1666,6 +1666,14 @@
                 "label": "Field 6",
                 "description": "Unknown Toniebox setting, default 1"
             },
+            "toniebox2__cacheContentV3": {
+                "label": "Cache TB2 content",
+                "description": "Cache complete original TONIES V3 manifests and Ogg/Opus chapters locally."
+            },
+            "toniebox2__cacheToLibraryV3": {
+                "label": "Cache TB2 content in library",
+                "description": "Import complete TB2 original content into the library as a deduplicated native Ogg/Opus collection."
+            },
             "toniebox2__baby_mode": {
                 "label": "Baby mode",
                 "description": "Enable baby mode (1 year)."

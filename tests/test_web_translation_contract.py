@@ -16,7 +16,7 @@ PARTIAL_LANGUAGES = ("tlh",)
 ALL_LANGUAGES = FULL_LANGUAGES + PARTIAL_LANGUAGES
 
 PUBLIC_OPTION_PATTERN = re.compile(
-    r"\bOPTION_(?:BOOL|STRING|UNSIGNED|SIGNED|FLOAT|READONLY_BOOL)"
+    r"\bOPTION_(?:BOOL|STRING|UNSIGNED|SIGNED|FLOAT|READONLY_BOOL|READONLY_STRING)"
     r'\(\s*(?:"([^"]+)"|([A-Z][A-Z0-9_]+))'
 )
 DEFINE_PATTERN = re.compile(
@@ -214,9 +214,10 @@ class WebTranslationContractTests(unittest.TestCase):
                 language,
             )
 
-    def test_bundle_keeps_the_dev_banner_and_references_an_existing_asset(self) -> None:
+    def test_bundle_excludes_the_dev_banner_and_references_an_existing_asset(self) -> None:
         index = (BUNDLE_DIR / "index.html").read_text(encoding="utf-8")
-        self.assertIn('id="tc-dev-environment-banner"', index)
+        self.assertNotIn('id="tc-dev-environment-banner"', index)
+        self.assertNotIn("tc-dev-banner-height", index)
         asset_match = re.search(r'src="/web/(assets/index-[^"]+\.js)"', index)
         self.assertIsNotNone(asset_match)
         self.assertTrue((BUNDLE_DIR / asset_match.group(1)).is_file())

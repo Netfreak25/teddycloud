@@ -1666,6 +1666,14 @@
                 "label": "Campo 6",
                 "description": "Configuración desconocida de Toniebox, valor predeterminado 1"
             },
+            "toniebox2__cacheContentV3": {
+                "label": "Guardar contenido TB2 en caché",
+                "description": "Guarda localmente manifiestos TONIES V3 completos y sus capítulos Ogg/Opus."
+            },
+            "toniebox2__cacheToLibraryV3": {
+                "label": "Guardar contenido TB2 en la biblioteca",
+                "description": "Importa contenido original TB2 completo como colección nativa Ogg/Opus deduplicada."
+            },
             "toniebox2__baby_mode": {
                 "label": "Modo bebé",
                 "description": "Habilitar modo bebé (1 año)."

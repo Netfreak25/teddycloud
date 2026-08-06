@@ -1666,6 +1666,14 @@
                 "label": "Feld 6",
                 "description": "Unbekannte Toniebox-Einstellung, Standard 1"
             },
+            "toniebox2__cacheContentV3": {
+                "label": "TB2-Inhalte zwischenspeichern",
+                "description": "Vollständige originale TONIES-V3-Manifeste und Ogg/Opus-Kapitel lokal zwischenspeichern."
+            },
+            "toniebox2__cacheToLibraryV3": {
+                "label": "TB2-Inhalte in Bibliothek cachen",
+                "description": "Vollständige TB2-Originalinhalte dedupliziert als native Ogg/Opus-Collection in die Bibliothek übernehmen."
+            },
             "toniebox2__baby_mode": {
                 "label": "Babymodus",
                 "description": "Baby-Modus aktivieren (1 Jahr)."

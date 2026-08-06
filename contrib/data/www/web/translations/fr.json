@@ -1666,6 +1666,14 @@
                 "label": "Champ 6",
                 "description": "Réglage Toniebox inconnu, défaut 1"
             },
+            "toniebox2__cacheContentV3": {
+                "label": "Mettre le contenu TB2 en cache",
+                "description": "Met en cache localement les manifestes TONIES V3 complets et leurs chapitres Ogg/Opus."
+            },
+            "toniebox2__cacheToLibraryV3": {
+                "label": "Mettre le contenu TB2 en bibliothèque",
+                "description": "Importe le contenu original TB2 complet comme collection native Ogg/Opus dédupliquée."
+            },
             "toniebox2__baby_mode": {
                 "label": "Mode bébé",
                 "description": "Activer le mode bébé (1 an)."
