@@ -168,6 +168,25 @@ V3 chapter objects live below `<cachedir>/v3-local/<full-sha256>.opus`. A genera
 
 The V3 chapter remux copies Opus packets and creates a standalone Ogg stream for each chapter. It does not decode or re-encode audio. All chapter objects are completed before the generation descriptor is published.
 
+For TB2, TAP selection is persisted per overlay and RUID below
+`<cachedir>/v3-local/tap-state`. The descriptor records the selected source
+index, display title and duration for every chapter. Repeated content-meta
+requests reuse the prepared generation; they never roll a second shuffle order
+for the same playback cycle.
+
+`shuffle == 0` remains stable until the TAP audio ID or definition changes.
+`shuffle == 1` selects one complete shuffled order per playback cycle, and
+`shuffle == 2` selects one source entry. A new dynamic selection becomes pending
+only after MQTT playback reports the Tonie stopped or changed to another RUID.
+The next content-meta request then creates a new version while the playing and
+immediately previous descriptors remain routable for in-flight chapter reads.
+
+The TAP observer owns only this selection state. It does not clear the general
+freshness cache, source-change markers or forced versions. The first generation
+after a source assignment therefore keeps the effective version allocated by
+the normal V3 freshness path and is confirmed by the existing exact playback
+version check.
+
 This synchronous snapshot is specific to the V3 local-content path. It does not replace the existing progressive TAP streaming behavior used by the older content path. The canonical storage, hash-name, legacy-gate, range and `.part` semantics are documented in [TB2_V3_CONTENT_CACHE.md](TB2_V3_CONTENT_CACHE.md).
 
 ## Freshness and versioning

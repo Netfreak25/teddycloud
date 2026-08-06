@@ -3017,10 +3017,22 @@ static error_t handle_mqtt_publish_playback_state(MqttClientConnection *conn, Mq
         return NO_ERROR;
     }
 
+    char previous_ruid[17] = {0};
+    const char *previous_ruid_ptr = NULL;
+    if (conn->client_ctx.state != NULL &&
+        conn->client_ctx.state->playback_state.ruid_valid)
+    {
+        osStrncpy(previous_ruid,
+                  conn->client_ctx.state->playback_state.ruid,
+                  sizeof(previous_ruid) - 1);
+        previous_ruid_ptr = previous_ruid;
+    }
+
     cJSON *tonie = cJSON_GetObjectItemCaseSensitive(json, "tonie");
     if (cJSON_IsNull(tonie))
     {
         tbs_toniebox2_playback_state(&conn->client_ctx, NULL, false, 0, false, 0, false, 0, NULL);
+        v3_tap_playback_observe(settings, previous_ruid_ptr, NULL, FALSE, 0);
         TRACE_INFO("MQTT playback-state for %s overlay=%u: stopped\r\n",
                    settings->commonName,
                    (unsigned)settings->internal.overlayNumber);
@@ -3082,6 +3094,11 @@ static error_t handle_mqtt_publish_playback_state(MqttClientConnection *conn, Mq
         freshness_confirm_v3_content_version(settings, tonie->valuestring,
                                              content_version);
     }
+    v3_tap_playback_observe(settings,
+                            previous_ruid_ptr,
+                            tonie->valuestring,
+                            content_version_valid && content_version <= UINT32_MAX,
+                            (uint32_t)content_version);
 
     TRACE_INFO("MQTT playback-state for %s overlay=%u: tonie=%s contentVersion=%s chapter=%s chapterUntilMs=%s chapterDuration=%s\r\n",
                settings->commonName,

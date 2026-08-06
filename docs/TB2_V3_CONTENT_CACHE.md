@@ -227,7 +227,7 @@ An explicitly assigned local source is authoritative. If its complete generation
 - `CT_SOURCE_TAP_CACHED`: the complete final TAF is current and can be materialized directly.
 - `CT_SOURCE_TAP_STREAM`: the request-local `contentPath` points to the growing `<final>.tmp` file.
 
-The V3 path never reads the growing `.tmp` as a local generation. For `CT_SOURCE_TAP_STREAM`, `handler_cloud.c` holds the existing TAP target lock and calls `tap_materialize_final_snapshot()`:
+The V3 path never reads the growing `.tmp` as a local generation. For `CT_SOURCE_TAP_STREAM`, `handler_cloud.c` holds the existing TAP target lock and materializes one already selected runtime order:
 
 1. runtime indices, including shuffle selection, are chosen exactly once;
 2. the existing TAP generator creates one complete TAF snapshot;
@@ -235,6 +235,13 @@ The V3 path never reads the growing `.tmp` as a local generation. For `CT_SOURCE
 4. only the complete final TAF is reopened and passed to the V3 chapter materializer.
 
 The returned source path is always the final TAP path, never `.tmp`. The target lock remains owned by `handler_cloud.c` for generation, publication, reopening and V3 materialization, preventing a parallel request from replacing the snapshot while it is being read.
+
+The selected order and its chapter metadata are stored in the local generation
+descriptor. A small state file below `v3-local/tap-state/<overlay>/<RUID>.json`
+points to the prepared, playing and immediately previous versions. Dynamic TAP
+playlists only mark a new selection pending when MQTT reports the end of the
+current playback cycle. This state never confirms or removes the normal
+source-change freshness marker.
 
 This synchronous V3 snapshot does not change the existing progressive TAP behavior used outside the V3 local-content path.
 

@@ -1375,7 +1375,10 @@ static error_t tap_generate_taf(tonie_audio_playlist_t *tap, size_t *runtime_ind
     return error;
 }
 
-error_t tap_materialize_final_snapshot(tonie_audio_playlist_t *tap, const char **final_taf_path)
+error_t tap_materialize_final_snapshot_selected(tonie_audio_playlist_t *tap,
+                                                size_t *runtime_indices,
+                                                size_t runtime_files_count,
+                                                const char **final_taf_path)
 {
     if (final_taf_path == NULL)
     {
@@ -1394,9 +1397,9 @@ error_t tap_materialize_final_snapshot(tonie_audio_playlist_t *tap, const char *
         return ERROR_OUT_OF_MEMORY;
     }
 
-    size_t *runtime_indices = NULL;
-    size_t runtime_files_count = 0;
-    error_t error = tap_prepare_runtime_indices(tap, &runtime_indices, &runtime_files_count);
+    error_t error = runtime_indices != NULL && runtime_files_count > 0
+                        ? NO_ERROR
+                        : ERROR_INVALID_PARAMETER;
     if (error == NO_ERROR)
     {
         size_t current_source = 0;
@@ -1428,13 +1431,35 @@ error_t tap_materialize_final_snapshot(tonie_audio_playlist_t *tap, const char *
         }
     }
 
-    tap_free_runtime_indices(runtime_indices);
     osFreeMem(tmp_taf);
 
     if (error == NO_ERROR)
     {
         *final_taf_path = tap->_filepath_resolved;
     }
+    return error;
+}
+
+error_t tap_materialize_final_snapshot(tonie_audio_playlist_t *tap, const char **final_taf_path)
+{
+    if (final_taf_path == NULL)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+    *final_taf_path = NULL;
+
+    size_t *runtime_indices = NULL;
+    size_t runtime_files_count = 0;
+    error_t error = tap_prepare_runtime_indices(tap, &runtime_indices,
+                                                &runtime_files_count);
+    if (error == NO_ERROR)
+    {
+        error = tap_materialize_final_snapshot_selected(tap,
+                                                        runtime_indices,
+                                                        runtime_files_count,
+                                                        final_taf_path);
+    }
+    tap_free_runtime_indices(runtime_indices);
     return error;
 }
 

@@ -39,8 +39,8 @@ class Tb2V3LocalContentContractTests(unittest.TestCase):
     def test_manifest_name_is_derived_from_exact_chapter_bytes(self):
         prepare = self.function(
             self.local_source,
+            "static error_t v3_local_content_prepare_internal(",
             "error_t v3_local_content_prepare(",
-            "void v3_local_content_generation_free(",
         )
         self.assertIn("sha256Update(&writer->sha256", self.local_source)
         self.assertIn(
@@ -58,8 +58,8 @@ class Tb2V3LocalContentContractTests(unittest.TestCase):
     def test_object_path_uses_the_complete_sha256(self):
         prepare = self.function(
             self.local_source,
+            "static error_t v3_local_content_prepare_internal(",
             "error_t v3_local_content_prepare(",
-            "void v3_local_content_generation_free(",
         )
         self.assertIn('#define V3_LOCAL_CONTENT_CACHE_DIR "v3-local"', self.local_source)
         object_path = re.search(
@@ -73,8 +73,8 @@ class Tb2V3LocalContentContractTests(unittest.TestCase):
     def test_generation_descriptor_is_exposed_only_after_atomic_publish(self):
         prepare = self.function(
             self.local_source,
+            "static error_t v3_local_content_prepare_internal(",
             "error_t v3_local_content_prepare(",
-            "void v3_local_content_generation_free(",
         )
         remux = prepare.index("v3_local_remux_chapter(")
         publish = prepare.index("v3_local_publish_prepared(")
@@ -85,7 +85,7 @@ class Tb2V3LocalContentContractTests(unittest.TestCase):
             "fsRenameFile(prepared[i].temp_path, prepared[i].final_path)",
             self.local_source,
         )
-        self.assertNotIn("fsMoveFile(", self.local_source)
+        self.assertNotIn("fsMoveFile(", prepare)
         self.assertIn("v3_local_prepared_free(prepared, chapter_count, TRUE)", prepare)
         self.assertRegex(
             prepare,
@@ -113,7 +113,7 @@ class Tb2V3LocalContentContractTests(unittest.TestCase):
         validation = self.function(
             self.local_source,
             "static error_t v3_local_validate_taf(",
-            "error_t v3_local_content_prepare(",
+            "static error_t v3_local_content_prepare_internal(",
         )
         self.assertIn("start_page < previous_start", validation)
         self.assertIn(
@@ -293,6 +293,85 @@ class Tb2V3LocalContentContractTests(unittest.TestCase):
         )
         self.assertIn("contentVersion == 0", meta)
         self.assertIn("if (effectiveVersion == 0)", chapter)
+
+    def test_tap_generation_uses_one_persisted_selection(self):
+        playlist = (ROOT / "src/tonie_audio_playlist.c").read_text(
+            encoding="utf-8"
+        )
+        selected = self.function(
+            playlist,
+            "error_t tap_materialize_final_snapshot_selected(",
+            "error_t tap_materialize_final_snapshot(",
+        )
+        self.assertIn("runtime_indices", selected)
+        self.assertNotIn("tap_prepare_runtime_indices", selected)
+        self.assertIn("V3_LOCAL_CONTENT_TAP_OGG_SERIAL", self.local_source)
+        self.assertIn("v3_local_content_prepare_tap", self.cloud)
+        self.assertIn('"sourceKind", "tap"', self.local_source)
+        for field in (
+            '"sourcePath"',
+            '"tapAudioId"',
+            '"shuffleMode"',
+            '"selectionGeneration"',
+            '"sourceIndex"',
+            '"duration"',
+        ):
+            self.assertIn(field, self.local_source)
+
+    def test_tap_state_is_bounded_and_previous_generation_is_routable(self):
+        for field in (
+            "prepared_version",
+            "playing_version",
+            "previous_version",
+            "selection_generation",
+            "regeneration_pending",
+        ):
+            self.assertIn(field, self.local_header)
+        self.assertNotIn("desired_version", self.local_header)
+
+        chapter = self.function(
+            self.cloud,
+            "error_t handleCloudChapterV3(",
+            "error_t handleCloudOtaV3(",
+        )
+        self.assertIn("tap_state.prepared_version", chapter)
+        self.assertIn("tap_state.playing_version", chapter)
+        self.assertIn("tap_state.previous_version", chapter)
+        self.assertIn("generation.source_kind != V3_LOCAL_CONTENT_SOURCE_TAP", chapter)
+
+    def test_tap_observer_cannot_clear_general_freshness(self):
+        observer = self.function(
+            self.cloud,
+            "void v3_tap_playback_observe(",
+            "static error_t sendLocalContentMetaV3(",
+        )
+        self.assertIn("state.regeneration_pending = TRUE", observer)
+        self.assertIn("mqtt_server_publish_fresh_tonie_for_overlay", observer)
+        self.assertNotIn("freshness_cache_remove_uid", observer)
+        self.assertNotIn("freshness_cache_add_uid", observer)
+        self.assertNotIn("freshness_forced_version", observer)
+
+        playback = self.function(
+            self.mqtt,
+            "static error_t handle_mqtt_publish_playback_state(",
+            "static error_t handle_mqtt_publish_generic(",
+        )
+        confirmation = playback.index("freshness_confirm_v3_content_version")
+        observation = playback.index("v3_tap_playback_observe", confirmation)
+        self.assertLess(confirmation, observation)
+
+    def test_first_tap_generation_keeps_stable_effective_version(self):
+        prepare = self.function(
+            self.cloud,
+            "static error_t v3_tap_load_or_prepare_generation(",
+            "void v3_tap_playback_observe(",
+        )
+        self.assertIn("uint32_t desired_version = static_version", prepare)
+        self.assertIn("source_change_pending", prepare)
+        next_version = prepare.index("v3_tap_next_version")
+        source_guard = prepare.index("!source_change_pending")
+        self.assertLess(source_guard, next_version)
+        self.assertNotIn("freshness_cache_add_uid", prepare)
 
 
 if __name__ == "__main__":

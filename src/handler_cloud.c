@@ -3602,6 +3602,199 @@ static error_t v3_native_collection_generation_load(
     return error;
 }
 
+static bool_t v3_source_is_tap(const tonie_info_t *tonieInfo)
+{
+    return tonieInfo != NULL && tonieInfo->json._tap._valid &&
+           (tonieInfo->json._source_type == CT_SOURCE_TAP_STREAM ||
+            tonieInfo->json._source_type == CT_SOURCE_TAP_CACHED);
+}
+
+static char *v3_tap_display_name(const char *preferred, const char *path,
+                                 const char *fallback)
+{
+    const char *begin = preferred != NULL ? preferred : "";
+    while (*begin != '\0' && isspace((unsigned char)*begin))
+    {
+        begin++;
+    }
+    const char *end = begin + osStrlen(begin);
+    while (end > begin && isspace((unsigned char)end[-1]))
+    {
+        end--;
+    }
+
+    if (end == begin)
+    {
+        begin = path != NULL ? path : "";
+        const char *slash = strrchr(begin, '/');
+        const char *backslash = strrchr(begin, '\\');
+        if (slash != NULL || backslash != NULL)
+        {
+            const char *last = slash == NULL ? backslash
+                                             : (backslash == NULL || slash > backslash ? slash : backslash);
+            begin = last + 1;
+        }
+        end = begin + osStrlen(begin);
+        const char *dot = strrchr(begin, '.');
+        if (dot != NULL && dot > begin)
+        {
+            end = dot;
+        }
+    }
+    if (end == begin)
+    {
+        begin = fallback;
+        end = begin + osStrlen(begin);
+    }
+
+    size_t length = (size_t)(end - begin);
+    if (length > V3_LOCAL_CONTENT_TITLE_MAX)
+    {
+        length = V3_LOCAL_CONTENT_TITLE_MAX;
+    }
+    char *value = osAllocMem(length + 1);
+    if (value != NULL)
+    {
+        osMemcpy(value, begin, length);
+        value[length] = '\0';
+    }
+    return value;
+}
+
+static bool_t v3_tap_attach_metadata(v3_local_content_generation_t *generation,
+                                     const tonie_info_t *tonieInfo,
+                                     const tonie_info_t *snapshotInfo,
+                                     const size_t *runtime_indices,
+                                     size_t runtime_files_count,
+                                     uint32_t selection_generation)
+{
+    if (generation == NULL || tonieInfo == NULL || snapshotInfo == NULL ||
+        runtime_indices == NULL || !v3_source_is_tap(tonieInfo) ||
+        generation->chapter_count != runtime_files_count)
+    {
+        return FALSE;
+    }
+
+    const tonie_audio_playlist_t *tap = &tonieInfo->json._tap;
+    generation->source_kind = V3_LOCAL_CONTENT_SOURCE_TAP;
+    generation->source_path = strdup(tonieInfo->json.source != NULL
+                                         ? tonieInfo->json.source
+                                         : "");
+    generation->title = v3_tap_display_name(tap->name,
+                                            tonieInfo->json.source,
+                                            "Playlist");
+    generation->tap_audio_id = (uint32_t)tap->audio_id;
+    generation->shuffle_mode = tap->shuffle;
+    generation->selection_generation = selection_generation;
+    if (generation->source_path == NULL || generation->title == NULL)
+    {
+        return FALSE;
+    }
+
+    const track_positions_t *positions = &snapshotInfo->additional.track_positions;
+    bool_t durations_available = positions->pos != NULL &&
+                                 positions->count == generation->chapter_count &&
+                                 positions->total_seconds > 0;
+    uint32_t chapter_start = 0;
+    for (size_t i = 0; i < generation->chapter_count; i++)
+    {
+        size_t source_index = runtime_indices[i];
+        if (source_index >= tap->filesCount)
+        {
+            return FALSE;
+        }
+        char fallback[32];
+        osSnprintf(fallback, sizeof(fallback), "Chapter %" PRIuSIZE, i + 1);
+        generation->chapters[i].source_index = source_index;
+        generation->chapters[i].title = v3_tap_display_name(
+            tap->files[source_index].name,
+            tap->files[source_index].filepath,
+            fallback);
+        if (generation->chapters[i].title == NULL)
+        {
+            return FALSE;
+        }
+        if (durations_available)
+        {
+            uint32_t chapter_end = i + 1 < generation->chapter_count
+                                       ? positions->pos[i + 1]
+                                       : positions->total_seconds;
+            if (chapter_end < chapter_start)
+            {
+                return FALSE;
+            }
+            generation->chapters[i].duration_seconds = chapter_end - chapter_start;
+            chapter_start = chapter_end;
+        }
+    }
+    return TRUE;
+}
+
+static error_t v3_tap_prepare_generation(settings_t *settings,
+                                         tonie_info_t *tonieInfo,
+                                         const char *ruid,
+                                         size_t *runtime_indices,
+                                         size_t runtime_files_count,
+                                         uint32_t selection_generation,
+                                         v3_local_content_generation_t *generation)
+{
+    tonie_audio_playlist_t *tap = &tonieInfo->json._tap;
+    if (!v3_source_is_tap(tonieInfo) || tap->_filepath_resolved == NULL)
+    {
+        return ERROR_INVALID_FILE;
+    }
+
+    error_t error = tap_target_lock(tap->_filepath_resolved);
+    if (error != NO_ERROR)
+    {
+        return error;
+    }
+
+    const char *final_taf_path = tap->_filepath_resolved;
+    if (tonieInfo->json._source_type != CT_SOURCE_TAP_CACHED ||
+        !tap_final_cache_is_current(tap))
+    {
+        error = tap_materialize_final_snapshot_selected(tap,
+                                                        runtime_indices,
+                                                        runtime_files_count,
+                                                        &final_taf_path);
+    }
+
+    tonie_info_t *snapshotInfo = NULL;
+    if (error == NO_ERROR)
+    {
+        snapshotInfo = getTonieInfoV2(final_taf_path, false,
+                                      settings->core.tap_taf_validation,
+                                      settings);
+        if (snapshotInfo == NULL || !snapshotInfo->exists || !snapshotInfo->valid ||
+            snapshotInfo->tafHeader == NULL)
+        {
+            error = ERROR_INVALID_FILE;
+        }
+    }
+    if (error == NO_ERROR)
+    {
+        error = v3_local_content_prepare_tap(final_taf_path,
+                                             snapshotInfo->tafHeader,
+                                             settings->internal.cachedirfull,
+                                             ruid,
+                                             generation);
+    }
+    if (error == NO_ERROR &&
+        !v3_tap_attach_metadata(generation, tonieInfo, snapshotInfo,
+                                runtime_indices, runtime_files_count,
+                                selection_generation))
+    {
+        error = ERROR_INVALID_FILE;
+    }
+    if (snapshotInfo != NULL)
+    {
+        freeTonieInfo(snapshotInfo);
+    }
+    tap_target_unlock(tap->_filepath_resolved);
+    return error;
+}
+
 static error_t v3_local_prepare_generation_from_source(settings_t *settings,
                                                        tonie_info_t *tonieInfo,
                                                        const char *ruid,
@@ -3716,6 +3909,276 @@ static error_t v3_local_load_or_prepare_generation(settings_t *settings,
                                                  generation);
     }
     return error;
+}
+
+static uint32_t v3_tap_next_version(const v3_local_tap_state_t *state,
+                                    uint32_t tap_audio_id,
+                                    uint32_t static_version,
+                                    bool_t box_version_known,
+                                    uint32_t box_version)
+{
+    uint32_t maximum = tap_audio_id > static_version ? tap_audio_id : static_version;
+    if (state != NULL && state->valid)
+    {
+        if (state->prepared_version > maximum) maximum = state->prepared_version;
+        if (state->playing_version > maximum) maximum = state->playing_version;
+        if (state->previous_version > maximum) maximum = state->previous_version;
+    }
+    if (box_version_known && box_version > maximum)
+    {
+        maximum = box_version;
+    }
+    if (maximum < UINT32_MAX)
+    {
+        return maximum + 1U;
+    }
+
+    uint32_t candidate = 1;
+    while (candidate == tap_audio_id || candidate == static_version ||
+           (box_version_known && candidate == box_version) ||
+           (state != NULL && state->valid &&
+            (candidate == state->prepared_version ||
+             candidate == state->playing_version ||
+             candidate == state->previous_version)))
+    {
+        candidate++;
+    }
+    return candidate;
+}
+
+static bool_t v3_tap_generation_matches(const v3_local_content_generation_t *generation,
+                                        const tonie_info_t *tonieInfo,
+                                        const v3_local_tap_state_t *state)
+{
+    const char *source = tonieInfo != NULL && tonieInfo->json.source != NULL
+                             ? tonieInfo->json.source
+                             : "";
+    return generation != NULL && state != NULL && state->valid &&
+           generation->source_kind == V3_LOCAL_CONTENT_SOURCE_TAP &&
+           generation->tap_audio_id == state->tap_audio_id &&
+           generation->shuffle_mode == state->shuffle_mode &&
+           generation->selection_generation == state->selection_generation &&
+           generation->source_path != NULL &&
+           osStrcmp(generation->source_path, source) == 0;
+}
+
+static error_t v3_tap_load_or_prepare_generation(settings_t *settings,
+                                                 tonie_info_t *tonieInfo,
+                                                 const char *ruid,
+                                                 uint32_t static_version,
+                                                 v3_local_content_generation_t *generation,
+                                                 uint32_t *effective_version)
+{
+    if (settings == NULL || !v3_source_is_tap(tonieInfo) ||
+        generation == NULL || effective_version == NULL || static_version == 0)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    tonie_audio_playlist_t *tap = &tonieInfo->json._tap;
+    v3_local_tap_state_t state;
+    bool_t state_valid = v3_local_tap_state_load(
+                             settings->internal.cachedirfull,
+                             settings->internal.overlayNumber,
+                             ruid, &state) == NO_ERROR && state.valid;
+    bool_t revision_changed = !state_valid ||
+                              state.tap_audio_id != (uint32_t)tap->audio_id ||
+                              state.shuffle_mode != tap->shuffle;
+    bool_t source_change_pending = freshness_source_changed_contains_ruid(settings, ruid);
+    if (state_valid && !revision_changed && !state.regeneration_pending &&
+        (!source_change_pending || state.prepared_version == static_version))
+    {
+        error_t load_error = v3_local_content_generation_load(
+            settings->internal.cachedirfull,
+            settings->internal.overlayNumber,
+            ruid, state.prepared_version, generation);
+        if (load_error == NO_ERROR &&
+            v3_tap_generation_matches(generation, tonieInfo, &state))
+        {
+            *effective_version = state.prepared_version;
+            return NO_ERROR;
+        }
+        v3_local_content_generation_free(generation);
+        revision_changed = TRUE;
+    }
+    else if (state_valid && source_change_pending &&
+             state.prepared_version != static_version)
+    {
+        revision_changed = TRUE;
+    }
+
+    uint64_t uid = 0;
+    uint32_t box_version = 0;
+    bool_t uid_valid = tb2_ruid_to_uid(ruid, &uid);
+    bool_t box_version_known = uid_valid &&
+                               freshness_inventory_find_uid(settings, uid,
+                                                            &box_version);
+    uint32_t desired_version = static_version;
+    if (state_valid && !source_change_pending &&
+        (state.regeneration_pending || revision_changed) &&
+        (desired_version == state.prepared_version ||
+         desired_version == state.playing_version ||
+         desired_version == state.previous_version))
+    {
+        desired_version = v3_tap_next_version(&state,
+                                              (uint32_t)tap->audio_id,
+                                              static_version,
+                                              box_version_known,
+                                              box_version);
+    }
+    if (desired_version == 0)
+    {
+        return ERROR_FAILURE;
+    }
+
+    size_t *runtime_indices = NULL;
+    size_t runtime_files_count = 0;
+    error_t error = tap_prepare_runtime_indices(tap, &runtime_indices,
+                                                &runtime_files_count);
+    uint32_t selection_generation = state_valid
+                                        ? (state.selection_generation == UINT32_MAX
+                                               ? 1U
+                                               : state.selection_generation + 1U)
+                                        : 1U;
+    if (error == NO_ERROR)
+    {
+        error = v3_tap_prepare_generation(settings, tonieInfo, ruid,
+                                          runtime_indices,
+                                          runtime_files_count,
+                                          selection_generation,
+                                          generation);
+    }
+    tap_free_runtime_indices(runtime_indices);
+    if (error == NO_ERROR)
+    {
+        error = v3_local_content_generation_save(
+            settings->internal.cachedirfull,
+            settings->internal.overlayNumber,
+            desired_version, generation);
+    }
+    if (error != NO_ERROR)
+    {
+        v3_local_content_generation_free(generation);
+        return error;
+    }
+
+    v3_local_tap_state_t updated = state_valid ? state : (v3_local_tap_state_t){0};
+    updated.valid = TRUE;
+    updated.tap_audio_id = (uint32_t)tap->audio_id;
+    updated.shuffle_mode = tap->shuffle;
+    updated.selection_generation = selection_generation;
+    updated.previous_version = state_valid ? state.prepared_version : 0;
+    updated.prepared_version = desired_version;
+    updated.regeneration_pending = FALSE;
+    error = v3_local_tap_state_save(settings->internal.cachedirfull,
+                                    settings->internal.overlayNumber,
+                                    ruid, &updated);
+    if (error != NO_ERROR)
+    {
+        v3_local_content_generation_free(generation);
+        return error;
+    }
+
+    *effective_version = desired_version;
+    TRACE_INFO("Prepared TB2 TAP generation overlay=%u rUID=%s version=%" PRIu32
+               " selection=%" PRIu32 " shuffle=%u chapters=%" PRIuSIZE "\r\n",
+               (unsigned)settings->internal.overlayNumber, ruid,
+               desired_version, selection_generation,
+               (unsigned)tap->shuffle, generation->chapter_count);
+    return NO_ERROR;
+}
+
+void v3_tap_playback_observe(settings_t *settings,
+                             const char *previous_ruid,
+                             const char *current_ruid,
+                             bool_t content_version_valid,
+                             uint32_t content_version)
+{
+    if (settings == NULL || settings->toniebox.boxGeneration != GENERATION_TB2)
+    {
+        return;
+    }
+
+    char previous[TB2_RUID_SIZE];
+    char current[TB2_RUID_SIZE];
+    bool_t previous_valid = tb2_ruid_canonicalize(previous_ruid, previous);
+    bool_t current_valid = tb2_ruid_canonicalize(current_ruid, current);
+    bool_t cycle_ended = previous_valid &&
+                         (!current_valid || osStrcasecmp(previous, current) != 0);
+    if (cycle_ended)
+    {
+        tonie_info_t *previous_info = getTonieInfoFromRuid(previous, false, settings);
+        v3_local_tap_state_t state;
+        if (v3_source_is_tap(previous_info) &&
+            v3_local_tap_state_load(settings->internal.cachedirfull,
+                                    settings->internal.overlayNumber,
+                                    previous, &state) == NO_ERROR &&
+            state.valid && state.shuffle_mode != TAP_SHUFFLE_NONE &&
+            !state.regeneration_pending)
+        {
+            state.regeneration_pending = TRUE;
+            if (v3_local_tap_state_save(settings->internal.cachedirfull,
+                                        settings->internal.overlayNumber,
+                                        previous, &state) == NO_ERROR)
+            {
+                uint64_t uid = 0;
+                bool_t queued = tb2_ruid_to_uid(previous, &uid) &&
+                                mqtt_server_publish_fresh_tonie_for_overlay(
+                                    settings->internal.overlayNumber, uid);
+                TRACE_INFO("TB2 TAP playback cycle ended overlay=%u rUID=%s; next selection pending queued=%u\r\n",
+                           (unsigned)settings->internal.overlayNumber,
+                           previous, queued ? 1U : 0U);
+            }
+            else
+            {
+                TRACE_WARNING("Could not persist pending TB2 TAP selection overlay=%u rUID=%s\r\n",
+                              (unsigned)settings->internal.overlayNumber,
+                              previous);
+            }
+        }
+        if (previous_info != NULL)
+        {
+            freeTonieInfo(previous_info);
+        }
+    }
+
+    if (!current_valid || !content_version_valid || content_version == 0)
+    {
+        return;
+    }
+
+    tonie_info_t *current_info = getTonieInfoFromRuid(current, false, settings);
+    v3_local_tap_state_t state;
+    if (v3_source_is_tap(current_info) &&
+        v3_local_tap_state_load(settings->internal.cachedirfull,
+                                settings->internal.overlayNumber,
+                                current, &state) == NO_ERROR &&
+        state.valid &&
+        (content_version == state.prepared_version ||
+         content_version == state.previous_version ||
+         content_version == state.playing_version) &&
+        state.playing_version != content_version)
+    {
+        state.playing_version = content_version;
+        if (v3_local_tap_state_save(settings->internal.cachedirfull,
+                                    settings->internal.overlayNumber,
+                                    current, &state) == NO_ERROR)
+        {
+            TRACE_INFO("Observed TB2 TAP playback overlay=%u rUID=%s version=%" PRIu32 "\r\n",
+                       (unsigned)settings->internal.overlayNumber,
+                       current, content_version);
+        }
+        else
+        {
+            TRACE_WARNING("Could not persist TB2 TAP playback state overlay=%u rUID=%s version=%" PRIu32 "\r\n",
+                          (unsigned)settings->internal.overlayNumber,
+                          current, content_version);
+        }
+    }
+    if (current_info != NULL)
+    {
+        freeTonieInfo(current_info);
+    }
 }
 
 static error_t sendLocalContentMetaV3(HttpConnection *connection,
@@ -4288,6 +4751,12 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
                     client_ctx->settings, tonieInfo->json.source, ruid,
                     contentVersion, &generation);
             }
+            else if (v3_source_is_tap(tonieInfo))
+            {
+                error = v3_tap_load_or_prepare_generation(
+                    client_ctx->settings, tonieInfo, ruid, contentVersion,
+                    &generation, &contentVersion);
+            }
             else
             {
                 error = v3_local_load_or_prepare_generation(
@@ -4504,6 +4973,7 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
         const v3_local_content_chapter_t *chapter = NULL;
         bool_t native_collection =
             tonieInfo->json._source_type == CT_SOURCE_NATIVE_COLLECTION;
+        bool_t tap_source = v3_source_is_tap(tonieInfo);
         if (native_collection && request.format == V3_LOCAL_CHAPTER_HASHED)
         {
             error = v3_native_collection_generation_load(
@@ -4529,6 +4999,71 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
             error = ERROR_NOT_FOUND;
             TRACE_DEBUG("Rejecting legacy V3 chapter for native collection rUID %s\r\n",
                         request.ruid);
+        }
+        else if (tap_source && request.format == V3_LOCAL_CHAPTER_HASHED)
+        {
+            uint32_t versions[4] = {0};
+            size_t version_count = 0;
+            v3_local_tap_state_t tap_state;
+            bool_t tap_state_valid =
+                v3_local_tap_state_load(client_ctx->settings->internal.cachedirfull,
+                                        client_ctx->settings->internal.overlayNumber,
+                                        request.ruid, &tap_state) == NO_ERROR &&
+                tap_state.valid;
+            if (tap_state_valid)
+            {
+                versions[version_count++] = tap_state.prepared_version;
+                if (tap_state.playing_version != 0 &&
+                    tap_state.playing_version != versions[0])
+                {
+                    versions[version_count++] = tap_state.playing_version;
+                }
+                if (tap_state.previous_version != 0 &&
+                    tap_state.previous_version != versions[0] &&
+                    (version_count < 2 || tap_state.previous_version != versions[1]))
+                {
+                    versions[version_count++] = tap_state.previous_version;
+                }
+            }
+            else
+            {
+                versions[version_count++] = effectiveVersion;
+            }
+
+            error = ERROR_NOT_FOUND;
+            for (size_t i = 0; i < version_count; i++)
+            {
+                error_t load_error = v3_local_content_generation_load(
+                    client_ctx->settings->internal.cachedirfull,
+                    client_ctx->settings->internal.overlayNumber,
+                    request.ruid, versions[i], &generation);
+                if (load_error != NO_ERROR ||
+                    (tap_state_valid &&
+                     generation.source_kind != V3_LOCAL_CONTENT_SOURCE_TAP))
+                {
+                    v3_local_content_generation_free(&generation);
+                    continue;
+                }
+
+                char canonical_name[V3_LOCAL_CONTENT_NAME_SIZE];
+                int name_length = osSnprintf(
+                    canonical_name, sizeof(canonical_name),
+                    "teddycloud_%s_%02" PRIuSIZE "_%s.opus",
+                    request.hash_prefix, request.chapter_index, request.ruid);
+                if (name_length > 0 &&
+                    (size_t)name_length < sizeof(canonical_name))
+                {
+                    chapter = v3_local_content_find_chapter(&generation,
+                                                            canonical_name);
+                }
+                if (chapter != NULL)
+                {
+                    effectiveVersion = versions[i];
+                    error = NO_ERROR;
+                    break;
+                }
+                v3_local_content_generation_free(&generation);
+            }
         }
         else if (request.format == V3_LOCAL_CHAPTER_HASHED)
         {
