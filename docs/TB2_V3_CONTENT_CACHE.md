@@ -1,8 +1,135 @@
-# TB2 V3 Content Caches
+# TB2 V3 Local Content Cache
 
-This is the canonical description of TeddyCloud's two physically separate TB2 V3 content stores: locally generated custom content and the native cache of original TONIES responses. It covers `content-meta`, Ogg/Opus chapters, generation activation, TAP snapshots, compatibility with old local chapter names and HTTP range handling.
+This is the canonical description of TeddyCloud's local TB2 V3 content path. It covers local `content-meta`, immutable chapter objects, generation descriptors, TAP snapshots, compatibility with old local chapter names and HTTP range handling.
 
 The transparent TB2 proxy is not part of this path. Local content routing is implemented by the content-aware V3 cloud path.
+
+## Native TONIES original-content cache
+
+`toniebox2.cacheContentV3` enables a physically separate cache for unmodified
+TONIES V3 manifests and Ogg/Opus chapters. It defaults to `false` and can be
+overridden per TB2 overlay. The existing local custom-content pipeline below
+is evaluated first and is not changed by this cache.
+
+The native cache uses the existing schema and layout below
+`settings->internal.cachedirfull`:
+
+```text
+v3-native/
+  staging/<overlay>/<CANONICAL-RUID>/<version>/
+    manifest.json
+    descriptor.json
+    chapters/<original-name>.part
+  versions/<overlay>/<CANONICAL-RUID>/<version>/
+    manifest.json
+    descriptor.json
+    chapters/<original-name>
+  active/<overlay>/<CANONICAL-RUID>.json
+```
+
+Manifest bytes, content version and safe original TONIES chapter names remain
+unchanged. A chapter is first written to `.part`, checked against the manifest
+size and renamed inside staging. The generation directory is published under
+`versions` only after every expected chapter is complete; the active marker is
+written last. A failed or interrupted new generation therefore cannot replace
+the previous active generation. Complete older version directories are retained.
+
+For an original Tonie without a configured local source, a complete active
+manifest and its chapters are served locally. A cache miss or an RUID already
+marked stale by the existing Freshness implementation is forwarded to TONIES
+and captured. The Freshness algorithm itself is not replaced or extended by
+the native cache. Local `teddycloud_` chapter names never enter this store and
+never fall through to TONIES.
+
+## Native TB2 library import
+
+`toniebox2.cacheToLibraryV3` defaults to `false` and is effective only while
+`toniebox2.cacheContentV3` is enabled. Only a complete active original
+generation may be imported. Private TAF sources are not eligible.
+
+The common library keeps TB1 TAFs and TB2-native collections physically
+separate:
+
+```text
+<library>/
+  by/audioID/<audio-id>.taf
+  by/contentHash/<collection-hash>/
+    library-entry.json
+    chapters/teddycloud_<chapter-sha256>_<index>.opus
+  .tb2-native-staging/
+```
+
+The collection hash is derived from the ordered chapter bytes, sizes and
+indices. RUID and overlay are provenance stored in `library-entry.json`, not
+part of the reusable content identity. Identical content from another RUID or
+overlay therefore reuses the existing collection. Import copies every chapter
+to hidden staging, compares the copy, writes metadata last and then renames the
+complete directory. Existing inconsistent collections are rejected rather
+than overwritten.
+
+## Manual generation-aware download
+
+The existing content-download API keeps the TB1 V1/V2 TAF path unchanged. For
+a selected TB2 overlay it requests V3 content-meta and every referenced chapter
+with that overlay's saved identity and authentication data.
+
+Manual TB2 downloads deliberately reuse the normal cache pipeline:
+
+- `v3_native_cache_meta_capture` validates and stages the original manifest;
+- `v3_native_cache_chapter_prepare` validates each advertised chapter and
+  writes it into the same staged generation as live MITM traffic;
+- the route becomes active only after all advertised chapters are complete.
+
+If authentication, manifest transfer, a chapter transfer or activation fails,
+the incomplete staging data is never selected. A previously active complete
+generation remains active. Original-content download is rejected while the
+selected Tonie has a private source or effective NoCloud protection, so the
+manual action cannot bypass the established content policy.
+
+## Assigning a native collection as Tonie content
+
+A complete imported collection can be selected through the existing Tonie
+source picker. Its persisted source is content-addressed:
+
+```text
+lib://by/contentHash/<64-lowercase-sha256>/library-entry.json
+```
+
+Before assignment TeddyCloud validates the descriptor, ordered chapter paths,
+sizes and every chapter SHA-256. Invalid input leaves the previous source
+unchanged. The assignment then uses the existing source-change, automatic
+NoCloud and Freshness hooks; it introduces no second source lifecycle. If an
+assigned collection later becomes incomplete or damaged, delivery fails
+locally and never falls back to Boxine or TONIES.
+
+For TB2, V3 content-meta references the collection's immutable chapter files
+directly. The box-visible names bind the stored chapter hash and index to the
+target RUID:
+
+```text
+teddycloud_<first-20-chapter-sha256>_<index>_<TARGET-RUID>.opus
+```
+
+Chapter requests must match the current source, target RUID and effective
+version. Existing immutable-file handling supplies `200`, `206`, `416`,
+`Content-Length` and `Content-Range`. No collection chapter is copied into the
+original TONIES cache or forwarded upstream.
+
+For TB1, the same independent Ogg/Opus chapters are fed into the existing TAP
+packet remux without decoding or re-encoding. The derived TAF is streamed with
+its predicted size and published replace-safely at:
+
+```text
+<cachedirfull>/tb1-native-library/<collection-sha256>.taf
+```
+
+Different Tonies using the same collection share this derived file. A failed
+temporary conversion never replaces a valid existing TAF.
+
+`/api/fileIndexV2?special=library&path=by/contentHash` exposes every complete
+collection directory as one logical `tb2_native_collection`; its chapters are
+not individual source choices. The narrow delete endpoint removes only the
+selected collection and its derived TB1 TAF, not the original V3 cache.
 
 ## Invariants
 
@@ -12,317 +139,9 @@ The transparent TB2 proxy is not part of this path. Local content routing is imp
 - A generation descriptor becomes visible only after every referenced chapter object has been prepared and published.
 - A local `teddycloud_...` chapter request is never forwarded to TONIES. Unknown, stale or malformed local names receive a local error.
 - Growing TAP `.tmp` files and incomplete TAF files are never used as V3 chapter sources.
-- Freshness source-change state survives content-meta and MQTT playback. It is cleared only after a successful `200` or `206` chapter transfer that still belongs to the currently selected source generation.
-- Native original responses retain the exact TONIES manifest bytes, version and chapter names. Only private content generated by TeddyCloud uses the `teddycloud_...` namespace.
+- Freshness source-change state survives content-meta and chapter downloads. It is cleared only after MQTT playback reports the exact effective content version.
 
-All TB2 input boundaries use the shared `tb2_ruid_*` helpers. Lowercase and
-mixed-case rUIDs are accepted, but generation state, outgoing V3 metadata and
-new descriptors use uppercase. Existing descriptors with a noncanonical rUID
-or chapter-name rUID are normalized while loading; no bulk data migration is
-required. The overlay directory and effective-version filename remain part of
-the cache identity, so equal rUIDs in different overlays cannot select each
-other's descriptor.
-
-## Components and data flow
-
-The content-aware V3 handlers in `src/handler_cloud.c` canonicalize the RUID,
-load the selected overlay metadata and evaluate the shared NoCloud policy. A
-configured private source is materialized by `v3_local_content.c` into an
-immutable local generation. Without a private source, `v3_native_cache.c`
-either returns the complete active original generation or observes/captures
-the unmodified TONIES response. Only a permitted cache miss continues
-upstream.
-
-When the private source is a TAP playlist, the same `.tap` remains usable by
-TB1 and TB2. TB2 materializes one complete TAF snapshot from a single runtime
-selection, remuxes it into immutable Opus chapters, and persists TAP metadata
-inside that generation descriptor. Dynamic shuffle creates a new selection
-only after MQTT observes the end of the prior playback cycle. The prepared,
-currently reported playing, and immediately previous descriptors remain valid
-chapter-routing candidates so in-flight requests cannot be redirected to a
-different selection.
-
-TAP state lives separately under `v3-local/tap-state` and never enters the
-native TONIES cache. Freshness remains pending until MQTT reports playback of
-the prepared `contentVersion`; successful meta, chapter, Range, or PUBACK
-operations do not confirm a TAP generation.
-
-For original content the response callbacks validate content-meta, stage the
-manifest and chapter files, and activate the version only after the expected
-set is complete. The optional library import reads that same revalidated active
-generation. The manual TB2 download also feeds the same callbacks; it does not
-have a second cache writer. V3 freshness selects versions from the same source
-and active-cache state. MQTT uses the shared overlay/RUID NoCloud policy after
-local observation and before upstream forwarding. The transparent developer
-proxy remains outside this content pipeline.
-
-## Native TONIES cache
-
-`toniebox2.cacheContentV3` enables the native cache and defaults to `false`. The
-effective global or box-overlay value is evaluated for every V3 request. It has
-no effect on the transparent developer proxy.
-
-The cache records the unmodified TONIES `content-meta` JSON and the associated
-Ogg/Opus chapter responses. Original manifest chapter names are retained. A
-name is accepted for local file access only when it is one portable filename
-segment consisting of letters, digits, `_`, `-` and `.`. Empty names, absolute
-paths, separators, drive syntax, control/encoded characters, `.`/`..`, Windows
-device names and case-insensitive duplicate names are rejected. Unsafe names
-are not rewritten, because rewriting could make two distinct upstream names
-collide. The reserved `teddycloud_` prefix is rejected in native manifests so
-that it identifies only TeddyCloud-generated private content.
-
-### Physical layout and cache key
-
-All native paths are below `settings->internal.cachedirfull` and never overlap
-the TAF-based content directory or `v3-local` custom objects:
-
-```text
-v3-native/
-  staging/<overlay>/<CANONICAL-RUID>/<version>/
-    manifest.json
-    descriptor.json
-    chapters/<original-name>
-    chapters/<original-name>.part
-  versions/<overlay>/<CANONICAL-RUID>/<version>/
-    manifest.json
-    descriptor.json
-    chapters/<original-name>
-  active/<overlay>/<CANONICAL-RUID>.json
-```
-
-The native generation key is `(overlay, canonical uppercase RUID,
-content-meta version)`. The descriptor binds every original chapter name to
-its exact advertised `fileSize`. The most recently accepted `content-meta`
-response for an overlay is the only routing context used for subsequent
-chapter requests; TeddyCloud does not guess a RUID from a chapter name or scan
-other overlays.
-
-### Staging and activation
-
-`content-meta` is written atomically to a staging generation together with its
-validated descriptor. Each expected chapter is written to `.part`, flushed,
-checked against the manifest size and then renamed to its final staging name.
-HTTP errors, ranges, disconnects, short/long bodies and write errors remove or
-leave only an inactive `.part`; they never modify the active marker.
-
-TONIES currently provides `fileSize`, but no chapter digest, in `content-meta`.
-The cache can therefore prove complete transport and exact length, but cannot
-invent an upstream checksum for same-length byte corruption. HTTPS protects the
-upstream transfer; a future protocol digest can be added without changing the
-generation layout.
-
-After every successful chapter completion TeddyCloud checks the complete
-expected list. Only when every file exists with its exact size is the staging
-directory renamed to the immutable `versions` location. The active marker is
-written through a temporary file only after that rename succeeds. Thus the
-previous complete version remains selected while a new version is incomplete.
-If activation is interrupted between these operations, the complete version
-is harmless but not selected; receiving the same complete manifest again can
-finish activation. A malformed descriptor, missing chapter or inconsistent
-version is never served locally.
-
-Complete older version directories are retained. They are immutable and may
-be cleaned by a future explicit cache-maintenance operation; staging and
-activation never delete the previous complete generation.
-
-### Manual generation-aware download
-
-The existing `/content/download/<RUID>` action selects its protocol from the
-requested overlay's `toniebox.boxGeneration`. TB1 continues to use the
-unchanged V1/V2 full-TAF download. A TB2 action instead resolves the shared
-overlay/global TB2 client certificate identity and the persisted content
-authentication, requests `/v3/content-meta/<RUID>`, and then downloads every
-referenced audio chapter in manifest order.
-
-This is orchestration, not a second cache implementation. The response body is
-fed to `v3_native_cache_meta_capture`; its validated route provides the bounded
-chapter name/auth download plan. Every chapter is opened through
-`v3_native_cache_chapter_prepare`, written with
-`v3_native_cache_chapter_append`, and completed by
-`v3_native_cache_chapter_finish`. Therefore the manual action uses the same
-name validation, `.part` files, exact-size checks, staging directory and atomic
-active-marker update as a normal V3 MITM request.
-
-The chapters are fetched sequentially because every manifest entry carries its
-own TONIES chapter authentication. A transport abort, HTTP error, missing
-chapter, invalid name, short body or write failure aborts the current capture.
-The previous active marker is never changed and its route is reloaded before
-the API returns an error. A newly staged version becomes active only after the
-last expected chapter passes the common completeness check.
-
-The API returns JSON with `stage`, `message`, `upstreamStatus`, `version`,
-`chaptersCompleted` and `chaptersTotal`. Stages distinguish generation/policy,
-stored or rejected authentication, manifest validation/staging, an individual
-chapter, activation and successful completion. Logs use the same stage names
-without printing authentication payloads.
-
-With no configured private source, a complete active generation is returned
-before contacting TONIES. TeddyCloud writes the stored manifest bytes directly;
-it does not parse and regenerate the response, rename chapters or change its
-version. An exact active chapter is served from its immutable file, including
-the existing HTTP range handling.
-
-Freshness prevents an old original generation from being pinned forever. A RUID
-marked stale bypasses the active manifest and reaches TONIES, where the next
-complete version is staged and activated. An incomplete or damaged generation
-is never used as a fallback.
-
-Relevant logs are `Staged TB2 V3 cache`, `Activated TB2 V3 cache`, `TB2 V3
-content route`, `TB2 V3 chapter route` and the warning explaining why a
-forwarded response was not cached. They include overlay, canonical RUID,
-version and chapter name where applicable.
-
-## Native TB2 library import
-
-`toniebox2.cacheToLibraryV3` enables import of complete original generations
-into the existing audio library and defaults to `false`. The effective global
-or TB2 overlay value is honored. It is effective only while
-`toniebox2.cacheContentV3` is also enabled; the settings API exposes the library
-switch as read-only when the effective native content cache is disabled. This
-mirrors the TB1 cache/library dependency without sharing their storage format.
-
-The existing WebUI library remains the common filesystem view. TB1 stays
-indexed by audio ID, while reusable TB2 audio is indexed by a collection hash
-derived from the ordered chapter bytes. RUID and overlay are provenance, not
-part of the reusable content identity. Native entries have no TAF header, so
-TAF-only actions are not offered, and Ogg/Opus chapters are never presented as
-`.taf` files.
-
-```text
-<library>/
-  by/
-    audioID/<audio-id>.taf             # existing TB1 layout
-    contentHash/<collection-sha256>/
-      library-entry.json
-      chapters/teddycloud_<chapter-sha256>_<index>.opus
-  .tb2-native-staging/                 # hidden from the library index
-    <collection-sha256>/
-```
-
-The collection hash is SHA-256 over a versioned domain, chapter count and each
-ordered chapter index, file size and SHA-256 digest. It excludes RUID, overlay,
-TONIES content version, chapter URL and authentication. Importing the same
-ordered audio bytes from another RUID or overlay therefore reuses the same
-collection directory. Different bytes or chapter order produce a different
-collection hash. Dedupe is collection-wide; a separate global chapter-object
-store is intentionally not introduced.
-
-`library-entry.json` stores the collection hash, box generation (`tb2`), format
-(`ogg-opus`) and the ordered chapter hashes, sizes, local paths and first
-observed TONIES names. Source overlay, canonical RUID and content version are
-retained only in the `origins` array. A subsequent identical import adds a
-missing origin atomically without copying the audio again. Private TAF sources
-are not eligible for this import and remain in their existing TAF storage.
-
-Import starts only after the normal V3 cache has an active marker and
-`v3_native_cache_read_active_manifest()` has revalidated the complete version.
-Every immutable chapter is hashed, copied into a staging collection under its
-local `teddycloud_` name and compared byte-for-byte with the active cache. The
-metadata is written last. Only after all checks pass is the staging directory
-renamed to its final `by/contentHash` directory. A missing chapter, invalid
-manifest, corrupt copy, write failure or interrupted import cannot expose a
-complete entry. An existing collection is reused only after its descriptor and
-every chapter match; an inconsistent destination is rejected and never
-overwritten.
-
-The native library is a reusable custom-content source, not an original TONIES
-route. The original auth-bearing content-meta remains only in the
-overlay/RUID/version-scoped native cache. A later assignment creates a fresh
-target-RUID-specific manifest and full `teddycloud_..._<TARGET-RUID>.opus`
-chapter names while reusing these immutable bytes without re-encoding. The
-automatic NoCloud/RUID protection remains required because not every metric or
-playback message contains a chapter name.
-
-Normal V3 MITM caching, serving an already active cached manifest, and the
-generation-aware manual TB2 download all use this same import entry point.
-Consequently the manual downloader does not have a separate library writer and
-cannot import a staging or partially downloaded cache version. Content-distinct
-collections are retained until an explicit library cleanup removes them.
-
-The successful diagnostic is `Imported TB2 V3 library contentHash`; failures
-name the overlay, RUID and filesystem/cache error without logging chapter auth.
-
-### Assigning a native collection as Tonie content
-
-A complete collection is selectable through the existing Tonie source picker.
-The persisted source is canonical and content-addressed:
-
-```text
-lib://by/contentHash/<64-lowercase-sha256>/library-entry.json
-```
-
-Saving validates schema 2, `boxGeneration=tb2`, `format=ogg-opus`, the
-collection hash, ordered chapter indices, exact relative chapter paths, sizes
-and every chapter SHA-256. An invalid selection does not replace the prior
-source. Normal requests repeat the structural, path and size checks; the files
-are immutable after import. A missing or damaged assigned collection fails
-locally and never falls back to Boxine or TONIES because it is private content.
-
-For TB2, content-meta is built directly from the collection without copying
-the chapter objects into `v3-local`. Names bind the collection chapter hash and
-index to the target RUID:
-
-```text
-teddycloud_<first-20-chapter-sha256>_<index>_<TARGET-RUID>.opus
-```
-
-Chapter requests must match the currently selected collection, target RUID and
-effective source version. The existing immutable-file response path provides
-`200`, `206`, `416`, `Content-Length` and `Content-Range`. A successful current
-chapter transfer completes the existing source-change state. No meta or chapter
-response weakens the automatic NoCloud or MQTT `teddycloud_` protection.
-
-For TB1, the same independent Ogg/Opus chapters are fed into the TAP packet
-remux writer without decoding or re-encoding. The stable non-zero Audio-ID is
-derived from the first four collection-hash bytes. The predicted TAF header,
-SHA1, chapter positions, Ogg state and complete length are available before the
-first response starts. Generation continues after a client disconnect and is
-published replace-safely at:
-
-```text
-<cachedirfull>/tb1-native-library/<collection-sha256>.taf
-```
-
-Later TB1 requests and different RUIDs using the same collection share this
-validated derived TAF. A failed `.tmp` is never activated and cannot replace an
-already valid derived file. The native collection itself stays unchanged and
-deduplicated.
-
-### Browsing, playback and deletion
-
-`/api/fileIndexV2?special=library&path=by/contentHash` validates each direct
-child as one logical `tb2_native_collection`. The lightweight listing check
-verifies the manifest schema, ordered chapter paths and file sizes but does not
-rehash immutable chapter files. Invalid or incomplete directories remain plain
-directories and are never advertised as playable collections.
-
-The WebUI keeps the collection directory readable but immutable. Opening it
-shows `library-entry.json` and `chapters/`; the only collection-level actions
-are open, multi-chapter playback, a stored ZIP export and deletion. ZIP export
-retains the manifest and original Opus chapter bytes beneath the content hash.
-
-Deletion uses the narrow endpoint:
-
-```text
-POST /api/library/native/delete
-{"contentHash":"<64-lowercase-hex>"}
-```
-
-It removes only `library/by/contentHash/<hash>` and a derived
-`tb1-native-library/<hash>.taf`. It does not remove the active V3 cache,
-TONIES source data, NoCloud state or Tonie assignments. Consequently a later
-TONIES download may import the same immutable collection again when
-`cacheToLibraryV3` is enabled.
-
-The WebUI audio model treats a native collection as one item with one source
-per Opus chapter. Chapter end advances to the next source, while seeking and
-duration remain chapter-relative. Existing TAF playback stays a single source
-whose tracks are time offsets. Standalone native links use `contentHash`,
-zero-based `chapter` and chapter-relative `position`; existing RUID links are
-unchanged.
-
-## Local custom-content storage layout
+## Storage layout
 
 All paths are below `settings->internal.cachedirfull`:
 
@@ -401,55 +220,6 @@ For local content, `handleCloudContentMetaV3()` obtains the effective version us
 
 An explicitly assigned local source is authoritative. If its complete generation cannot be prepared, TeddyCloud returns a local server error instead of silently substituting TONIES content. Normal cloud fallback remains available only where no authoritative local source or NoCloud rule forbids it.
 
-## Source of truth and NoCloud provenance
-
-`contentJson.source` is the binding selector for TB2:
-
-1. With a non-empty source, only the locally prepared private generation is
-   valid. Neither a native original cache nor TONIES is a fallback.
-2. Without a source, a complete active native original generation is preferred.
-3. Without such a generation, the request reaches TONIES only when the effective
-   NoCloud policy permits it.
-
-The existence of a TAF beside the content JSON does not select that TAF for TB2.
-The TB1 `prioCustomContent` and `updateOnLowerAudioId` heuristics do not take part
-in this decision.
-
-Content JSON persists two provenance bits while retaining `nocloud` as the
-derived compatibility value:
-
-- `nocloud_manual`: an independently selected cloud lock;
-- `nocloud_source`: the automatic lock while `source` is non-empty;
-- `nocloud`: `nocloud_manual || nocloud_source`.
-
-Removing a source clears only `nocloud_source`. A prior manual lock therefore
-remains. The automatic source lock cannot be bypassed by a cloud identity
-override. Legacy JSON files do not contain provenance: a lock beside an assigned
-source is interpreted as the former automatic source lock; a lock without a
-source is interpreted as manual. The normalized fields are written on the next
-regular metadata save, without a bulk migration.
-
-Every actual source-string change increments the persistent `source_revision`.
-Repeating the identical assignment is a no-op. The change marks the canonical
-RUID stale and removes the native active marker and in-memory chapter route for
-that overlay. Immutable old version directories may remain on disk but cannot
-be selected.
-
-## Effective private-content version
-
-The TAF Audio-ID is the natural starting version when it exists, but it is not a
-higher/lower validity rule. Each source revision receives a deterministic
-32-bit effective version derived with FNV-1a from canonical RUID, revision,
-source and natural Audio-ID. Fixed byte order makes the result stable across
-host architectures. A deterministic collision step excludes zero, the natural
-version, the known box version and the previous forced version.
-
-This produces a different version for first assignment, another source, the
-same or lower Audio-ID and missing Audio-ID. The stored forced version remains
-stable across restarts. Removing the source returns to the unmodified version
-from the active original manifest or TONIES; no forced private version is put
-into an original response.
-
 ## Live TAP snapshot
 
 `getTonieInfo()` distinguishes two TAP states:
@@ -472,11 +242,7 @@ This synchronous V3 snapshot does not change the existing progressive TAP behavi
 
 Hashed chapter requests are resolved only from the descriptor for the current overlay, RUID and effective version. The requested canonical name must exactly match one descriptor entry. A missing descriptor, stale version, unknown hash, wrong index, wrong RUID or invalid object returns `404` locally.
 
-The selected immutable `.opus` object is sent through TeddyCloud's existing unchanged file-streaming path. Full responses and valid non-zero range resumes use the exact immutable object, while an invalid range produces `416`. No local request is reconstructed from a TAF during hashed delivery, and no failed local request falls through to the TONIES chapter endpoint.
-
-Original TONIES content-meta always establishes the current overlay-local chapter route. With `toniebox2.cacheContentV3=true`, the route captures and later serves the native generation. With caching disabled, the same parser retains only the validated in-memory name/RUID/version association and forwards matching chapters without writing files. This keeps routing and NoCloud decisions identical in both modes.
-
-A chapter name that is not assigned to the current content-meta route is rejected locally. This fail-closed rule also covers a direct resume after a TeddyCloud restart: the box must refresh content-meta before TeddyCloud can associate an opaque original name with its RUID and NoCloud policy. Matching original chapters may reach TONIES only when that effective RUID policy permits cloud access. A `teddycloud_` request additionally requires that its private source is still selected. This prevents old custom or original requests from being redirected to a newer source or silently falling through upstream.
+The selected immutable `.opus` object is sent through TeddyCloud's existing unchanged file-streaming path. No local request is reconstructed from a TAF during hashed delivery, and no failed local request falls through to the TONIES chapter endpoint.
 
 ## Legacy transition gate
 
@@ -520,46 +286,9 @@ Protection against mixed client-side `.part` data is layered:
 
 ## Freshness relationship
 
-The generation key uses the effective V3 version, including an overlay-local forced version after a source change. If the assigned source is not materialized when the mapping changes, the forced version is allocated as soon as the local content becomes readable; no manifest is emitted with the old version in between. TB2 compares the raw content versions for inequality and does not apply the TB1 custom-Audio-ID normalization. Content-meta alone does not prove that the box started retrieving the new generation, so it does not clear a pending source-change marker.
+The generation key uses the effective V3 version, including an overlay-local forced version after a source change. If the assigned source is not materialized when the mapping changes, the forced version is allocated as soon as the local content becomes readable; no manifest is emitted with the old version in between. TB2 compares the raw content versions for inequality and does not apply the TB1 custom-Audio-ID normalization. Content-meta and chapter requests do not prove that the box activated the new generation, so they do not clear a pending source-change marker.
 
-Without a configured source, the outbound TONIES freshness map uses the active
-native manifest version. If no complete native generation exists, TeddyCloud
-leaves the box-reported version untouched. In particular, it never substitutes
-the Audio-ID of a coincidentally present TAF. This makes a cached original look
-like the same original to both the box and TONIES.
-
-The incoming `content` object is canonicalized and deduplicated by RUID before
-it is evaluated. TeddyCloud then sends at most one filtered `content` map to
-TONIES:
-
-- TB2 system RUIDs (`00000AF0...`) stay separate from content policy and retain
-  the version reported by the box;
-- content RUIDs with a private source or effective NoCloud policy are omitted;
-- cloud-eligible original RUIDs use the version of the completely activated
-  native generation, or the box-reported version when no active generation
-  exists;
-- staged, incomplete and invalidated cache generations are never reported as
-  current.
-
-The response returned to the box is the union of local stale decisions and
-validated entries from the TONIES response. Local decisions are append-only and
-therefore win when TONIES considers the same item fresh. TONIES response items
-that were not present in the filtered request are ignored. A failed request,
-non-`200` status, malformed JSON or incomplete response keeps the local result
-and does not turn protected content into an upstream request.
-
-After the merged HTTPS decision is stored, local MQTT delivery remains one
-`fresh-tonies` QoS-1 publish per RUID. This local notification is not relayed to
-TONIES and does not alter the HTTPS request grouping.
-
-Content-meta, full or partial chapter responses and MQTT `PUBACK` do not clear a
-source-change marker. `playback/state` clears it only when its canonical RUID and
-content version exactly match the expected current generation. Direct private
-content uses the effective source version; original content requires the current
-validated TONIES route version. TAP remains owned by its specialized observer.
-Failed, stale, unassigned or mismatched observations keep the marker
-restart-safe. The forced private version remains stored after cleanup so later
-meta and chapter requests continue to resolve the same generation.
+The marker is cleared only when the local MQTT observer receives playback state for the same RUID and the reported `contentVersion` exactly equals the current effective version. Stale or unknown playback versions are ignored.
 
 ## Source and file map
 
@@ -595,23 +324,7 @@ meta and chapter requests continue to resolve the same generation.
 - Holds the TAP target lock around snapshot preparation.
 - Loads or creates generation descriptors for content-meta.
 - Parses hashed and legacy chapter names, applies the transition gate and keeps local misses local.
-- Observes original content-meta routes even when native caching is disabled, applies NoCloud before upstream chapter forwarding and rejects every unassigned original name fail-closed.
-- Returns `416` for resumed legacy requests, delegates hashed objects to the existing unchanged immutable-file streamer and leaves source-change completion to exact-version playback confirmation.
-- Canonicalizes and deduplicates V3 freshness input, builds one filtered TONIES
-  request, selects only active native-cache versions and merges the allowlisted
-  response additively with local stale decisions.
-
-### `src/handler.c`
-
-- Retains the shared TB1 passthrough callbacks. V3 freshness owns its response
-  capture and merge in `handler_cloud.c`, preventing an upstream body from being
-  forwarded before TeddyCloud has applied local decisions.
-
-### `include/v3_native_cache.h` and `src/v3_native_cache.c`
-
-- Keep native cache persistence and cacheless original-route observation in one validated manifest parser.
-- Bind every current chapter name to its overlay, canonical requested RUID and TONIES content version.
-- Expose the exact validated route version used by playback-based source-change confirmation; no second content pipeline or filename guessing is introduced.
+- Returns `416` for resumed legacy requests and delegates hashed objects to the existing unchanged immutable-file streamer.
 
 ### `include/settings.h` and `src/settings.c`
 
@@ -621,147 +334,3 @@ meta and chapter requests continue to resolve the same generation.
 ### `tests/test_tb2_v3_local_content_contract.py`
 
 - Protects the hash-name, full-digest object, complete-generation, remux, strict local-routing, legacy-gate, range and freshness contracts.
-
-## Runtime diagnostics
-
-The content-meta routing line is the primary compact diagnosis. It reports the
-chosen `source` (`private`, `original-cache`, `original-upstream` or `none`),
-`cache` state (`hit`, `miss`, `stale`, `disabled` or `bypass`), overlay,
-canonical RUID, effective version, active cache version, requested version,
-effective NoCloud decision and final local/upstream action. A content-meta
-request does not carry a requested content version, so that field is explicitly
-`requestedVersion=unknown`; it is not guessed. Private generations additionally
-report `versionKind=natural` or `versionKind=forced`.
-
-Chapter cache hits report both `activeVersion` and `requestedVersion`. A
-version mismatch, malformed local name, old hash, resumed legacy `.part`
-request, unassigned original chapter or NoCloud fallback is logged at the
-point where it is rejected. Source updates report only action (`set`, `changed`
-or `removed`), overlay, canonical RUID, revision and NoCloud provenance. Source
-paths, chapter authentication, certificates and authentication tokens are not
-part of these diagnostic lines.
-
-Freshness logs identify the canonical RUID, overlay, reason and whether an
-inventory was available. The merge log distinguishes a normal TONIES result
-from an unavailable or incomplete response. MQTT PUBLISH decisions report
-direction, topic, QoS, packet ID, `action` and `filter`; local response
-consumption and NoCloud blocking remain separate capture actions. The
-packet-level `traffic.jsonl` retains the original packet in `data_base64` and,
-when rewritten, the actual forwarded packet in `wire_data_base64`.
-
-Typical interpretations:
-
-- `cache=miss ... action=upstream` is a normal first original-content request.
-- `cache=stale` means freshness deliberately bypassed the old active version.
-- `nocloud=true action=local-404` proves that no upstream fallback occurred.
-- `reason=v3-endpoint-disabled` means the content-aware endpoint, not the cache,
-  prevented upstream routing.
-- `chapter cache version mismatch` or an inconsistent mapping indicates state
-  that must not be served; inspect the active marker and version directory.
-- A staged version without a later activation log is incomplete and remains
-  invisible to local serving and library import.
-
-## Safe manual cache maintenance
-
-Stop TeddyCloud before changing cache files and preserve a backup of the exact
-`v3-native` subtree being touched. Resolve the concrete overlay, canonical RUID
-and version first; never delete the complete cache root as a shortcut.
-
-- An inactive `staging/<overlay>/<RUID>/<version>` directory may be removed.
-  It cannot be selected by an active marker.
-- A `versions/.../<version>` directory may be removed only when the matching
-  `active/<overlay>/<RUID>.json` does not name that version and no rollback to it
-  is required.
-- Files below `v3-local/` are content-addressed and may be shared by more than
-  one private generation descriptor. Delete one only after proving that no
-  descriptor references its full SHA-256 object name.
-- `.tb2-native-staging` library entries are incomplete and hidden. Final native
-  library versions are independent copies and should be removed only as an
-  explicit library operation.
-- Do not mix these paths with the TB1 TAF cache or library.
-
-After maintenance, restart TeddyCloud and require a successful route/activation
-log before deleting the backup. A missing or invalid marker fails closed; it
-does not authorize serving an arbitrary version directory.
-
-## Production activation verification
-
-Enable the content-aware TB2 V3 path for one test overlay first. The transparent
-developer proxy is not a substitute. Verify the following sequence with a
-known original Tonie and a known private-source Tonie:
-
-1. The first original request reports cache miss/upstream, followed by staging
-   and activation; the next request reports an original-cache hit with the same
-   version and original TONIES chapter names.
-2. A full chapter returns `200`; a valid range returns `206` with the expected
-   `Content-Range` and bytes; an invalid start returns `416` without modifying
-   the stored chapter.
-3. A private source reports a local hashed `teddycloud_` generation. Changing
-   the source produces a different effective version/name and an old chapter
-   request is rejected locally.
-4. Effective NoCloud with no local source produces a local `404` and no TONIES
-   request. The freshness result keeps private/local stale decisions when the
-   cloud response disagrees or fails.
-5. Local MQTT control, automatic MQTT NoCloud filtering and locally consumed
-   replies have distinct actions in `traffic.jsonl`; unrelated upstream
-   commands remain transparent.
-6. A manual TB2 download reports each stage and activates only after all
-   chapters. Library import occurs only when both native-cache settings are
-   effective and the generation is complete.
-7. A TB1 box still uses V1/V2 TAF download and its existing cache/library path.
-
-Do not consider an HTTP status or one activation line sufficient on its own.
-Compare the reported overlay, canonical RUID, version, chapter count and exact
-chapter sizes, then replay the Tonie on the box.
-
-For TAP-backed playback, the TB2 WebUI requests `/api/getTagInfo` with the
-`contentVersion` reported by MQTT. The API reads that exact immutable TAP
-descriptor, so title, selected chapter order, durations, and shuffle mode stay
-bound to the bytes currently playing even after a newer generation has already
-been prepared. If the descriptor is unavailable, the UI uses generic chapter
-labels rather than mixing in TONIES metadata.
-
-## Rollback to a previous complete cache version
-
-Complete older original generations are intentionally retained. To roll one
-RUID back, stop TeddyCloud, verify that the target
-`versions/<overlay>/<RUID>/<version>` contains a valid `manifest.json`, matching
-`descriptor.json` and every chapter at the advertised exact size, then replace
-`active/<overlay>/<RUID>.json` atomically with schema version 1 and the same
-overlay, canonical RUID and target version. Never edit the marker in place and
-never point it at staging.
-
-Keep the currently active complete directory until the rollback has been
-verified after restart. The first cached manifest request revalidates the
-marker, manifest and all chapter sizes before serving. If validation fails,
-restore the saved marker; do not copy files between versions. This rollback
-changes only original-cache selection. It does not roll back private source
-metadata, source revision, NoCloud provenance, freshness markers or native
-library entries.
-
-## Acceptance coverage
-
-The final gap analysis found the protocol and lifecycle cases already covered
-by the existing focused suites; duplicating them in a second mock pipeline
-would not add confidence. The acceptance map is:
-
-- `test_tb2_v3_native_cache_contract.py`: complete/incomplete/corrupt versions,
-  aborted writes, atomic activation and overlay/version isolation.
-- `test_tb2_v3_local_content_contract.py`: immutable private generations,
-  old-chapter rejection, complete and partial Range handling, and source-marker
-  completion.
-- `test_tb2_source_truth_contract.py`: source set/change/remove, manual versus
-  automatic NoCloud and natural, same, lower or missing Audio-ID inputs.
-- `test_tb2_v3_freshness_merge_contract.py`: canonical mixed requests, active
-  versus staged version, local-over-cloud stale priority and cloud failures.
-- `test_mqtt_nocloud_filter_contract.py` and
-  `test_mqtt_local_control_contract.py`: automatic protection, mixed payload
-  rewrites, local control during upstream, reply correlation and capture.
-- `test_settings_scope_layout_contract.py`: mixed TB1/TB2 settings and overlay
-  visibility.
-- `test_tb2_v3_manual_download_contract.py`: generation-aware download,
-  authentication/manifest/chapter failures and reuse of atomic cache staging.
-- `test_tb2_v3_library_cache_contract.py`: complete-only import, physical format
-  separation and the common TB1/TB2 library view.
-- `test_tb2_v3_diagnostics_contract.py`: the consolidated safe diagnostic fields
-  and this operational runbook.

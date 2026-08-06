@@ -11,26 +11,30 @@ ROOT = Path(__file__).resolve().parents[1]
 class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.content_header = (ROOT / "include/contentJson.h").read_text(encoding="utf-8")
+        cls.content_header = (ROOT / "include/contentJson.h").read_text(
+            encoding="utf-8"
+        )
         cls.content = (ROOT / "src/contentJson.c").read_text(encoding="utf-8")
-        cls.native_header = (ROOT / "include/v3_native_cache.h").read_text(encoding="utf-8")
         cls.native = (ROOT / "src/v3_native_cache.c").read_text(encoding="utf-8")
         cls.api = (ROOT / "src/handler_api.c").read_text(encoding="utf-8")
         cls.cloud = (ROOT / "src/handler_cloud.c").read_text(encoding="utf-8")
-        cls.playlist = (ROOT / "src/tonie_audio_playlist.c").read_text(encoding="utf-8")
-        cls.modal = (
+        cls.playlist = (ROOT / "src/tonie_audio_playlist.c").read_text(
+            encoding="utf-8"
+        )
+        cls.docs = (ROOT / "docs/TB2_V3_CONTENT_CACHE.md").read_text(
+            encoding="utf-8"
+        )
+        cls.web_select = (
             ROOT
             / "teddycloud_web/src/components/tonies/common/modals/SelectAudioModal.tsx"
         ).read_text(encoding="utf-8")
-        cls.browser = (
+        cls.web_browser = (
             ROOT
-            / "teddycloud_web/src/components/tonies/filebrowser/SelectFileFileBrowser.tsx"
+            / "teddycloud_web/src/components/tonies/filebrowser/FileBrowser.tsx"
         ).read_text(encoding="utf-8")
-        cls.columns = (
-            ROOT
-            / "teddycloud_web/src/components/tonies/filebrowser/helper/Columns.tsx"
+        cls.web_player = (
+            ROOT / "teddycloud_web/src/provider/AudioProvider.tsx"
         ).read_text(encoding="utf-8")
-        cls.docs = (ROOT / "docs/TB2_V3_CONTENT_CACHE.md").read_text(encoding="utf-8")
 
     @staticmethod
     def section(source: str, start: str, end: str) -> str:
@@ -72,8 +76,6 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
             "v3_native_library_hash_file",
         ):
             self.assertIn(marker, loader)
-        self.assertIn("V3_NATIVE_LIBRARY_SOURCE_PREFIX", self.native)
-        self.assertIn("V3_NATIVE_LIBRARY_SOURCE_SUFFIX", self.native)
 
     def test_save_validates_before_mutating_existing_source(self) -> None:
         setter = self.section(
@@ -86,13 +88,26 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
         self.assertLess(validation, comparison)
         self.assertIn("TRUE, &collection", setter[validation:comparison])
 
+    def test_existing_source_lifecycle_is_reused_without_new_fields(self) -> None:
+        self.assertNotIn("source_revision", self.content_header)
+        self.assertNotIn("nocloud_manual", self.content_header)
+        self.assertNotIn("nocloud_source", self.content_header)
+        setter = self.section(
+            self.api,
+            "error_t handleApiContentJsonSet(",
+            "bool isHexString(",
+        )
+        self.assertIn("freshness_mark_content_mapping_changed", setter)
+
     def test_tb2_uses_library_files_with_target_ruid_names(self) -> None:
         generation = self.section(
             self.cloud,
             "static error_t v3_native_collection_generation_load(",
-            "static char *v3_tap_display_name(",
+            "static error_t v3_local_prepare_generation_from_source(",
         )
-        self.assertIn('"teddycloud_%.20s_%02" PRIuSIZE "_%s.opus"', generation)
+        self.assertIn(
+            '"teddycloud_%.20s_%02" PRIuSIZE "_%s.opus"', generation
+        )
         self.assertIn("chapter->path = strdup(stored->path)", generation)
         self.assertNotIn("v3_local_content_generation_save", generation)
         meta = self.section(
@@ -102,7 +117,6 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
         )
         self.assertIn("CT_SOURCE_NATIVE_COLLECTION", meta)
         self.assertIn("v3_native_collection_generation_load", meta)
-        self.assertIn("source_configured || !cloud_access_allowed", meta)
 
     def test_tb1_reuses_fast_packet_remux_and_hash_cache(self) -> None:
         reader = self.section(
@@ -128,11 +142,10 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
             "tap_remux_native_collection",
             "tap_send_response_stream_unsafe_with_size",
             "tap_publish_taf_replace_safe",
-            "v3_native_library_collection_load(\n        client_ctx->settings->internal.librarydirfull,\n        tonieInfo->json.source, TRUE",
         ):
             self.assertIn(marker, serve)
 
-    def test_file_index_and_existing_picker_treat_collection_as_one_entry(self) -> None:
+    def test_file_index_treats_collection_as_one_entry(self) -> None:
         index = self.section(
             self.api,
             "error_t handleApiFileIndexV2(",
@@ -146,21 +159,26 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
             '"ogg-opus"',
         ):
             self.assertIn(marker, index)
-        self.assertIn("file.nativeCollection.source", self.modal)
-        self.assertIn("selectNativeCollections={!requireTafHeader}", self.modal)
-        self.assertIn("hideNativeCollections={requireTafHeader}", self.modal)
-        self.assertIn("record.nativeCollection.chapterCount", self.columns)
-        self.assertIn("visibleFiles", self.browser)
 
     def test_documentation_covers_both_generations_and_failure_policy(self) -> None:
         for marker in (
-            "### Assigning a native collection as Tonie content",
+            "## Assigning a native collection as Tonie content",
             "lib://by/contentHash/",
             "target RUID",
             "tb1-native-library",
             "never falls back to Boxine or TONIES",
         ):
             self.assertIn(marker, self.docs)
+
+    def test_webui_selects_collection_as_one_source_and_keeps_taf_only_dialogs(self) -> None:
+        self.assertIn("file.nativeCollection.source", self.web_select)
+        self.assertIn("selectNativeCollections={!requireTafHeader}", self.web_select)
+        self.assertIn("hideNativeCollections={requireTafHeader}", self.web_select)
+
+    def test_webui_plays_all_chapters_and_can_close_collection_detail(self) -> None:
+        self.assertIn("playPlaybackItem", self.web_player)
+        self.assertIn("NATIVE_COLLECTION_ROOT_PATH", self.web_browser)
+        self.assertIn("closeNativeCollectionDetail", self.web_browser)
 
 
 if __name__ == "__main__":

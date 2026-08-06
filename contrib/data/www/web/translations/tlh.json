@@ -233,15 +233,6 @@
             "chapters": "'ay'mey",
             "customContent": "De' le'",
             "editPlaylist": "choH",
-            "playlistTypes": {
-                "directTaf": "nIqHom le'",
-                "tap": "TeddyAudio QonoS"
-            },
-            "shuffleModes": {
-                "ordered": "tlheghDaq",
-                "all": "Hoch DuD",
-                "one": "pagh nabbe' wIv"
-            },
             "playlistSaveFailed": "QoQ tetlh polbe'lu'",
             "playlistSaveFailedDetails": "pongmey polmeH Qagh tu'lu'",
             "playlistSaved": "QoQ tetlh pollu'",
@@ -269,20 +260,15 @@
             "title": "QaH"
         },
         "selectFileModal": {
-            "cancel": "qIl"
+            "cancel": "qIl",
+            "nativeCollection": "TB2 mung · Ogg/Opus · {{count}} 'ay'mey · {{hash}}"
         },
         "selectMode": {
             "cancel": "qIl"
         },
         "tapEditor": {
             "cancel": "qIl",
-            "save": "pol",
-            "shuffle": "chu'ghach tlhegh",
-            "shuffleModes": {
-                "ordered": "tlhegh",
-                "all": "Hoch Hoch DuD",
-                "one": "wa' wIv lo' SuD"
-            }
+            "save": "pol"
         },
         "teddystudio": {
             "cancel": "qIl",

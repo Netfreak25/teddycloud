@@ -120,7 +120,7 @@ class MqttFreshToniesContractTests(unittest.TestCase):
 
     def test_active_playback_never_holds_freshness(self):
         freshness = self.server_function(
-            "static char *mqtt_build_fresh_tonie_payload",
+            "static void mqtt_uid_to_ruid",
             "static bool_t mqtt_handle_fresh_tonies_puback",
         )
         self.assertNotIn("active_playback", freshness)

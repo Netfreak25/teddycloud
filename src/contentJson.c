@@ -11,33 +11,6 @@
 #include "json_helper.h"
 #include "v3_native_cache.h"
 
-void content_json_refresh_nocloud(contentJson_t *content_json)
-{
-    if (content_json != NULL)
-    {
-        content_json->nocloud = content_json->nocloud_manual ||
-                                content_json->nocloud_source;
-    }
-}
-
-void content_json_set_manual_nocloud(contentJson_t *content_json, bool_t enabled)
-{
-    if (content_json != NULL)
-    {
-        content_json->nocloud_manual = enabled;
-        content_json_refresh_nocloud(content_json);
-    }
-}
-
-void content_json_set_source_nocloud(contentJson_t *content_json, bool_t enabled)
-{
-    if (content_json != NULL)
-    {
-        content_json->nocloud_source = enabled;
-        content_json_refresh_nocloud(content_json);
-    }
-}
-
 error_t load_content_json(const char *content_path, contentJson_t *content_json, bool create_if_missing, settings_t *settings)
 {
     char *jsonPath = custom_asprintf("%s.json", content_path);
@@ -45,10 +18,7 @@ error_t load_content_json(const char *content_path, contentJson_t *content_json,
     osMemset(content_json, 0, sizeof(contentJson_t));
     content_json->live = false;
     content_json->nocloud = false;
-    content_json->nocloud_manual = false;
-    content_json->nocloud_source = false;
     content_json->source = NULL;
-    content_json->source_revision = 0;
     content_json->skip_seconds = 0;
     content_json->cache = false;
     content_json->_updated = false;
@@ -102,29 +72,9 @@ error_t load_content_json(const char *content_path, contentJson_t *content_json,
             else
             {
                 content_json->live = jsonGetBool(contentJson, "live");
-                bool_t legacy_nocloud = jsonGetBool(contentJson, "nocloud");
+                content_json->nocloud = jsonGetBool(contentJson, "nocloud");
                 content_json->source = jsonGetString(contentJson, "source");
                 content_json->_source_resolved = jsonGetString(contentJson, "source");
-                content_json->source_revision = jsonGetUInt32(contentJson, "source_revision");
-                cJSON *manual_nocloud = cJSON_GetObjectItemCaseSensitive(contentJson,
-                                                                         "nocloud_manual");
-                cJSON *source_nocloud = cJSON_GetObjectItemCaseSensitive(contentJson,
-                                                                         "nocloud_source");
-                if (cJSON_IsBool(manual_nocloud) && cJSON_IsBool(source_nocloud))
-                {
-                    content_json->nocloud_manual = cJSON_IsTrue(manual_nocloud);
-                    content_json->nocloud_source = cJSON_IsTrue(source_nocloud);
-                }
-                else
-                {
-                    /* Legacy files cannot distinguish provenance. A lock next to
-                     * an assigned source is the former automatic source lock. */
-                    content_json->nocloud_source = osStrlen(content_json->source) > 0;
-                    content_json->nocloud_manual = legacy_nocloud &&
-                                                   !content_json->nocloud_source;
-                    content_json->_updated = true;
-                }
-                content_json_refresh_nocloud(content_json);
                 content_json->skip_seconds = jsonGetUInt32(contentJson, "skip_seconds");
                 content_json->cache = jsonGetBool(contentJson, "cache");
                 content_json->cloud_ruid = jsonGetString(contentJson, "cloud_ruid");
@@ -200,10 +150,10 @@ error_t load_content_json(const char *content_path, contentJson_t *content_json,
                         else if (fsFileExists(content_json->_source_resolved) || osStrstr(content_json->_source_resolved, "://"))
                         {
                             content_json->_source_type = CT_SOURCE_STREAM;
-                            if (!content_json->live || !content_json->nocloud_source)
+                            if (!content_json->live || !content_json->nocloud)
                             {
                                 content_json->live = true;
-                                content_json_set_source_nocloud(content_json, true);
+                                content_json->nocloud = true;
                                 content_json->_updated = true;
                             }
                         }
@@ -267,12 +217,8 @@ error_t save_content_json(const char *json_path, contentJson_t *content_json)
     cJSON *contentJson = cJSON_CreateObject();
 
     cJSON_AddBoolToObject(contentJson, "live", content_json->live);
-    content_json_refresh_nocloud(content_json);
     cJSON_AddBoolToObject(contentJson, "nocloud", content_json->nocloud);
-    cJSON_AddBoolToObject(contentJson, "nocloud_manual", content_json->nocloud_manual);
-    cJSON_AddBoolToObject(contentJson, "nocloud_source", content_json->nocloud_source);
     jsonAddStringToObject(contentJson, "source", content_json->source);
-    cJSON_AddNumberToObject(contentJson, "source_revision", content_json->source_revision);
     cJSON_AddNumberToObject(contentJson, "skip_seconds", content_json->skip_seconds);
     cJSON_AddBoolToObject(contentJson, "cache", content_json->cache);
     jsonAddStringToObject(contentJson, "cloud_ruid", content_json->cloud_ruid);

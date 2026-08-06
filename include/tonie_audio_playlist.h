@@ -45,17 +45,6 @@ error_t tap_publish_taf_replace_safe(const char *tmp_taf, const char *final_taf)
  */
 error_t tap_materialize_final_snapshot(tonie_audio_playlist_t *tap, const char **final_taf_path);
 
-/**
- * Materialize a complete TAP snapshot using an already selected runtime order.
- *
- * This is used by the TB2 V3 path so shuffle selection is performed exactly
- * once and the same indices can be persisted with the generated metadata.
- */
-error_t tap_materialize_final_snapshot_selected(tonie_audio_playlist_t *tap,
-                                                size_t *runtime_indices,
-                                                size_t runtime_files_count,
-                                                const char **final_taf_path);
-
 error_t tap_prepare_runtime_indices(tonie_audio_playlist_t *tap, size_t **runtime_indices, size_t *runtime_files_count);
 void tap_free_runtime_indices(size_t *runtime_indices);
 error_t tap_predict_taf_live_header(tonie_audio_playlist_t *tap, size_t *runtime_indices, size_t runtime_files_count, toniefile_live_header_t *live_header, uint32_t *predicted_size);

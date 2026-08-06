@@ -47,13 +47,21 @@ class MqttNoCloudFilterContractTests(unittest.TestCase):
         self.assertNotIn("load_content_json", policy)
         self.assertIn("if (!fsFileExists(json_path))", policy)
         self.assertIn("tb2_nocloud_optional_bool", policy)
-        self.assertIn("policy->source_nocloud ||", policy)
-        self.assertIn("policy->manual_nocloud && !policy->cloud_override", policy)
+        self.assertIn("policy->nocloud && !policy->cloud_override", policy)
 
-        parser = policy
+        parser = self.policy
         self.assertIn("cJSON_ParseWithLengthOpts", parser)
         self.assertIn("parse_end != data_end", parser)
         self.assertIn("tb2_nocloud_json_space", parser)
+
+    def test_policy_uses_effective_overlay_without_new_source_lifecycle(self):
+        self.assertIn(
+            "policy->overlay_id = settings->internal.overlayNumber", self.policy
+        )
+        self.assertIn("TB2_RUID_SYSTEM", self.policy)
+        self.assertIn("policy->kind == TB2_RUID_CONTENT", self.policy)
+        self.assertNotIn("nocloud_manual", self.policy)
+        self.assertNotIn("nocloud_source", self.policy)
 
     def test_unique_ruids_are_cached_only_for_one_packet(self):
         lookup = self.function(

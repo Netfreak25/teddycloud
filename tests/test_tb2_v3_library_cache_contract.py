@@ -15,28 +15,11 @@ class Tb2V3LibraryCacheContractTests(unittest.TestCase):
         cls.source = (ROOT / "src/v3_native_cache.c").read_text(encoding="utf-8")
         cls.handler = (ROOT / "src/handler_cloud.c").read_text(encoding="utf-8")
         cls.api = (ROOT / "src/handler_api.c").read_text(encoding="utf-8")
-        cls.server = (ROOT / "src/server.c").read_text(encoding="utf-8")
         cls.settings = (ROOT / "src/settings.c").read_text(encoding="utf-8")
         cls.settings_header = (ROOT / "include/settings.h").read_text(encoding="utf-8")
         cls.columns = (
             ROOT
             / "teddycloud_web/src/components/tonies/filebrowser/helper/Columns.tsx"
-        ).read_text(encoding="utf-8")
-        cls.browser = (
-            ROOT / "teddycloud_web/src/components/tonies/filebrowser/FileBrowser.tsx"
-        ).read_text(encoding="utf-8")
-        cls.audio_provider = (
-            ROOT / "teddycloud_web/src/provider/AudioProvider.tsx"
-        ).read_text(encoding="utf-8")
-        cls.audio_page = (
-            ROOT / "teddycloud_web/src/pages/tonies/TeddyAudioPlayerPage.tsx"
-        ).read_text(encoding="utf-8")
-        cls.audio_player = (
-            ROOT
-            / "teddycloud_web/src/components/tonies/teddyaudioplayer/elements/AudioPlayer.tsx"
-        ).read_text(encoding="utf-8")
-        cls.native_web = (
-            ROOT / "teddycloud_web/src/utils/audio/nativeCollection.ts"
         ).read_text(encoding="utf-8")
         cls.docs = (ROOT / "docs/TB2_V3_CONTENT_CACHE.md").read_text(encoding="utf-8")
 
@@ -171,7 +154,7 @@ class Tb2V3LibraryCacheContractTests(unittest.TestCase):
         )
         replay = meta_handler.index("v3_native_cache_read_active_manifest(")
         self.assertIn(
-            "v3_native_import_library_if_enabled(client_ctx, ruid)",
+            "v3_native_import_library_if_enabled(client_ctx, canonical_ruid)",
             meta_handler[replay : replay + 1800],
         )
 
@@ -180,75 +163,6 @@ class Tb2V3LibraryCacheContractTests(unittest.TestCase):
         self.assertIn('!osStrcmp(special, "library")', self.api)
         self.assertIn("if (record.tafHeader && handleEditTafMetaDataClick)", self.columns)
         self.assertIn("special !== \"library\"", self.columns)
-
-    def test_complete_collections_are_grouped_with_ordered_manifest_metadata(self) -> None:
-        index = self.section(
-            self.api,
-            "error_t handleApiFileIndexV2(",
-            "error_t handleApiFileIndex(",
-        )
-        for marker in (
-            '"entryKind"',
-            '"tb2_native_collection"',
-            '"manifestPath"',
-            '"chapters"',
-            '"originalName"',
-            '"sha256"',
-            '"fileSize"',
-            '"totalSize"',
-        ):
-            self.assertIn(marker, index)
-        self.assertIn("v3_native_library_collection_load(\n                                                 rootPath, source, FALSE", index)
-
-    def test_native_delete_is_hash_scoped_and_preserves_v3_cache(self) -> None:
-        self.assertIn('"/api/library/native/delete"', self.server)
-        endpoint = self.section(
-            self.api,
-            "error_t handleApiNativeLibraryDelete(",
-            "static bool_t api_get_box_control_overlay(",
-        )
-        self.assertIn('"contentHash"', endpoint)
-        self.assertIn("v3_native_library_source_is_candidate", endpoint)
-        deletion = self.section(
-            self.source,
-            "error_t v3_native_library_collection_delete(",
-            "static uint32_t v3_native_library_audio_id(",
-        )
-        self.assertIn("V3_NATIVE_LIBRARY_CONTENT_HASH_DIR", deletion)
-        self.assertIn("tb1-native-library", deletion)
-        self.assertIn("v3_native_remove_tree(collection_dir)", deletion)
-        self.assertNotIn("V3_NATIVE_CACHE_DIR", deletion)
-        self.assertNotIn("v3_native_cache_invalidate", deletion)
-
-    def test_webui_keeps_collection_actions_and_details_read_only(self) -> None:
-        native_actions = self.section(
-            self.columns,
-            'if (mode === "full" && record.nativeCollection)',
-            "if (\n                !record.isDir",
-        )
-        for marker in (
-            "FolderOpenOutlined",
-            "PlayCircleOutlined",
-            "DownloadOutlined",
-            "DeleteOutlined",
-        ):
-            self.assertIn(marker, native_actions)
-        self.assertIn("isNativeCollectionDetail", self.browser)
-        self.assertIn("showRenameDialog: isNativeCollectionDetail ? undefined", self.browser)
-        self.assertIn("showMoveDialog: isNativeCollectionDetail ? undefined", self.browser)
-        self.assertIn("showDeleteConfirmDialog: isNativeCollectionDetail ? undefined", self.browser)
-        self.assertIn("isNativeCollectionRecord(record)", self.browser)
-
-    def test_zip_and_players_use_immutable_chapter_sources(self) -> None:
-        self.assertIn('compression: "STORE"', self.native_web)
-        self.assertIn('root.file("library-entry.json"', self.native_web)
-        self.assertIn("for (const chapter of collection.chapters)", self.native_web)
-        self.assertIn("playPlaybackItem", self.audio_provider)
-        self.assertIn('item.kind !== "tb2_native_collection"', self.audio_provider)
-        self.assertIn("nativeCollectionToPlaybackItem", self.audio_page)
-        self.assertIn("contentHash", self.audio_page)
-        self.assertIn('playbackItem.kind === "tb2_native_collection"', self.audio_player)
-        self.assertIn('audio.addEventListener("ended", onEnded)', self.audio_player)
 
     def test_documentation_covers_import_failures_and_physical_layout(self) -> None:
         normalized_docs = " ".join(self.docs.split())

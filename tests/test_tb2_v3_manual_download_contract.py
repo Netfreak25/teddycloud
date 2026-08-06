@@ -45,6 +45,11 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
         self.assertIn("identity.auth", self.manual)
         self.assertGreaterEqual(self.manual.count("cloud_request_tb2_get("), 2)
 
+    def test_existing_source_and_nocloud_policy_remain_authoritative(self):
+        self.assertIn("content->nocloud", self.manual)
+        self.assertIn("content->source", self.manual)
+        self.assertNotIn("tb2_nocloud_policy", self.manual)
+
     def test_manifest_and_chapters_reuse_native_cache_pipeline(self):
         for marker in (
             "v3_native_cache_meta_capture_init",

@@ -12,8 +12,6 @@ typedef struct
     char ruid[TB2_RUID_SIZE];
     tb2_ruid_kind_t kind;
     bool_t metadata_exists;
-    bool_t manual_nocloud;
-    bool_t source_nocloud;
     bool_t nocloud;
     bool_t cloud_override;
 } tb2_nocloud_policy_t;

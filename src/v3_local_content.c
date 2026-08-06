@@ -9,7 +9,6 @@
 #include "cJSON.h"
 #include "fs_ext.h"
 #include "fs_port_config.h"
-#include "mutex_manager.h"
 #include "ogg/ogg.h"
 #include "opus.h"
 #include "os_port.h"
@@ -18,14 +17,12 @@
 
 #define V3_LOCAL_CONTENT_CACHE_DIR "v3-local"
 #define V3_LOCAL_CONTENT_GENERATIONS_DIR "generations"
-#define V3_LOCAL_CONTENT_TAP_STATE_DIR "tap-state"
 #define V3_LOCAL_CONTENT_TEMP_ATTEMPTS 8
 #define V3_LOCAL_CONTENT_OGG_HEADER_SIZE 27
 #define V3_LOCAL_CONTENT_OGG_MAX_SEGMENTS 255
 #define V3_LOCAL_CONTENT_OGG_MAX_PAGE_BODY (255 * 255)
 #define V3_LOCAL_CONTENT_DESCRIPTOR_MAX_SIZE (TONIEFILE_MAX_CHAPTERS * 1024 + 4096)
 #define V3_LOCAL_CONTENT_OGG_SERIAL_NAMESPACE 0x54430000U
-#define V3_LOCAL_CONTENT_TAP_OGG_SERIAL 0x54415031U
 #define V3_LOCAL_CONTENT_OPUS_HEAD_PRESKIP_OFFSET 10U
 #define V3_LOCAL_CONTENT_OPUS_HEAD_PRESKIP_SIZE 2U
 
@@ -201,6 +198,26 @@ static void v3_local_headers_free(v3_local_headers_t *headers)
     osMemset(headers, 0, sizeof(*headers));
 }
 
+static bool_t v3_local_normalize_ruid(const char *ruid, char canonical[V3_LOCAL_CONTENT_RUID_SIZE])
+{
+    if (ruid == NULL || osStrlen(ruid) != V3_LOCAL_CONTENT_RUID_HEX_LENGTH)
+    {
+        return FALSE;
+    }
+
+    for (size_t i = 0; i < V3_LOCAL_CONTENT_RUID_HEX_LENGTH; i++)
+    {
+        unsigned char value = (unsigned char)ruid[i];
+        if (!isxdigit(value))
+        {
+            return FALSE;
+        }
+        canonical[i] = (char)toupper(value);
+    }
+    canonical[V3_LOCAL_CONTENT_RUID_HEX_LENGTH] = '\0';
+    return TRUE;
+}
+
 static void v3_local_digest_to_hex(const uint8_t digest[SHA256_DIGEST_SIZE], char hex[V3_LOCAL_CONTENT_SHA256_HEX_SIZE])
 {
     static const char digits[] = "0123456789abcdef";
@@ -275,23 +292,6 @@ static bool_t v3_local_json_size(const cJSON *item, size_t maximum, size_t *valu
     return TRUE;
 }
 
-static bool_t v3_local_string_valid(const char *value, size_t maximum)
-{
-    if (value == NULL || osStrlen(value) > maximum)
-    {
-        return FALSE;
-    }
-    for (const unsigned char *cursor = (const unsigned char *)value;
-         *cursor != '\0'; cursor++)
-    {
-        if (*cursor < 0x20)
-        {
-            return FALSE;
-        }
-    }
-    return TRUE;
-}
-
 static char *v3_local_object_path(const char *cache_root, const char *sha256_hex)
 {
     return v3_local_format_alloc("%s%c%s%c%s.opus",
@@ -324,24 +324,6 @@ static char *v3_local_descriptor_path(const char *descriptor_dir, uint32_t effec
                                  descriptor_dir,
                                  PATH_SEPARATOR,
                                  effective_version);
-}
-
-static char *v3_local_tap_state_dir(const char *cache_root, uint8_t overlay_id)
-{
-    return v3_local_format_alloc("%s%c%s%c%s%c%" PRIu8,
-                                 cache_root,
-                                 PATH_SEPARATOR,
-                                 V3_LOCAL_CONTENT_CACHE_DIR,
-                                 PATH_SEPARATOR,
-                                 V3_LOCAL_CONTENT_TAP_STATE_DIR,
-                                 PATH_SEPARATOR,
-                                 overlay_id);
-}
-
-static char *v3_local_tap_state_path(const char *state_dir, const char *canonical_ruid)
-{
-    return v3_local_format_alloc("%s%c%s.json", state_dir, PATH_SEPARATOR,
-                                 canonical_ruid);
 }
 
 static error_t v3_local_ensure_dir(const char *path)
@@ -382,11 +364,10 @@ static error_t v3_local_validate_object(const char *cache_root,
                                  chapter->index,
                                  canonical_ruid);
     if (name_length < 0 || (size_t)name_length >= sizeof(expected_name) ||
-        osStrcasecmp(expected_name, chapter->name) != 0)
+        osStrcmp(expected_name, chapter->name) != 0)
     {
         return ERROR_INVALID_FILE;
     }
-    osStrcpy(chapter->name, expected_name);
 
     char *expected_path = v3_local_object_path(cache_root, digest_hex);
     if (expected_path == NULL)
@@ -1032,19 +1013,18 @@ static error_t v3_local_validate_taf(const char *taf_path,
     return *chapter_count > 0 ? NO_ERROR : ERROR_INVALID_FILE;
 }
 
-static error_t v3_local_content_prepare_internal(const char *taf_path,
-                                                 const TonieboxAudioFileHeader *taf_header,
-                                                 const char *cache_root,
-                                                 const char *ruid,
-                                                 bool_t tap_serial,
-                                                 v3_local_content_generation_t *generation)
+error_t v3_local_content_prepare(const char *taf_path,
+                                 const TonieboxAudioFileHeader *taf_header,
+                                 const char *cache_root,
+                                 const char *ruid,
+                                 v3_local_content_generation_t *generation)
 {
     if (cache_root == NULL || cache_root[0] == '\0' || generation == NULL)
     {
         return ERROR_INVALID_PARAMETER;
     }
     osMemset(generation, 0, sizeof(*generation));
-    if (!tb2_ruid_canonicalize(ruid, generation->ruid))
+    if (!v3_local_normalize_ruid(ruid, generation->ruid))
     {
         return ERROR_INVALID_PARAMETER;
     }
@@ -1115,8 +1095,7 @@ static error_t v3_local_content_prepare_internal(const char *taf_path,
                                            start,
                                            end,
                                            i,
-                                           tap_serial ? V3_LOCAL_CONTENT_TAP_OGG_SERIAL
-                                                      : v3_local_chapter_serial(i),
+                                           v3_local_chapter_serial(i),
                                            prepared[i].temp_path,
                                            &headers,
                                            &prepared[i].descriptor);
@@ -1185,32 +1164,6 @@ static error_t v3_local_content_prepare_internal(const char *taf_path,
     return error;
 }
 
-error_t v3_local_content_prepare(const char *taf_path,
-                                 const TonieboxAudioFileHeader *taf_header,
-                                 const char *cache_root,
-                                 const char *ruid,
-                                 v3_local_content_generation_t *generation)
-{
-    return v3_local_content_prepare_internal(taf_path, taf_header, cache_root,
-                                             ruid, FALSE, generation);
-}
-
-error_t v3_local_content_prepare_tap(const char *taf_path,
-                                     const TonieboxAudioFileHeader *taf_header,
-                                     const char *cache_root,
-                                     const char *ruid,
-                                     v3_local_content_generation_t *generation)
-{
-    error_t error = v3_local_content_prepare_internal(taf_path, taf_header,
-                                                      cache_root, ruid, TRUE,
-                                                      generation);
-    if (error == NO_ERROR)
-    {
-        generation->source_kind = V3_LOCAL_CONTENT_SOURCE_TAP;
-    }
-    return error;
-}
-
 void v3_local_content_generation_free(v3_local_content_generation_t *generation)
 {
     if (generation == NULL)
@@ -1220,11 +1173,8 @@ void v3_local_content_generation_free(v3_local_content_generation_t *generation)
     for (size_t i = 0; i < generation->chapter_count; i++)
     {
         osFreeMem(generation->chapters[i].path);
-        osFreeMem(generation->chapters[i].title);
     }
     osFreeMem(generation->chapters);
-    osFreeMem(generation->source_path);
-    osFreeMem(generation->title);
     osMemset(generation, 0, sizeof(*generation));
 }
 
@@ -1256,7 +1206,7 @@ static error_t v3_local_validate_generation(const char *cache_root,
     }
 
     char canonical_ruid[V3_LOCAL_CONTENT_RUID_SIZE];
-    if (!tb2_ruid_canonicalize(generation->ruid, canonical_ruid) ||
+    if (!v3_local_normalize_ruid(generation->ruid, canonical_ruid) ||
         osStrcmp(generation->ruid, canonical_ruid) != 0)
     {
         return ERROR_INVALID_PARAMETER;
@@ -1274,25 +1224,6 @@ static error_t v3_local_validate_generation(const char *cache_root,
         if (error != NO_ERROR)
         {
             return error;
-        }
-    }
-    if (generation->source_kind == V3_LOCAL_CONTENT_SOURCE_TAP)
-    {
-        if (!v3_local_string_valid(generation->source_path,
-                                   V3_LOCAL_CONTENT_SOURCE_PATH_MAX) ||
-            !v3_local_string_valid(generation->title,
-                                   V3_LOCAL_CONTENT_TITLE_MAX) ||
-            generation->shuffle_mode > 2)
-        {
-            return ERROR_INVALID_FILE;
-        }
-        for (size_t i = 0; i < generation->chapter_count; i++)
-        {
-            if (!v3_local_string_valid(generation->chapters[i].title,
-                                       V3_LOCAL_CONTENT_TITLE_MAX))
-            {
-                return ERROR_INVALID_FILE;
-            }
         }
     }
     return NO_ERROR;
@@ -1315,20 +1246,6 @@ static cJSON *v3_local_generation_to_json(uint8_t overlay_id,
         return NULL;
     }
 
-    if (generation->source_kind == V3_LOCAL_CONTENT_SOURCE_TAP)
-    {
-        if (cJSON_AddStringToObject(root, "sourceKind", "tap") == NULL ||
-            cJSON_AddStringToObject(root, "sourcePath", generation->source_path) == NULL ||
-            cJSON_AddStringToObject(root, "title", generation->title) == NULL ||
-            cJSON_AddNumberToObject(root, "tapAudioId", generation->tap_audio_id) == NULL ||
-            cJSON_AddNumberToObject(root, "shuffleMode", generation->shuffle_mode) == NULL ||
-            cJSON_AddNumberToObject(root, "selectionGeneration", generation->selection_generation) == NULL)
-        {
-            cJSON_Delete(root);
-            return NULL;
-        }
-    }
-
     for (size_t i = 0; i < generation->chapter_count; i++)
     {
         const v3_local_content_chapter_t *chapter = &generation->chapters[i];
@@ -1338,10 +1255,6 @@ static cJSON *v3_local_generation_to_json(uint8_t overlay_id,
             cJSON_AddStringToObject(entry, "name", chapter->name) == NULL ||
             cJSON_AddStringToObject(entry, "sha256", chapter->sha256_hex) == NULL ||
             cJSON_AddNumberToObject(entry, "fileSize", chapter->file_size) == NULL ||
-            (generation->source_kind == V3_LOCAL_CONTENT_SOURCE_TAP &&
-             (cJSON_AddNumberToObject(entry, "sourceIndex", chapter->source_index) == NULL ||
-              cJSON_AddStringToObject(entry, "title", chapter->title) == NULL ||
-              cJSON_AddNumberToObject(entry, "duration", chapter->duration_seconds) == NULL)) ||
             !cJSON_AddItemToArray(chapters, entry))
         {
             cJSON_Delete(entry);
@@ -1536,55 +1449,15 @@ static error_t v3_local_generation_from_json(const char *cache_root,
     const cJSON *ruid_json = cJSON_GetObjectItemCaseSensitive(root, "ruid");
     const cJSON *version_json = cJSON_GetObjectItemCaseSensitive(root, "effectiveVersion");
     const cJSON *chapters_json = cJSON_GetObjectItemCaseSensitive(root, "chapters");
-    const cJSON *source_kind_json = cJSON_GetObjectItemCaseSensitive(root, "sourceKind");
-    char stored_canonical_ruid[V3_LOCAL_CONTENT_RUID_SIZE];
     if (!cJSON_IsObject(root) ||
         !v3_local_json_u32(schema_json, &schema) || schema != V3_LOCAL_CONTENT_DESCRIPTOR_SCHEMA_VERSION ||
         !v3_local_json_u32(overlay_json, &stored_overlay) || stored_overlay != overlay_id ||
         !cJSON_IsString(ruid_json) || ruid_json->valuestring == NULL ||
-        !tb2_ruid_canonicalize(ruid_json->valuestring, stored_canonical_ruid) ||
-        osStrcmp(stored_canonical_ruid, canonical_ruid) != 0 ||
+        osStrcmp(ruid_json->valuestring, canonical_ruid) != 0 ||
         !v3_local_json_u32(version_json, &stored_version) || stored_version != effective_version ||
         !cJSON_IsArray(chapters_json))
     {
         return ERROR_INVALID_FILE;
-    }
-
-    generation->source_kind = V3_LOCAL_CONTENT_SOURCE_DIRECT_TAF;
-    if (source_kind_json != NULL)
-    {
-        uint32_t tap_audio_id = 0;
-        uint32_t shuffle_mode = 0;
-        uint32_t selection_generation = 0;
-        const cJSON *source_path_json = cJSON_GetObjectItemCaseSensitive(root, "sourcePath");
-        const cJSON *title_json = cJSON_GetObjectItemCaseSensitive(root, "title");
-        const cJSON *tap_audio_id_json = cJSON_GetObjectItemCaseSensitive(root, "tapAudioId");
-        const cJSON *shuffle_json = cJSON_GetObjectItemCaseSensitive(root, "shuffleMode");
-        const cJSON *selection_json = cJSON_GetObjectItemCaseSensitive(root, "selectionGeneration");
-        if (!cJSON_IsString(source_kind_json) || source_kind_json->valuestring == NULL ||
-            osStrcmp(source_kind_json->valuestring, "tap") != 0 ||
-            !cJSON_IsString(source_path_json) ||
-            !v3_local_string_valid(source_path_json->valuestring,
-                                   V3_LOCAL_CONTENT_SOURCE_PATH_MAX) ||
-            !cJSON_IsString(title_json) ||
-            !v3_local_string_valid(title_json->valuestring,
-                                   V3_LOCAL_CONTENT_TITLE_MAX) ||
-            !v3_local_json_u32(tap_audio_id_json, &tap_audio_id) ||
-            !v3_local_json_u32(shuffle_json, &shuffle_mode) || shuffle_mode > 2 ||
-            !v3_local_json_u32(selection_json, &selection_generation))
-        {
-            return ERROR_INVALID_FILE;
-        }
-        generation->source_path = strdup(source_path_json->valuestring);
-        generation->title = strdup(title_json->valuestring);
-        if (generation->source_path == NULL || generation->title == NULL)
-        {
-            return ERROR_OUT_OF_MEMORY;
-        }
-        generation->source_kind = V3_LOCAL_CONTENT_SOURCE_TAP;
-        generation->tap_audio_id = tap_audio_id;
-        generation->shuffle_mode = (uint8_t)shuffle_mode;
-        generation->selection_generation = selection_generation;
     }
 
     int chapter_count = cJSON_GetArraySize(chapters_json);
@@ -1623,32 +1496,6 @@ static error_t v3_local_generation_from_json(const char *cache_root,
             return ERROR_INVALID_FILE;
         }
 
-        if (generation->source_kind == V3_LOCAL_CONTENT_SOURCE_TAP)
-        {
-            size_t source_index = 0;
-            uint32_t duration = 0;
-            const cJSON *source_index_json = cJSON_GetObjectItemCaseSensitive(entry, "sourceIndex");
-            const cJSON *title_json = cJSON_GetObjectItemCaseSensitive(entry, "title");
-            const cJSON *duration_json = cJSON_GetObjectItemCaseSensitive(entry, "duration");
-            if (!v3_local_json_size(source_index_json,
-                                    UINT32_MAX,
-                                    &source_index) ||
-                !cJSON_IsString(title_json) ||
-                !v3_local_string_valid(title_json->valuestring,
-                                       V3_LOCAL_CONTENT_TITLE_MAX) ||
-                !v3_local_json_u32(duration_json, &duration))
-            {
-                return ERROR_INVALID_FILE;
-            }
-            chapter->source_index = source_index;
-            chapter->duration_seconds = duration;
-            chapter->title = strdup(title_json->valuestring);
-            if (chapter->title == NULL)
-            {
-                return ERROR_OUT_OF_MEMORY;
-            }
-        }
-
         chapter->index = index;
         chapter->file_size = file_size;
         osStrcpy(chapter->name, name_json->valuestring);
@@ -1682,7 +1529,7 @@ error_t v3_local_content_generation_load(const char *cache_root,
     osMemset(generation, 0, sizeof(*generation));
 
     char canonical_ruid[V3_LOCAL_CONTENT_RUID_SIZE];
-    if (!tb2_ruid_canonicalize(ruid, canonical_ruid))
+    if (!v3_local_normalize_ruid(ruid, canonical_ruid))
     {
         return ERROR_INVALID_PARAMETER;
     }
@@ -1724,177 +1571,5 @@ error_t v3_local_content_generation_load(const char *cache_root,
     osFreeMem(data);
     osFreeMem(descriptor_path);
     osFreeMem(descriptor_dir);
-    return error;
-}
-
-error_t v3_local_tap_state_load(const char *cache_root,
-                                uint8_t overlay_id,
-                                const char *ruid,
-                                v3_local_tap_state_t *state)
-{
-    if (cache_root == NULL || cache_root[0] == '\0' || state == NULL)
-    {
-        return ERROR_INVALID_PARAMETER;
-    }
-    osMemset(state, 0, sizeof(*state));
-
-    char canonical_ruid[V3_LOCAL_CONTENT_RUID_SIZE];
-    if (!tb2_ruid_canonicalize(ruid, canonical_ruid))
-    {
-        return ERROR_INVALID_PARAMETER;
-    }
-
-    char *state_dir = v3_local_tap_state_dir(cache_root, overlay_id);
-    char *state_path = state_dir != NULL
-                           ? v3_local_tap_state_path(state_dir, canonical_ruid)
-                           : NULL;
-    char *data = NULL;
-    uint32_t data_size = 0;
-    error_t error = state_path == NULL
-                        ? ERROR_OUT_OF_MEMORY
-                        : v3_local_read_descriptor(state_path, &data, &data_size);
-    cJSON *json = NULL;
-    if (error == NO_ERROR)
-    {
-        const char *parse_end = NULL;
-        json = cJSON_ParseWithLengthOpts(data, data_size, &parse_end, FALSE);
-        if (!cJSON_IsObject(json) || parse_end != data + data_size)
-        {
-            error = ERROR_INVALID_FILE;
-        }
-    }
-
-    uint32_t schema = 0;
-    uint32_t stored_overlay = 0;
-    uint32_t shuffle_mode = 0;
-    if (error == NO_ERROR)
-    {
-        const cJSON *stored_ruid = cJSON_GetObjectItemCaseSensitive(json, "ruid");
-        char stored_canonical_ruid[V3_LOCAL_CONTENT_RUID_SIZE];
-        if (!v3_local_json_u32(cJSON_GetObjectItemCaseSensitive(json, "schema"), &schema) || schema != 1 ||
-            !v3_local_json_u32(cJSON_GetObjectItemCaseSensitive(json, "overlay"), &stored_overlay) || stored_overlay != overlay_id ||
-            !cJSON_IsString(stored_ruid) || stored_ruid->valuestring == NULL ||
-            !tb2_ruid_canonicalize(stored_ruid->valuestring, stored_canonical_ruid) ||
-            osStrcmp(stored_canonical_ruid, canonical_ruid) != 0 ||
-            !v3_local_json_u32(cJSON_GetObjectItemCaseSensitive(json, "tapAudioId"), &state->tap_audio_id) ||
-            !v3_local_json_u32(cJSON_GetObjectItemCaseSensitive(json, "shuffleMode"), &shuffle_mode) || shuffle_mode > 2 ||
-            !v3_local_json_u32(cJSON_GetObjectItemCaseSensitive(json, "selectionGeneration"), &state->selection_generation) ||
-            !v3_local_json_u32(cJSON_GetObjectItemCaseSensitive(json, "desiredVersion"), &state->desired_version) ||
-            !v3_local_json_u32(cJSON_GetObjectItemCaseSensitive(json, "preparedVersion"), &state->prepared_version) ||
-            !v3_local_json_u32(cJSON_GetObjectItemCaseSensitive(json, "playingVersion"), &state->playing_version) ||
-            !v3_local_json_u32(cJSON_GetObjectItemCaseSensitive(json, "previousVersion"), &state->previous_version) ||
-            !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(json, "regenerationPending")))
-        {
-            error = ERROR_INVALID_FILE;
-        }
-        else
-        {
-            state->shuffle_mode = (uint8_t)shuffle_mode;
-            state->regeneration_pending = cJSON_IsTrue(
-                cJSON_GetObjectItemCaseSensitive(json, "regenerationPending"));
-            state->valid = state->prepared_version != 0;
-            if (!state->valid)
-            {
-                error = ERROR_INVALID_FILE;
-            }
-        }
-    }
-
-    if (error != NO_ERROR)
-    {
-        osMemset(state, 0, sizeof(*state));
-    }
-    cJSON_Delete(json);
-    osFreeMem(data);
-    osFreeMem(state_path);
-    osFreeMem(state_dir);
-    return error;
-}
-
-error_t v3_local_tap_state_save(const char *cache_root,
-                                uint8_t overlay_id,
-                                const char *ruid,
-                                const v3_local_tap_state_t *state)
-{
-    char canonical_ruid[V3_LOCAL_CONTENT_RUID_SIZE];
-    if (cache_root == NULL || cache_root[0] == '\0' || state == NULL ||
-        !state->valid || state->prepared_version == 0 ||
-        state->shuffle_mode > 2 ||
-        !tb2_ruid_canonicalize(ruid, canonical_ruid))
-    {
-        return ERROR_INVALID_PARAMETER;
-    }
-
-    char *state_dir = v3_local_tap_state_dir(cache_root, overlay_id);
-    char *state_path = state_dir != NULL
-                           ? v3_local_tap_state_path(state_dir, canonical_ruid)
-                           : NULL;
-    char *temp_path = state_path != NULL
-                          ? v3_local_format_alloc("%s.tmp", state_path)
-                          : NULL;
-    error_t error = state_dir == NULL || state_path == NULL || temp_path == NULL
-                        ? ERROR_OUT_OF_MEMORY
-                        : v3_local_ensure_dir(state_dir);
-    cJSON *json = NULL;
-    char *serialized = NULL;
-    if (error == NO_ERROR)
-    {
-        json = cJSON_CreateObject();
-        if (json == NULL ||
-            cJSON_AddNumberToObject(json, "schema", 1) == NULL ||
-            cJSON_AddNumberToObject(json, "overlay", overlay_id) == NULL ||
-            cJSON_AddStringToObject(json, "ruid", canonical_ruid) == NULL ||
-            cJSON_AddNumberToObject(json, "tapAudioId", state->tap_audio_id) == NULL ||
-            cJSON_AddNumberToObject(json, "shuffleMode", state->shuffle_mode) == NULL ||
-            cJSON_AddNumberToObject(json, "selectionGeneration", state->selection_generation) == NULL ||
-            cJSON_AddNumberToObject(json, "desiredVersion", state->desired_version) == NULL ||
-            cJSON_AddNumberToObject(json, "preparedVersion", state->prepared_version) == NULL ||
-            cJSON_AddNumberToObject(json, "playingVersion", state->playing_version) == NULL ||
-            cJSON_AddNumberToObject(json, "previousVersion", state->previous_version) == NULL ||
-            cJSON_AddBoolToObject(json, "regenerationPending", state->regeneration_pending) == NULL)
-        {
-            error = ERROR_OUT_OF_MEMORY;
-        }
-    }
-    if (error == NO_ERROR)
-    {
-        serialized = cJSON_PrintUnformatted(json);
-        if (serialized == NULL)
-        {
-            error = ERROR_OUT_OF_MEMORY;
-        }
-    }
-    if (error == NO_ERROR)
-    {
-        mutex_lock_id(state_path);
-        FsFile *file = fsOpenFile(temp_path,
-                                  FS_FILE_MODE_WRITE | FS_FILE_MODE_CREATE | FS_FILE_MODE_TRUNC);
-        error = file != NULL
-                    ? fsWriteFile(file, serialized, osStrlen(serialized))
-                    : ERROR_FILE_OPENING_FAILED;
-        if (file != NULL)
-        {
-            if (error == NO_ERROR)
-            {
-                error = fsFlushFile(file);
-            }
-            fsCloseFile(file);
-        }
-        if (error == NO_ERROR)
-        {
-            error = fsMoveFile(temp_path, state_path, TRUE);
-        }
-        if (error != NO_ERROR && fsFileExists(temp_path))
-        {
-            fsDeleteFile(temp_path);
-        }
-        mutex_unlock_id(state_path);
-    }
-
-    cJSON_free(serialized);
-    cJSON_Delete(json);
-    osFreeMem(temp_path);
-    osFreeMem(state_path);
-    osFreeMem(state_dir);
     return error;
 }

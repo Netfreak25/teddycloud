@@ -43,8 +43,6 @@ bool_t tb2_nocloud_policy_from_content(settings_t *settings,
     policy->metadata_exists = content != NULL;
     if (content != NULL)
     {
-        policy->manual_nocloud = content->nocloud_manual;
-        policy->source_nocloud = content->nocloud_source;
         policy->nocloud = content->nocloud;
         policy->cloud_override = content->cloud_override;
     }
@@ -127,16 +125,12 @@ static bool_t tb2_nocloud_read_file(const char *path, char **data,
 }
 
 static bool_t tb2_nocloud_optional_bool(const cJSON *root, const char *name,
-                                        bool_t *value, bool_t *found)
+                                        bool_t *value)
 {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, name);
     if (item == NULL)
     {
         *value = FALSE;
-        if (found != NULL)
-        {
-            *found = FALSE;
-        }
         return TRUE;
     }
     if (!cJSON_IsBool(item))
@@ -144,10 +138,6 @@ static bool_t tb2_nocloud_optional_bool(const cJSON *root, const char *name,
         return FALSE;
     }
     *value = cJSON_IsTrue(item);
-    if (found != NULL)
-    {
-        *found = TRUE;
-    }
     return TRUE;
 }
 
@@ -193,31 +183,11 @@ bool_t tb2_nocloud_policy_resolve(settings_t *settings,
 
     cJSON *json = tb2_nocloud_parse_json(data, length);
     osFreeMem(data);
-    bool_t legacy_nocloud = FALSE;
-    bool_t manual_found = FALSE;
-    bool_t source_found = FALSE;
-    const cJSON *source = cJSON_IsObject(json)
-                              ? cJSON_GetObjectItemCaseSensitive(json, "source")
-                              : NULL;
-    bool_t source_configured = cJSON_IsString(source) && source->valuestring != NULL &&
-                               source->valuestring[0] != '\0';
     bool_t valid = cJSON_IsObject(json) &&
                    tb2_nocloud_optional_bool(json, "nocloud",
-                                             &legacy_nocloud, NULL) &&
-                   tb2_nocloud_optional_bool(json, "nocloud_manual",
-                                             &policy->manual_nocloud,
-                                             &manual_found) &&
-                   tb2_nocloud_optional_bool(json, "nocloud_source",
-                                             &policy->source_nocloud,
-                                             &source_found) &&
+                                             &policy->nocloud) &&
                    tb2_nocloud_optional_bool(json, "cloud_override",
-                                             &policy->cloud_override, NULL);
-    if (valid && (!manual_found || !source_found))
-    {
-        policy->source_nocloud = source_configured;
-        policy->manual_nocloud = legacy_nocloud && !source_configured;
-    }
-    policy->nocloud = policy->manual_nocloud || policy->source_nocloud;
+                                             &policy->cloud_override);
     cJSON_Delete(json);
     return valid;
 }
@@ -225,6 +195,5 @@ bool_t tb2_nocloud_policy_resolve(settings_t *settings,
 bool_t tb2_nocloud_policy_blocks_upstream(const tb2_nocloud_policy_t *policy)
 {
     return policy != NULL && policy->kind == TB2_RUID_CONTENT &&
-           (policy->source_nocloud ||
-            (policy->manual_nocloud && !policy->cloud_override));
+           policy->nocloud && !policy->cloud_override;
 }

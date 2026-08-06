@@ -651,57 +651,15 @@
                     },
                     "title": "Plugins TeddyCloud"
                 },
-                "15tb2Management": {
+                "15tb2V3": {
                     "items": {
-                        "01registration": "reconnaître automatiquement les appareils Toniebox 2 et les gérer avec des réglages individuels",
-                        "02liveState": "afficher la lecture, le volume, la batterie, les écouteurs et d'autres états en direct",
-                        "03liveControls": "contrôler directement la lecture, le volume, le ping, l'heure du coucher et d'autres fonctions de la boîte",
-                        "04generationSettings": "séparer clairement les réglages et certificats en Global, TB1 et TB2"
+                        "01mitm": "Chemin cloud TB2 V3 sensible au contenu pour TONIES",
+                        "02cache": "Mise en cache atomique des manifestes TB2 et chapitres Ogg/Opus d'origine",
+                        "03library": "Collections TB2 natives dédupliquées dans la bibliothèque commune",
+                        "04source": "Collections natives comme source de contenu pour TB1 et TB2",
+                        "05mqtt": "Observer, filtrer et contrôler facultativement TB2 via ICI MQTT"
                     },
-                    "title": "Gérer les appareils Toniebox 2"
-                },
-                "16tb2Content": {
-                    "items": {
-                        "01v3Routing": "chemin cloud V3 conscient du contenu avec source de vérité locale et contrôle NoCloud",
-                        "02nativeCache": "mettre en cache les manifestes TONIES originaux et les chapitres Ogg/Opus avec activation atomique des versions",
-                        "03customContent": "distribuer le contenu TAF privé à TB2 sous forme de chapitres Ogg/Opus autonomes et sûrs pour le cache",
-                        "04freshness": "actualiser le contenu modifié via la freshness HTTPS et des notifications MQTT QoS 1 fiables",
-                        "05download": "télécharger le contenu original via V1/V2 ou V3 selon la génération de la boîte",
-                        "06library": "importer nativement le contenu original TB2 complet dans la bibliothèque avec déduplication par contenu"
-                    },
-                    "title": "Distribution native de contenu TB2"
-                },
-                "17iciMqtt": {
-                    "items": {
-                        "01serverAndUpstream": "serveur MQTT TLS intégré avec relais ICI transparent optionnel",
-                        "02observer": "observer localement les claims, la lecture, le volume, les réglages, les métriques et l'état de la boîte",
-                        "03localControl": "utiliser les commandes TeddyCloud en toute sécurité pendant une connexion ICI active",
-                        "04filters": "contrôler les topics, métriques et sources de journaux avec des filtres de relais bidirectionnels",
-                        "05privacy": "retirer automatiquement du trafic upstream le contenu privé et protégé par NoCloud",
-                        "06capture": "diagnostiquer et capturer complètement les paquets MQTT, décisions de filtrage et détails de connexion TLS"
-                    },
-                    "title": "MQTT ICI pour Toniebox 2"
-                },
-                "18tb2Https": {
-                    "items": {
-                        "01modes": "choisir entre le chemin cloud V3 conscient du contenu et un moniteur DEV transparent",
-                        "02capture": "capturer les requêtes, réponses, payloads et codes de statut HTTP complets",
-                        "03status": "afficher l'état de BOX, ICI, TONIES et TeddyCloud ainsi que le mode HTTPS actif dans la barre de navigation"
-                    },
-                    "title": "Modes HTTPS TB2 et diagnostic"
-                },
-                "19customPlaylists": {
-                    "items": {
-                        "01contentPlaylists": "créer et modifier des playlists TAP propres aux fichiers TAF personnalisés",
-                        "02chapterMetadata": "afficher les titres personnalisés et les durées enregistrées des chapitres pendant la lecture et dans les playlists"
-                    },
-                    "title": "Contenu personnalisé avancé"
-                },
-                "20languages": {
-                    "items": {
-                        "01klingon": "prise en charge soigneusement sélectionnée du klingon dans la WebUI"
-                    },
-                    "title": "Langue supplémentaire"
+                    "title": "Prise en charge de TB2"
                 }
             },
             "futureFeatures": {
@@ -2816,15 +2774,6 @@
             "commandFailedDetails": "La commande n'a pas pu être envoyée",
             "customContent": "Contenu personnalisé",
             "editPlaylist": "Modifier",
-            "playlistTypes": {
-                "directTaf": "Contenu personnalisé",
-                "tap": "Liste TeddyAudio"
-            },
-            "shuffleModes": {
-                "ordered": "Dans l'ordre",
-                "all": "Mélangé",
-                "one": "Sélection aléatoire"
-            },
             "headphonesConnected": "Casques connectés : {{count}}",
             "next": "Suivant",
             "pause": "Pause",
@@ -3335,12 +3284,6 @@
             "addFile": "Ajouter un fichier",
             "audioId": "ID audio",
             "audioIdTooltip": "Définit l'ID audio si le fichier est mis en cache. Définissez-le à 0 pour forcer la recréation du fichier mis en cache",
-            "shuffle": "Ordre de lecture",
-            "shuffleModes": {
-                "ordered": "Dans l'ordre",
-                "all": "Tout mélanger",
-                "one": "Sélection aléatoire"
-            },
             "cancel": "Annuler",
             "create": "Créer",
             "fileNameContentFile": "Description",

@@ -20,7 +20,6 @@
 #include "handler.h"
 #include "handler_cloud.h"
 #include "tb2_mqtt_passthrough.h"
-#include "tb2_ruid.h"
 #include "toniebox_state.h"
 
 // Forward declaration of platform-specific function
@@ -388,40 +387,6 @@ static void mqtt_connection_close(MqttClientConnection *conn, const char *reason
     }
 }
 
-static void mqtt_connection_replace_existing_box_sessions(MqttClientConnection *current)
-{
-    char current_box_id[13];
-    if (current == NULL || !current->active || !current->box_connection ||
-        current->box_overlay_id == 0 ||
-        !settings_canonicalize_box_id(current->box_common_name, current_box_id,
-                                      sizeof(current_box_id)))
-    {
-        return;
-    }
-
-    for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
-    {
-        MqttClientConnection *candidate = &connections[i];
-        char candidate_box_id[13];
-        if (candidate == current || !candidate->active ||
-            !candidate->box_connection ||
-            candidate->box_overlay_id != current->box_overlay_id ||
-            !settings_canonicalize_box_id(candidate->box_common_name,
-                                          candidate_box_id,
-                                          sizeof(candidate_box_id)) ||
-            osStrcmp(candidate_box_id, current_box_id) != 0)
-        {
-            continue;
-        }
-
-        TRACE_INFO("MQTT reconnect replacing stale session box=%s overlay=%u oldSlot=%d newSlot=%d\r\n",
-                   current_box_id, (unsigned)current->box_overlay_id,
-                   mqtt_connection_slot(candidate),
-                   mqtt_connection_slot(current));
-        mqtt_connection_close(candidate, "superseded by reconnect");
-    }
-}
-
 static bool mqtt_topic_match(const char *filter, const char *topic)
 {
     while (*filter && *topic)
@@ -496,17 +461,12 @@ static void mqtt_connection_update_context(MqttClientConnection *conn, const cha
                 {
                     if (conn->box_connection || mqtt_connection_has_trusted_client_cert(conn))
                     {
-                        bool_t was_box_connection = conn->box_connection;
                         if (mqtt_promote_connection_to_box(conn, box_settings, canonical_mac,
                                                            conn->box_connection ? "topic" : "trusted-topic"))
                         {
                             osStrncpy(conn->box_topic_id, mac,
                                       sizeof(conn->box_topic_id) - 1);
                             conn->box_topic_id[sizeof(conn->box_topic_id) - 1] = '\0';
-                            if (!was_box_connection)
-                            {
-                                mqtt_connection_replace_existing_box_sessions(conn);
-                            }
                         }
                     }
                     else
@@ -1076,6 +1036,25 @@ static bool_t mqtt_extract_toniebox_topic_common_name(const char *topic, const c
     return TRUE;
 }
 
+static bool_t mqtt_is_hex_string(const char *value, size_t len)
+{
+    if (value == NULL || osStrlen(value) != len)
+    {
+        return FALSE;
+    }
+
+    for (size_t i = 0; i < len; i++)
+    {
+        char c = value[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+        {
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
 static bool_t mqtt_is_all_zero_string(const char *value)
 {
     if (value == NULL || value[0] == '\0')
@@ -1128,13 +1107,15 @@ static bool_t mqtt_extract_toniebox_claim_topic(const char *topic, char *common_
     }
 
     const char *ruid_start = claim_start + claim_segment_len;
-    if (!tb2_ruid_canonicalize(ruid_start, ruid))
+    if (!mqtt_is_hex_string(ruid_start, 16))
     {
         return FALSE;
     }
 
     osMemcpy(common_name, common_start, common_len);
     common_name[common_len] = '\0';
+    osMemcpy(ruid, ruid_start, 16);
+    ruid[16] = '\0';
     return TRUE;
 }
 
@@ -2182,8 +2163,6 @@ static error_t handle_mqtt_connect(MqttClientConnection *conn, MqttMessageType t
         return error != NO_ERROR ? error : ERROR_FAILURE;
     }
 
-    mqtt_connection_replace_existing_box_sessions(conn);
-
     return NO_ERROR;
 }
 
@@ -2998,13 +2977,8 @@ static error_t handle_mqtt_publish_playback_state(MqttClientConnection *conn, Mq
     }
 
     cJSON *tonie = cJSON_GetObjectItemCaseSensitive(json, "tonie");
-    const char *previous_ruid = conn->client_ctx.state != NULL &&
-                                        conn->client_ctx.state->playback_state.ruid_valid
-                                    ? conn->client_ctx.state->playback_state.ruid
-                                    : NULL;
     if (cJSON_IsNull(tonie))
     {
-        v3_tap_playback_observe(settings, previous_ruid, NULL, FALSE, 0);
         tbs_toniebox2_playback_state(&conn->client_ctx, NULL, false, 0, false, 0, false, 0, NULL);
         TRACE_INFO("MQTT playback-state for %s overlay=%u: stopped\r\n",
                    settings->commonName,
@@ -3053,18 +3027,6 @@ static error_t handle_mqtt_publish_playback_state(MqttClientConnection *conn, Mq
         chapter_duration_text[sizeof(chapter_duration_text) - 1] = '\0';
     }
 
-    v3_tap_playback_observe(settings,
-                            previous_ruid,
-                            tonie->valuestring,
-                            content_version_valid && content_version <= UINT32_MAX,
-                            (uint32_t)content_version);
-    if (content_version_valid)
-    {
-        freshness_confirm_v3_content_version(settings,
-                                             tonie->valuestring,
-                                             content_version);
-    }
-
     tbs_toniebox2_playback_state(&conn->client_ctx,
                                  tonie->valuestring,
                                  content_version_valid,
@@ -3074,6 +3036,12 @@ static error_t handle_mqtt_publish_playback_state(MqttClientConnection *conn, Mq
                                  chapter_until_ms_valid,
                                  chapter_until_ms,
                                  chapter_duration_valid ? chapter_duration : NULL);
+    if (content_version_valid)
+    {
+        freshness_confirm_v3_content_version(settings, tonie->valuestring,
+                                             content_version);
+    }
+
     TRACE_INFO("MQTT playback-state for %s overlay=%u: tonie=%s contentVersion=%s chapter=%s chapterUntilMs=%s chapterDuration=%s\r\n",
                settings->commonName,
                (unsigned)settings->internal.overlayNumber,
@@ -3347,10 +3315,6 @@ void mqtt_server_task()
                                 error = tb2_mqtt_passthrough_forward_initial(conn->passthrough,
                                                                              conn->buffer,
                                                                              conn->buffer_len);
-                                if (!error)
-                                {
-                                    mqtt_connection_replace_existing_box_sessions(conn);
-                                }
                             }
                             if (handled)
                             {
@@ -3558,20 +3522,19 @@ void mqtt_server_task()
                 {
                     TRACE_ERROR("MQTT TLS connection rejected: failed to allocate TLS context\r\n");
                     mqtt_connection_close(conn, "TLS context allocation failed");
+                    return;
                 }
-                else
+
+                error_t tlsError = mqtt_server_tls_init(conn->tlsContext);
+                if (tlsError == NO_ERROR)
                 {
-                    error_t tlsError = mqtt_server_tls_init(conn->tlsContext);
-                    if (tlsError == NO_ERROR)
-                    {
-                        tlsError = tlsSetSocket(conn->tlsContext, conn->socket);
-                    }
-                    if (tlsError != NO_ERROR)
-                    {
-                        TRACE_ERROR("MQTT TLS connection rejected before MQTT parsing: %s (%d)\r\n",
-                                    error2text(tlsError), (int)tlsError);
-                        mqtt_connection_close(conn, "TLS setup failed");
-                    }
+                    tlsError = tlsSetSocket(conn->tlsContext, conn->socket);
+                }
+                if (tlsError != NO_ERROR)
+                {
+                    TRACE_ERROR("MQTT TLS connection rejected before MQTT parsing: %s (%d)\r\n",
+                                error2text(tlsError), (int)tlsError);
+                    mqtt_connection_close(conn, "TLS setup failed");
                 }
             }
             else
@@ -3924,6 +3887,11 @@ bool_t mqtt_server_publish_app_control_stl_for_overlay(uint8_t overlay_id, const
     return mqtt_server_publish_app_control_for_overlay(overlay_id, "stl", payload_json, TRUE);
 }
 
+static void mqtt_uid_to_ruid(uint64_t uid, char ruid[17])
+{
+    osSnprintf(ruid, 17, "%016" PRIX64, bswap_64(uid));
+}
+
 static bool_t mqtt_fresh_tonies_topic(MqttClientConnection *conn, char *topic,
                                       size_t topic_size)
 {
@@ -4102,7 +4070,7 @@ static bool_t mqtt_fresh_tonies_cache_contains(settings_t *settings,
 static char *mqtt_build_fresh_tonie_payload(uint64_t uid)
 {
     char ruid[17];
-    tb2_ruid_from_uid(uid, ruid);
+    mqtt_uid_to_ruid(uid, ruid);
     char *payload = osAllocMem(40);
     if (payload == NULL)
         return NULL;
@@ -4178,7 +4146,7 @@ static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn)
         if (conn->fresh_tonie_attempts >= MQTT_FRESH_TONIES_MAX_ATTEMPTS)
         {
             char ruid[17];
-            tb2_ruid_from_uid(conn->fresh_tonie_inflight->uid, ruid);
+            mqtt_uid_to_ruid(conn->fresh_tonie_inflight->uid, ruid);
             TRACE_WARNING("MQTT fresh-tonies PUBACK timeout for %s ruid=%s packet_id=%u attempts=%u\r\n",
                           settings->commonName, ruid,
                           (unsigned)conn->fresh_tonie_packet_id,
@@ -4188,7 +4156,7 @@ static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn)
         }
 
         char ruid[17];
-        tb2_ruid_from_uid(conn->fresh_tonie_inflight->uid, ruid);
+        mqtt_uid_to_ruid(conn->fresh_tonie_inflight->uid, ruid);
         TRACE_INFO("MQTT fresh-tonies retry for %s ruid=%s packet_id=%u attempt=%u\r\n",
                    settings->commonName, ruid,
                    (unsigned)conn->fresh_tonie_packet_id,
@@ -4246,7 +4214,7 @@ static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn)
     }
 
     char ruid[17];
-    tb2_ruid_from_uid(next->uid, ruid);
+    mqtt_uid_to_ruid(next->uid, ruid);
     TRACE_INFO("MQTT fresh-tonies send for %s ruid=%s reason=%s\r\n",
                settings->commonName, ruid,
                state->reason[0] != '\0' ? state->reason : "unknown");
@@ -4264,7 +4232,7 @@ static bool_t mqtt_handle_fresh_tonies_puback(MqttClientConnection *conn,
 
     settings_t *settings = conn->client_ctx.settings;
     char ruid[17];
-    tb2_ruid_from_uid(conn->fresh_tonie_inflight->uid, ruid);
+    mqtt_uid_to_ruid(conn->fresh_tonie_inflight->uid, ruid);
     TRACE_INFO("MQTT fresh-tonies acknowledged for %s ruid=%s packet_id=%u attempts=%u\r\n",
                settings != NULL ? settings->commonName : "-", ruid,
                (unsigned)packet_id, (unsigned)conn->fresh_tonie_attempts);
@@ -4361,7 +4329,7 @@ bool_t mqtt_server_publish_fresh_tonie_for_overlay(uint8_t overlay_id,
     }
 
     char ruid[17];
-    tb2_ruid_from_uid(uid, ruid);
+    mqtt_uid_to_ruid(uid, ruid);
     TRACE_INFO("MQTT fresh-tonies targeted invalidation queued for %s ruid=%s\r\n",
                settings->commonName, ruid);
     return TRUE;

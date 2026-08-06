@@ -89,26 +89,23 @@ also affects existing sessions immediately. The WebUI presents global options
 as forwarding switches and box options as `Global | Forward | Suppress`.
 
 After local observation and response correlation, the proxy applies an
-automatic selective NoCloud policy before the manual forwarding switches. The
-automatic decision therefore cannot be enabled or bypassed by a forwarding
-setting. No additional setting is required. A valid 16-hex rUID is
-accepted case-insensitively and canonicalized to uppercase by the shared TB2
-rUID policy. It is protected for the effective box overlay when the shared
-policy resolves either an automatic source lock or a manual NoCloud lock without
-an effective cloud override. The lookup reads only the policy fields and source
-presence for each unique rUID in the current packet; it does not load TAF
-headers or playlists and it keeps no persistent cache. A missing content JSON
-is treated as an unknown cloud Tonie. Existing unreadable JSON or invalid policy
-fields are fail-closed for that rUID, so damaged local policy cannot leak data.
-Reserved TB2 system rUIDs beginning with `00000AF0` are classified separately;
-they do not inherit a Tonie content JSON NoCloud decision.
+automatic selective NoCloud policy before the manual forwarding switches. It
+therefore cannot be bypassed by a forwarding option. No additional setting is
+required. A valid 16-hex rUID is accepted case-insensitively and protected for
+the effective box overlay when its current content JSON has `nocloud=true` and
+`cloud_override=false`. The lookup reads only these two JSON fields for each
+unique rUID in the current packet; it does not load TAF headers, playlists or
+sources and it keeps no persistent cache. A missing content JSON is treated as
+an unknown cloud Tonie. An existing but unreadable JSON or invalid policy field
+is fail-closed for that rUID. Reserved TB2 system rUIDs beginning with
+`00000AF0` are classified separately and never inherit a Tonie NoCloud policy.
 
-Independently of that policy, every box-to-TONIES payload is scanned as bounded
+Independently of NoCloud, every box-to-TONIES payload is scanned as bounded
 binary data for the local chapter prefix `teddycloud_`. A match suppresses the
-whole publish with filter ID `local_content.teddycloud_payload`, even when the
-referenced RUID has no NoCloud lock and even when a manual forwarding switch is
-enabled. Locally generated server-to-box settings, controls and freshness
-publishes are not upstream relay traffic and do not enter this filter.
+whole publish with filter ID `local_content.teddycloud_payload`, even when all
+manual forwarding options are enabled. Locally generated server-to-box
+settings, controls and freshness publishes are not upstream relay traffic and
+do not enter this filter.
 
 The automatic policy applies in these directions:
 
@@ -117,10 +114,9 @@ The automatic policy applies in these directions:
   field are removed from `metrics/fleet`, `metrics/events` and `bi-events`
   arrays. This removes playback metrics `1000` and `1001` as whole objects,
   including chapter, duration, play-time, content-version and end-reason data.
-  A log publish is suppressed when its unstructured payload contains an
-  explicitly bounded, case-insensitive 16-hex token for a protected rUID. For
-  a parseable log array, only entries containing protected RUIDs are removed;
-  the safe remainder is forwarded.
+  A raw log publish is suppressed when it contains an explicitly bounded,
+  case-insensitive 16-hex token for a protected rUID. In a parseable log array,
+  only affected entries are removed and the safe remainder is forwarded.
 - Cloud to box: protected rUIDs are removed from `fresh-tonies` single objects,
   string arrays and object arrays. TeddyCloud's locally generated freshness
   publishes bypass this relay policy.
@@ -156,7 +152,7 @@ queued while it is false and are sent without reconnecting after it becomes
 true. Local `fresh-tonies` delivery is independent of this switch.
 
 Matching responses to local proxy commands are handled before the automatic
-NoCloud/payload protection and the manual forwarding filters. Matching local
+NoCloud/payload protection and manual forwarding filters. Matching local
 `settings/confirm` revisions are removed from the payload; an entirely local
 confirm is consumed, while unknown or cloud-owned fields are rebuilt and sent
 to TONIES. A `pong` is local only when its `requestId` exactly matches the last
@@ -217,10 +213,9 @@ original packet in `data_base64`, stores the actual packet in
 `nocloud.*` filter ID and `removed_count`.
 Passively handled status packets use `local_status_forward`,
 `local_status_manual_block`, `local_status_nocloud_block` or
-`local_status_nocloud_rewrite`, so the same capture line shows that TeddyCloud
-processed the original payload before applying the final relay decision. The
-independent local-prefix guard uses `local_content_block` (or
-`local_status_local_content_block` after passive processing) together with its
+`local_status_nocloud_rewrite`, showing that TeddyCloud processed the payload
+before applying the relay decision. The local-prefix guard uses
+`local_content_block` or `local_status_local_content_block` and its
 `local_content.*` filter ID.
 Capture data is intentionally sensitive, local-only and excluded from Git.
 
@@ -491,24 +486,14 @@ The concrete topic uses the connection's observed MQTT topic ID. While a cache
 entry is pending but no matching topic identity or subscription is known, one
 debug message is emitted for that pending series instead of silently waiting.
 
-After a successful MQTT `CONNACK`, or after the initial transparent-proxy
-forward succeeds, the new authenticated session becomes primary for its overlay
-and canonical box ID. Older sessions for exactly that same box are closed with
-the reason `superseded by reconnect`; sessions of other boxes and connections
-without an authenticated box mapping remain untouched. A failed or incomplete
-reconnect never displaces the working session. Closing the old connection keeps
-the persistent freshness cache and marks pending delivery for the replacement,
-which synchronizes it after the box subscribes.
-
 Content JSON changes target the overlay selected by the API request. A source
 change is queued even if that overlay has not yet supplied a V3 freshness
 inventory containing the rUID. Follow-up metadata requests such as the WebUI's
 automatic `nocloud=true` or `live` update do not clear the source-change marker.
-Successful content-meta responses, chapter responses and MQTT delivery
-acknowledgements do not clear that marker. It remains pending and keeps
-`resumeBehavior=alwaysReset` until `playback/state` reports the exact expected
-version for the current rUID.
-Calls without a selected overlay retain the conservative
+Successful content-meta responses, full or ranged chapter requests and MQTT
+delivery acknowledgements do not clear that marker. It remains pending and
+keeps `resumeBehavior=alwaysReset` until the box reports the new generation in
+`playback/state`. Calls without a selected overlay retain the conservative
 inventory-based scan and do not broadcast an unknown rUID to every box.
 
 Freshness invalidations are coalesced per overlay. The first pending
@@ -535,15 +520,13 @@ bidirectional forwarding filters because they are generated by TeddyCloud, not
 relayed cloud traffic.
 
 `PUBACK` proves MQTT delivery only. A pending source change also survives
-content-meta and full or ranged chapter delivery. It is completed only when
-`playback/state` reports the same canonical rUID and exact expected version.
-Private content uses its current effective source version; original content uses
-the version of the currently validated TONIES content-meta route. TAP remains
-owned by its specialized playback observer. Old versions, other rUIDs, missing
-routes and invalid payloads leave the marker, `internal.freshnessCacheChanged`
-and its cache entry untouched. A reconnect therefore requeues every UID still
-present in the cache. Hard socket or TLS write errors close the connection while
-preserving that pending state.
+content-meta delivery and every complete or partial chapter response. It is
+completed only by a valid `playback/state` whose canonical rUID matches the
+pending rUID and whose `contentVersion` exactly equals the expected effective
+version. Old versions, other rUIDs and missing or unparseable fields leave the
+marker, `internal.freshnessCacheChanged` and its cache entry untouched. A
+reconnect therefore requeues every UID still present in the cache. Hard socket
+or TLS write errors close the connection while preserving that pending state.
 
 ### Outgoing `app-control/*`
 
@@ -702,11 +685,12 @@ the existing WebUI anchors `internal.last_ruid` and `internal.last_ruid_time`.
 Stopped playback, offline transitions, `tonie:null` and tag-remove events do
 not clear or overwrite Last Played.
 
-Playback observations acknowledge a pending source change only when the
-canonical rUID and `contentVersion` exactly match the current expected
-generation. For original content, the expected version must come from the
-currently validated TONIES content-meta route. TAP confirmation remains owned by
-the specialized TAP observer.
+The same canonical rUID is used to correlate a pending source change. The
+change is acknowledged only when `contentVersion` is present, parseable and
+exactly equals the effective version expected for that rUID and overlay. This
+successful match removes the source-change marker and its freshness entry.
+Playback reports for a different rUID, an older or otherwise different version,
+or without usable correlation fields update no freshness completion state.
 
 TB2 payloads may report a playback identifier that is not a raw rUID. In that
 case the playback state is still stored and emitted, but Last Played is left
@@ -773,7 +757,7 @@ as `BatteryPercent`, `BatteryRaw`, `BatteryCurrent`, `BatteryStatus`,
 | `src/mqtt_server.c` | Certificate-mapped and trusted-topic-mapped active connections update `internal.online` and `internal.last_connection`. |
 | `src/mqtt_server.c` | Subscribe/request/background handlers publish pending settings and coalesced freshness data to the active connection. Proxy settings delivery obeys the effective local-control setting; `settings/confirm` clears and consumes only matching local revisions. |
 | `src/mqtt_server.c` | App-control helpers build typed playback, volume and ping commands; experimental `stl` remains raw JSON until its schema is confirmed. Proxy commands obey the effective local-control setting and replies require exact local correlation. |
-| `src/mqtt_server.c` | `claim`, logs, `app-reply/bedtime-state`, battery/headphone metrics and `playback/state` publishes are observed locally before relay filtering; semantic status handlers update TB2 runtime state and box events. `claim/<ruid>` also records Last Played from the topic rUID. |
+| `src/mqtt_server.c` | `claim`, `app-reply/bedtime-state`, battery/headphone metrics and `playback/state` publishes update semantic TB2 runtime state and box events. `claim/<ruid>` also records Last Played from the topic rUID. |
 
 ## Source Occurrence Map
 
@@ -788,8 +772,8 @@ as `BatteryPercent`, `BatteryRaw`, `BatteryCurrent`, `BatteryStatus`,
 | `src/server.c` | Starts, polls and stops the internal MQTT server. |
 | `src/mqtt_server.c` | Owns the TCP/TLS listener, packet parsing, subscription tracking, topic handlers and box publishes. |
 | `include/mqtt_nocloud_filter.h` | Declares the per-publish noCloud allow/block/rewrite decision and its rewritten payload ownership. |
-| `src/mqtt_nocloud_filter.c` | Performs lightweight per-packet content-policy lookups, selective claim/playback/metrics/BI-event/log/freshness filtering and the independent `teddycloud_` payload guard. |
-| `src/tb2_mqtt_passthrough.c` | Applies automatic protection after local observation and before manual filters, rebuilds partial PUBLISH packets, preserves QoS/packet-ID translation and records capture/status counters. |
+| `src/mqtt_nocloud_filter.c` | Performs lightweight per-packet content-policy lookups and selective claim, playback, metrics, BI-event, log and freshness filtering. |
+| `src/tb2_mqtt_passthrough.c` | Applies the automatic noCloud decision after manual filters, rebuilds partial PUBLISH packets, preserves QoS/packet-ID translation and records capture/status counters. |
 | `src/mqtt.c` | Exposes the new TB2 runtime box events through the existing Home Assistant discovery/event path. |
 | `include/home_assistant.h` | Raises the entity budget for the additional TB2 runtime event sensors. |
 | `src/handler_api.c` | Exposes runtime state through `getBoxes`, implements the validated box-control HTTP endpoints and marks TB2 settings changes as pending for ICI delivery. |

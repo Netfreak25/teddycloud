@@ -1,7 +1,6 @@
 #include "tb2_client_identity.h"
 
 #include "debug.h"
-#include "net_config.h"
 #include "os_port.h"
 
 static const char *const tb2_identity_options[] = {

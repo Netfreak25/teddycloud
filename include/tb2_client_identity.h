@@ -26,11 +26,7 @@ typedef struct
 const settings_cert_t *tb2_client_identity_resolve(settings_t *box_settings,
                                                    const char **source);
 
-/**
- * Resolve the canonical rUID and authentication token for a TB2 content
- * request. Persisted lowercase override rUIDs remain readable; the selected
- * identity returned to new upstream requests is always canonical.
- */
+/** Resolve the canonical upstream content rUID and saved authentication. */
 bool_t tb2_content_identity_resolve(const char *requested_ruid,
                                     const uint8_t *requested_auth,
                                     const contentJson_t *content,

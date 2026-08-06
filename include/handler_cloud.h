@@ -36,13 +36,7 @@ error_t handleContent(HttpConnection *connection, const char_t *uri, const char_
 void freshness_mark_content_mapping_changed(settings_t *target_settings, const char *ruid,
                                             bool_t source_changed);
 void freshness_cache_sync_source_changed_uids(settings_t *settings);
-bool_t freshness_confirm_v3_content_version(settings_t *settings,
-                                            const char *ruid,
+bool_t freshness_confirm_v3_content_version(settings_t *settings, const char *ruid,
                                             uint64_t content_version);
-void v3_tap_playback_observe(settings_t *settings,
-                             const char *previous_ruid,
-                             const char *current_ruid,
-                             bool_t content_version_valid,
-                             uint32_t content_version);
 
 #endif

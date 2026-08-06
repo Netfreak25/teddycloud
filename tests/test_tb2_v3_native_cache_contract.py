@@ -52,7 +52,6 @@ class Tb2V3NativeCacheContractTests(unittest.TestCase):
         self.assertIn("v3_native_cache_chapter_name_is_safe", parsing)
         self.assertIn("osStrcasecmp", parsing)
         self.assertIn("ERROR_INVALID_NAME", parsing)
-        self.assertIn("V3_NATIVE_RESERVED_LOCAL_PREFIX", self.source)
 
     def test_missing_or_damaged_chapter_cannot_activate(self):
         completeness = self.section(
@@ -101,66 +100,6 @@ class Tb2V3NativeCacheContractTests(unittest.TestCase):
         self.assertIn("v3_native_cache_meta_capture_append", self.handler)
         self.assertIn("v3_native_cache_chapter_append", self.handler)
         self.assertIn("cbrCloudBodyPassthrough", self.handler)
-
-    def test_meta_observer_tracks_original_route_without_writing_cache(self):
-        observer = self.section(
-            self.source,
-            "void v3_native_cache_meta_observe_init(",
-            "void v3_native_cache_meta_capture_response(",
-        )
-        self.assertNotIn("cache_root", observer)
-        finish = self.section(
-            self.source,
-            "error_t v3_native_cache_meta_capture_finish(",
-            "void v3_native_cache_meta_capture_abort(",
-        )
-        observed = finish[finish.index("if (error == NO_ERROR && !capture->store)") :]
-        self.assertIn("route->chapters = chapters", observed)
-        self.assertLess(observed.index("return NO_ERROR"), observed.index("v3_native_generation_dir"))
-        self.assertIn("V3_NATIVE_CHAPTER_FORWARD", self.header)
-
-    def test_unassigned_original_names_fail_closed(self):
-        chapter = self.section(
-            self.handler,
-            "error_t handleCloudChapterV3(",
-            "error_t handleCloudOtaV3(",
-        )
-        self.assertIn("V3_NATIVE_CHAPTER_BYPASS", chapter)
-        self.assertIn("Rejecting V3 chapter without current content-meta route", chapter)
-        self.assertIn("V3_NATIVE_CHAPTER_FORWARD", chapter)
-        self.assertIn("Rejecting TONIES V3 chapter fallback for NoCloud", chapter)
-
-    def test_validated_route_exposes_its_exact_content_version(self):
-        getter = self.section(
-            self.source,
-            "bool_t v3_native_cache_route_version(",
-            "void v3_native_cache_chapter_append(",
-        )
-        self.assertIn("mutex_lock(MUTEX_V3_NATIVE_CACHE)", getter)
-        self.assertIn("route->valid", getter)
-        self.assertIn("!osStrcasecmp(route->ruid, canonical_ruid)", getter)
-        self.assertIn("*version = route->version", getter)
-
-    def test_original_manifest_is_replayed_verbatim_without_local_names(self):
-        replay = self.section(
-            self.source,
-            "error_t v3_native_cache_read_active_manifest(",
-            "bool_t v3_native_cache_active_version(",
-        )
-        self.assertIn("v3_native_read_file(manifest_path", replay)
-        self.assertIn("*data = manifest_data", replay)
-        self.assertNotIn("cJSON_Print", replay)
-        self.assertNotIn("teddycloud_", replay)
-
-        meta = self.section(
-            self.handler,
-            "error_t handleCloudContentMetaV3(",
-            "error_t handleCloudChapterV3(",
-        )
-        cache = meta.index("v3_native_cache_read_active_manifest")
-        upstream = meta.index("cloud_request_tb2_get", cache)
-        self.assertLess(cache, upstream)
-        self.assertIn("httpWriteResponse(connection, manifest, manifest_length", meta)
 
 
 if __name__ == "__main__":
