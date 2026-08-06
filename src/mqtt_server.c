@@ -387,6 +387,40 @@ static void mqtt_connection_close(MqttClientConnection *conn, const char *reason
     }
 }
 
+static void mqtt_connection_replace_existing_box_sessions(MqttClientConnection *current)
+{
+    char current_box_id[13];
+    if (current == NULL || !current->active || !current->box_connection ||
+        current->box_overlay_id == 0 ||
+        !settings_canonicalize_box_id(current->box_common_name, current_box_id,
+                                      sizeof(current_box_id)))
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
+    {
+        MqttClientConnection *candidate = &connections[i];
+        char candidate_box_id[13];
+        if (candidate == current || !candidate->active ||
+            !candidate->box_connection ||
+            candidate->box_overlay_id != current->box_overlay_id ||
+            !settings_canonicalize_box_id(candidate->box_common_name,
+                                          candidate_box_id,
+                                          sizeof(candidate_box_id)) ||
+            osStrcmp(candidate_box_id, current_box_id) != 0)
+        {
+            continue;
+        }
+
+        TRACE_INFO("MQTT reconnect replacing stale session box=%s overlay=%u oldSlot=%d newSlot=%d\r\n",
+                   current_box_id, (unsigned)current->box_overlay_id,
+                   mqtt_connection_slot(candidate),
+                   mqtt_connection_slot(current));
+        mqtt_connection_close(candidate, "superseded by reconnect");
+    }
+}
+
 static bool mqtt_topic_match(const char *filter, const char *topic)
 {
     while (*filter && *topic)
@@ -461,12 +495,17 @@ static void mqtt_connection_update_context(MqttClientConnection *conn, const cha
                 {
                     if (conn->box_connection || mqtt_connection_has_trusted_client_cert(conn))
                     {
+                        bool_t was_box_connection = conn->box_connection;
                         if (mqtt_promote_connection_to_box(conn, box_settings, canonical_mac,
                                                            conn->box_connection ? "topic" : "trusted-topic"))
                         {
                             osStrncpy(conn->box_topic_id, mac,
                                       sizeof(conn->box_topic_id) - 1);
                             conn->box_topic_id[sizeof(conn->box_topic_id) - 1] = '\0';
+                            if (!was_box_connection)
+                            {
+                                mqtt_connection_replace_existing_box_sessions(conn);
+                            }
                         }
                     }
                     else
@@ -2163,6 +2202,8 @@ static error_t handle_mqtt_connect(MqttClientConnection *conn, MqttMessageType t
         return error != NO_ERROR ? error : ERROR_FAILURE;
     }
 
+    mqtt_connection_replace_existing_box_sessions(conn);
+
     return NO_ERROR;
 }
 
@@ -3315,6 +3356,10 @@ void mqtt_server_task()
                                 error = tb2_mqtt_passthrough_forward_initial(conn->passthrough,
                                                                              conn->buffer,
                                                                              conn->buffer_len);
+                                if (!error)
+                                {
+                                    mqtt_connection_replace_existing_box_sessions(conn);
+                                }
                             }
                             if (handled)
                             {
@@ -3522,19 +3567,20 @@ void mqtt_server_task()
                 {
                     TRACE_ERROR("MQTT TLS connection rejected: failed to allocate TLS context\r\n");
                     mqtt_connection_close(conn, "TLS context allocation failed");
-                    return;
                 }
-
-                error_t tlsError = mqtt_server_tls_init(conn->tlsContext);
-                if (tlsError == NO_ERROR)
+                else
                 {
-                    tlsError = tlsSetSocket(conn->tlsContext, conn->socket);
-                }
-                if (tlsError != NO_ERROR)
-                {
-                    TRACE_ERROR("MQTT TLS connection rejected before MQTT parsing: %s (%d)\r\n",
-                                error2text(tlsError), (int)tlsError);
-                    mqtt_connection_close(conn, "TLS setup failed");
+                    error_t tlsError = mqtt_server_tls_init(conn->tlsContext);
+                    if (tlsError == NO_ERROR)
+                    {
+                        tlsError = tlsSetSocket(conn->tlsContext, conn->socket);
+                    }
+                    if (tlsError != NO_ERROR)
+                    {
+                        TRACE_ERROR("MQTT TLS connection rejected before MQTT parsing: %s (%d)\r\n",
+                                    error2text(tlsError), (int)tlsError);
+                        mqtt_connection_close(conn, "TLS setup failed");
+                    }
                 }
             }
             else

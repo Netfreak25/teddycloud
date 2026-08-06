@@ -191,6 +191,13 @@ active tunnel is green. The API contains no credential values, certificate
 paths, payloads or box identifiers.
 
 Each session writes `session.json` and a full Base64 `traffic.jsonl` capture.
+
+After a newly authenticated connection has completed MQTT CONNECT/CONNACK (or
+the transparent initial forwarding), TeddyCloud closes older active sessions
+for the same canonical box ID and overlay. Failed or incomplete reconnects do
+not displace the working session. Pending freshness remains stored in the
+overlay and is retried on the replacement connection.
+
 The capture is packet-based and records `packet_type`, optional `topic`,
 `forwarded`, optional `filter_id`, `generated`, and `packet_complete`.
 `data_base64` always contains the packet actually received from that direction.

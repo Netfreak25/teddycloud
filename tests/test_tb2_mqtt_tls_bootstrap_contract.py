@@ -79,6 +79,13 @@ class Tb2MqttTlsBootstrapContractTests(unittest.TestCase):
         self.assertIn('mqtt_connection_close(conn, "TLS context allocation failed")', accept)
         self.assertIn('mqtt_connection_close(conn, "TLS setup failed")', accept)
         self.assertIn("rejected before MQTT parsing", accept)
+        allocation_failure = accept[
+            accept.index("if (conn->tlsContext == NULL)") :
+            accept.index("error_t tlsError")
+        ]
+        self.assertNotIn("continue;", allocation_failure)
+        self.assertNotIn("return;", allocation_failure)
+        self.assertIn("else", allocation_failure)
 
     def test_official_docker_files_publish_ici_port(self):
         for filename in ("DockerfileUbuntu", "DockerfileDebian", "DockerfileAlpine"):
