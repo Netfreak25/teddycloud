@@ -93,6 +93,27 @@ an incomplete `.part` is replaced by the next complete HTTP `200` transfer.
 Only one capture may write a given object at a time. Cache failures are logged
 but never interrupt the live TONIES response.
 
+## Manual cache/library doctor
+
+`contrib/repair_tb2_native_library.py` is an operator-invoked doctor for native
+TB2 library manifests damaged by the former file-browser sidecar bug. Its
+default mode is read-only. It scans cache generations once, derives audio and
+Tonieplay collection hashes from the exact stored bytes, validates every
+archived library object and reports which manifests can be reconstructed.
+
+`--apply` writes only byte-verified repairs and preserves the damaged manifest
+as `library-entry.json.before-browser-repair.bak`. `--recache` additionally asks
+the running TeddyCloud API to execute eligible server-side TB2 V3 downloads;
+it is rejected unless `--apply` is also present. Recache never changes a
+Tonie's source or NoCloud policy. Tags that are not already eligible for an
+original-content download remain unresolved instead of being forced through
+TONIES.
+
+For Docker, run the doctor in a temporary Python container with the TeddyCloud
+volumes attached. Use read-only volumes for diagnosis. Recache needs the live
+TeddyCloud container, host networking and an explicitly configured local API
+URL. Self-signed local HTTPS requires the explicit `--insecure` flag.
+
 ## Tonieplay library collections
 
 `toniebox2.cacheTonieplayToLibraryV3` defaults to `false`, is overlay-capable

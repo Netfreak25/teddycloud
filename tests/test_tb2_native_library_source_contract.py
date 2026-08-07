@@ -176,13 +176,16 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
         self.assertLess(index.index("if (isNativeCollectionDetail)"), generic_metadata)
         self.assertIn("api_is_native_collection_detail_path", self.api)
 
-    def test_manual_repair_is_dry_run_and_requires_an_intact_cache_generation(self) -> None:
+    def test_manual_doctor_is_dry_run_and_gates_recache_explicitly(self) -> None:
         for marker in (
-            'parser.add_argument("--apply"',
+            '"--apply"',
+            '"--recache"',
+            'parser.error("--recache requires --apply',
             "is_browser_overwrite",
-            "find_matching_generations",
-            "archived_chapters_match",
-            "manual recache required: Tonieplay metadata cannot be reconstructed safely",
+            "build_cache_index",
+            "archived_audio_matches",
+            "archived_tonieplay_matches",
+            "recache_until_resolved",
             "library-entry.json.before-browser-repair.bak",
         ):
             self.assertIn(marker, self.repair_script)
