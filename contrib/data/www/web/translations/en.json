@@ -353,6 +353,13 @@
             "open": "Open collection",
             "summary": "{{count}} chapters · {{size}}"
         },
+        "tonieplayCollection": {
+            "authWarning": "This ZIP contains the original TONIES content-meta manifest, including its auth values. Store and share it as sensitive data.",
+            "deleteTitle": "Delete Tonieplay collection",
+            "deleteWarning": "Assignments using this game will no longer be served locally. The active V3 cache is not deleted and the game may be imported again when Tonieplay library caching is enabled.",
+            "downloadTitle": "Download Tonieplay collection",
+            "summary": "{{count}} objects · {{size}}"
+        },
         "encodeFiles": {
             "addFiles": "Add files",
             "cancel": "Cancel",
@@ -1631,6 +1638,10 @@
             "toniebox2__cacheToLibraryV3": {
                 "label": "Cache TB2 content in library",
                 "description": "Import complete TB2 original content into the library as a deduplicated native Ogg/Opus collection."
+            },
+            "toniebox2__cacheTonieplayToLibraryV3": {
+                "label": "Cache Tonieplay in library",
+                "description": "Import complete Tonieplay manifests and every referenced object into the TB2 library. Requires TB2 content caching."
             },
             "toniebox2__baby_mode": {
                 "label": "Baby mode",
@@ -3247,6 +3258,7 @@
         "selectFileModal": {
             "cancel": "Cancel",
             "nativeCollection": "TB2 origin · Ogg/Opus · {{count}} chapters · {{hash}}",
+            "tonieplayCollection": "TB2 Tonieplay · {{count}} objects · {{hash}}",
             "ok": "OK",
             "selectFile": "Select file"
         },

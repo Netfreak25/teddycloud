@@ -33,6 +33,13 @@
             "open": "ghom poSmoH",
             "summary": "{{count}} 'ay'mey · {{size}}"
         },
+        "tonieplayCollection": {
+            "authWarning": "TONIES content-meta ngo' ngaS ZIPvam; auth De' je ngaS. De' pegh rur yIpol 'ej yIngeH.",
+            "deleteTitle": "Tonieplay ghom Qaw'",
+            "deleteWarning": "Qujvam lo'bogh rarghachmey jablaHbe'choH TeddyCloud. V3 cache Qaw'be'; Tonieplay library cache chu'lu'chugh Quj qengqa'laH.",
+            "downloadTitle": "Tonieplay ghom qengHa'",
+            "summary": "{{count}} Dochmey · {{size}}"
+        },
         "encodeFiles": {
             "cancel": "qIl"
         },
@@ -207,6 +214,10 @@
             "mqtt_server__cert__rotation_status": {
                 "label": "ICI MQTT certificate Dotlh",
                 "description": "certificate nuDta' pagh chenmoHqa'ta' Dotlh."
+            },
+            "toniebox2__cacheTonieplayToLibraryV3": {
+                "label": "Tonieplay libraryDaq pol",
+                "description": "Tonieplay content-meta naQ Hoch Dochmey je TB2 libraryDaq qeng. TB2 De' cache poQ."
             }
         }
     },
@@ -261,7 +272,8 @@
         },
         "selectFileModal": {
             "cancel": "qIl",
-            "nativeCollection": "TB2 mung · Ogg/Opus · {{count}} 'ay'mey · {{hash}}"
+            "nativeCollection": "TB2 mung · Ogg/Opus · {{count}} 'ay'mey · {{hash}}",
+            "tonieplayCollection": "TB2 Tonieplay · {{count}} Dochmey · {{hash}}"
         },
         "selectMode": {
             "cancel": "qIl"

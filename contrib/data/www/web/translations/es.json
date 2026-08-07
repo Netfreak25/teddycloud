@@ -353,6 +353,13 @@
             "open": "Abrir colección",
             "summary": "{{count}} capítulos · {{size}}"
         },
+        "tonieplayCollection": {
+            "authWarning": "Este ZIP contiene el manifiesto content-meta original de TONIES, incluidos sus valores de autenticación. Guárdalo y compártelo como dato sensible.",
+            "deleteTitle": "Eliminar colección Tonieplay",
+            "deleteWarning": "Las asignaciones que usen este juego dejarán de servirse localmente. La caché V3 activa no se elimina y el juego podrá importarse de nuevo si está activa la caché Tonieplay de la biblioteca.",
+            "downloadTitle": "Descargar colección Tonieplay",
+            "summary": "{{count}} objetos · {{size}}"
+        },
         "encodeFiles": {
             "addFiles": "Agregar archivos",
             "cancel": "Cancelar",
@@ -1631,6 +1638,10 @@
             "toniebox2__cacheToLibraryV3": {
                 "label": "Guardar contenido TB2 en la biblioteca",
                 "description": "Importa contenido original TB2 completo como colección nativa Ogg/Opus deduplicada."
+            },
+            "toniebox2__cacheTonieplayToLibraryV3": {
+                "label": "Guardar Tonieplay en la biblioteca",
+                "description": "Importar manifiestos Tonieplay completos y todos los objetos referenciados en la biblioteca TB2. Requiere la caché de contenido TB2."
             },
             "toniebox2__baby_mode": {
                 "label": "Modo bebé",
@@ -3247,6 +3258,7 @@
         "selectFileModal": {
             "cancel": "Cancelar",
             "nativeCollection": "Origen TB2 · Ogg/Opus · {{count}} capítulos · {{hash}}",
+            "tonieplayCollection": "TB2 Tonieplay · {{count}} objetos · {{hash}}",
             "ok": "OK",
             "selectFile": "Seleccionar archivo"
         },
