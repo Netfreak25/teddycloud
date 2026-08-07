@@ -99,6 +99,7 @@ typedef struct
     bool enableV3Chapter;
     bool cacheContentV3;
     bool cacheToLibraryV3;
+    bool cacheTonieplayToLibraryV3;
     bool cacheOta;
     bool localOta;
     bool cacheContent;

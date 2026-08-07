@@ -78,7 +78,7 @@ class Tb2V3NativeCacheContractTests(unittest.TestCase):
         self.assertLess(finish.index("capture->written != capture->expected_size"),
                         finish.index("fsRenameFile"))
         abort = self.source[self.source.index("void v3_native_cache_chapter_abort("):]
-        self.assertIn("fsDeleteFile(capture->temp_path)", abort)
+        self.assertIn("v3_native_capture_paths_free(capture, TRUE)", abort)
 
     def test_new_version_changes_active_marker_only_after_complete_publish(self):
         activation = self.section(

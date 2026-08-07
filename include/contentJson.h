@@ -16,6 +16,7 @@ typedef enum
     CT_SOURCE_TAP_CACHED,
     CT_SOURCE_STREAM,
     CT_SOURCE_NATIVE_COLLECTION,
+    CT_SOURCE_TONIEPLAY_COLLECTION,
 } ct_source_t;
 
 typedef struct

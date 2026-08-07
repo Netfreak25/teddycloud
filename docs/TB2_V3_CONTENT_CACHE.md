@@ -7,7 +7,7 @@ The transparent TB2 proxy is not part of this path. Local content routing is imp
 ## Native TONIES original-content cache
 
 `toniebox2.cacheContentV3` enables a physically separate cache for unmodified
-TONIES V3 manifests and Ogg/Opus chapters. It defaults to `false` and can be
+TONIES V3 manifests and every object referenced by `content[]`. It defaults to `false` and can be
 overridden per TB2 overlay. The existing local custom-content pipeline below
 is evaluated first and is not changed by this cache.
 
@@ -27,10 +27,10 @@ v3-native/
   active/<overlay>/<CANONICAL-RUID>.json
 ```
 
-Manifest bytes, content version and safe original TONIES chapter names remain
-unchanged. A chapter is first written to `.part`, checked against the manifest
+Manifest bytes, content version and safe original TONIES object names remain
+unchanged. An object is first written to `.part`, checked against the manifest
 size and renamed inside staging. The generation directory is published under
-`versions` only after every expected chapter is complete; the active marker is
+`versions` only after every expected object is complete; the active marker is
 written last. A failed or interrupted new generation therefore cannot replace
 the previous active generation. Complete older version directories are retained.
 
@@ -85,6 +85,52 @@ the incomplete staging data is never selected. A previously active complete
 generation remains active. Original-content download is rejected while the
 selected Tonie has a private source or effective NoCloud protection, so the
 manual action cannot bypass the established content policy.
+
+The response reports `objectsCompleted`, `objectsTotal` and `object` while
+retaining the existing `chaptersCompleted`, `chaptersTotal` and `chapter`
+fields as compatibility aliases. Complete staged objects survive reconnects;
+an incomplete `.part` is replaced by the next complete HTTP `200` transfer.
+Only one capture may write a given object at a time. Cache failures are logged
+but never interrupt the live TONIES response.
+
+## Tonieplay library collections
+
+`toniebox2.cacheTonieplayToLibraryV3` defaults to `false`, is overlay-capable
+and is usable only while `toniebox2.cacheContentV3` is effective. It is separate
+from `toniebox2.cacheToLibraryV3`, which remains audio-only.
+
+```text
+library/by/contentHash/<tonieplay-hash>/
+  library-entry.json
+  content-meta.json
+  objects/<index>-<object-sha256>.bin
+```
+
+The raw `content-meta.json` is stored byte-for-byte, including every unknown
+field and opaque object `auth` value. `library-entry.json` uses
+`format: "tonieplay-v3"` and records manifest hash and size, content version,
+known game metadata, provenance and the ordered generic object list with name,
+optional type and filename, hash, size, MIME and path. The collection hash uses
+a dedicated Tonieplay domain, the raw manifest and the ordered object sizes and
+hashes. Consequently, changed auth values intentionally change the collection
+identity.
+
+The FileBrowser exposes the directory as one `tb2_tonieplay_collection` with
+Open, ZIP download and Delete actions, but no audio Play action. Its detail view
+is read-only. ZIP export includes the raw manifest and therefore warns that
+original TONIES auth values are sensitive.
+
+The same canonical `lib://by/contentHash/<hash>/library-entry.json` URI can be
+assigned to any valid content RUID of a TB2 overlay. Full manifest, size and
+SHA-256 validation happens before assignment. The local V3 response preserves
+all manifest values and rewrites only the top-level version to the effective
+local Freshness version. Exact object names are resolved from the assigned
+collection; any other name receives a local `404`, and NoCloud never falls back
+to TONIES. Freshness is confirmed only by MQTT playback of that exact version.
+
+The captured protocol does not prove that TONIES games are RUID-portable. The
+cross-RUID assignment is an explicit TeddyCloud capability whose real device
+compatibility must be verified separately.
 
 ## Assigning a native collection as Tonie content
 

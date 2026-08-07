@@ -344,7 +344,9 @@ error_t handleApiGetIndex(HttpConnection *connection, const char_t *uri, const c
         {
             read_only = !get_settings_ovl(overlay)->mqtt_client_upstream.enabled;
         }
-        else if (!osStrcmp(opt->option_name, "toniebox2.cacheToLibraryV3"))
+        else if (!osStrcmp(opt->option_name, "toniebox2.cacheToLibraryV3") ||
+                 !osStrcmp(opt->option_name,
+                           "toniebox2.cacheTonieplayToLibraryV3"))
         {
             read_only = !get_settings_ovl(overlay)->cloud.cacheContentV3;
         }
@@ -1006,6 +1008,135 @@ error_t handleApiFileIndexV2(HttpConnection *connection, const char_t *uri, cons
                 cJSON_AddNumberToObject(native, "totalSize",
                                        (double)total_size);
                 v3_native_library_collection_free(&collection);
+                osFreeMem(source);
+                osFreeMem(filePathAbsolute);
+                cJSON_AddItemToArray(jsonArray, jsonEntry);
+                continue;
+            }
+            v3_tonieplay_library_collection_t tonieplay;
+            error_t tonieplay_error =
+                source != NULL
+                    ? v3_tonieplay_library_collection_load(
+                          rootPath, source, FALSE, &tonieplay)
+                    : ERROR_INVALID_FILE;
+            if (tonieplay_error == NO_ERROR)
+            {
+                if (overlay[0] != '\0' &&
+                    client_ctx->settings->toniebox.boxGeneration !=
+                        GENERATION_TB2)
+                {
+                    v3_tonieplay_library_collection_free(&tonieplay);
+                    osFreeMem(source);
+                    osFreeMem(filePathAbsolute);
+                    cJSON_Delete(jsonEntry);
+                    continue;
+                }
+                cJSON_AddStringToObject(jsonEntry, "entryKind",
+                                       "tb2_tonieplay_collection");
+                cJSON *native = cJSON_AddObjectToObject(
+                    jsonEntry, "tonieplayCollection");
+                cJSON_AddStringToObject(native, "source", source);
+                cJSON_AddStringToObject(native, "contentHash",
+                                       tonieplay.content_hash);
+                cJSON_AddNumberToObject(native, "version",
+                                       tonieplay.content_version);
+                cJSON_AddStringToObject(native, "contentType",
+                                       tonieplay.content_type);
+                cJSON_AddNumberToObject(native, "objectCount",
+                                       tonieplay.object_count);
+                char *library_entry_path = custom_asprintf(
+                    "by/contentHash/%s/library-entry.json",
+                    tonieplay.content_hash);
+                if (library_entry_path != NULL)
+                {
+                    cJSON_AddStringToObject(native, "libraryEntryPath",
+                                           library_entry_path);
+                    osFreeMem(library_entry_path);
+                }
+                const char *manifest_end = NULL;
+                cJSON *raw_manifest = cJSON_ParseWithLengthOpts(
+                    (const char *)tonieplay.manifest,
+                    tonieplay.manifest_length, &manifest_end, 0);
+                if (raw_manifest != NULL &&
+                    manifest_end == (const char *)tonieplay.manifest +
+                                        tonieplay.manifest_length)
+                {
+                    static const char *metadata_keys[] = {
+                        "gameId", "tonieplayEngineVersion", "language",
+                        "tonieSalesId", "title", "name",
+                    };
+                    cJSON *metadata = cJSON_AddObjectToObject(native,
+                                                              "metadata");
+                    for (size_t metadata_index = 0;
+                         metadata != NULL &&
+                         metadata_index < sizeof(metadata_keys) /
+                                              sizeof(metadata_keys[0]);
+                         metadata_index++)
+                    {
+                        cJSON *value = cJSON_GetObjectItemCaseSensitive(
+                            raw_manifest, metadata_keys[metadata_index]);
+                        cJSON *copy = value != NULL
+                                          ? cJSON_Duplicate(value, TRUE)
+                                          : NULL;
+                        if (copy != NULL)
+                        {
+                            cJSON_AddItemToObject(
+                                metadata, metadata_keys[metadata_index], copy);
+                        }
+                    }
+                }
+                cJSON_Delete(raw_manifest);
+                char *manifest_path = custom_asprintf(
+                    "by/contentHash/%s/content-meta.json",
+                    tonieplay.content_hash);
+                if (manifest_path != NULL)
+                {
+                    cJSON_AddStringToObject(native, "manifestPath",
+                                           manifest_path);
+                    osFreeMem(manifest_path);
+                }
+                uint64_t total_size = tonieplay.manifest_length;
+                cJSON *objects = cJSON_AddArrayToObject(native, "objects");
+                for (size_t i = 0; i < tonieplay.object_count; i++)
+                {
+                    const v3_tonieplay_library_object_t *object =
+                        &tonieplay.objects[i];
+                    cJSON *object_json = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(object_json, "index",
+                                           object->index);
+                    cJSON_AddStringToObject(object_json, "name",
+                                           object->name);
+                    if (object->type[0] != '\0')
+                    {
+                        cJSON_AddStringToObject(object_json, "type",
+                                               object->type);
+                    }
+                    if (object->filename[0] != '\0')
+                    {
+                        cJSON_AddStringToObject(object_json, "filename",
+                                               object->filename);
+                    }
+                    cJSON_AddStringToObject(object_json, "sha256",
+                                           object->sha256);
+                    cJSON_AddNumberToObject(object_json, "fileSize",
+                                           object->file_size);
+                    cJSON_AddStringToObject(object_json, "contentType",
+                                           object->content_type);
+                    char *relative = custom_asprintf(
+                        "by/contentHash/%s/objects/%" PRIuSIZE "-%s.bin",
+                        tonieplay.content_hash, object->index,
+                        object->sha256);
+                    if (relative != NULL)
+                    {
+                        cJSON_AddStringToObject(object_json, "path", relative);
+                        osFreeMem(relative);
+                    }
+                    cJSON_AddItemToArray(objects, object_json);
+                    total_size += object->file_size;
+                }
+                cJSON_AddNumberToObject(native, "totalSize",
+                                       (double)total_size);
+                v3_tonieplay_library_collection_free(&tonieplay);
                 osFreeMem(source);
                 osFreeMem(filePathAbsolute);
                 cJSON_AddItemToArray(jsonArray, jsonEntry);
@@ -5060,8 +5191,11 @@ error_t handleApiContentJsonSet(HttpConnection *connection, const char_t *uri, c
     char item_data[256];
     bool_t updated = false;
     bool_t source_changed = false;
+    bool_t tonieplay_source =
+        content_json._source_type == CT_SOURCE_TONIEPLAY_COLLECTION;
     if (queryGet(post_data, "source", item_data, sizeof(item_data)))
     {
+        tonieplay_source = false;
         if (!osStrncmp(item_data, "lib://by/contentHash/",
                        sizeof("lib://by/contentHash/") - 1U))
         {
@@ -5074,14 +5208,39 @@ error_t handleApiContentJsonSet(HttpConnection *connection, const char_t *uri, c
                     : ERROR_INVALID_FILE;
             if (collection_error != NO_ERROR)
             {
-                TRACE_ERROR("Rejecting invalid native library source %s: %s\r\n",
-                            item_data, error2text(collection_error));
-                osFreeMem(contentPath);
-                free_content_json(&content_json);
-                free(old_source);
-                return collection_error;
+                v3_tonieplay_library_collection_t tonieplay;
+                error_t tonieplay_error =
+                    v3_native_library_source_is_candidate(item_data)
+                        ? v3_tonieplay_library_collection_load(
+                              client_ctx->settings->internal.librarydirfull,
+                              item_data, TRUE, &tonieplay)
+                        : ERROR_INVALID_FILE;
+                if (tonieplay_error != NO_ERROR ||
+                    client_ctx->settings->toniebox.boxGeneration !=
+                        GENERATION_TB2)
+                {
+                    TRACE_ERROR("Rejecting native library source %s: audio=%s tonieplay=%s generation=%u\r\n",
+                                item_data, error2text(collection_error),
+                                error2text(tonieplay_error),
+                                (unsigned)client_ctx->settings->toniebox.boxGeneration);
+                    if (tonieplay_error == NO_ERROR)
+                    {
+                        v3_tonieplay_library_collection_free(&tonieplay);
+                    }
+                    osFreeMem(contentPath);
+                    free_content_json(&content_json);
+                    free(old_source);
+                    return tonieplay_error != NO_ERROR
+                               ? tonieplay_error
+                               : ERROR_ACCESS_DENIED;
+                }
+                tonieplay_source = true;
+                v3_tonieplay_library_collection_free(&tonieplay);
             }
-            v3_native_library_collection_free(&collection);
+            else
+            {
+                v3_native_library_collection_free(&collection);
+            }
         }
         const char *current_source = content_json.source ? content_json.source : "";
         if (osStrcmp(item_data, current_source))
@@ -5090,6 +5249,15 @@ error_t handleApiContentJsonSet(HttpConnection *connection, const char_t *uri, c
             content_json.source = strdup(item_data);
             updated = true;
             source_changed = osStrcmp(item_data, old_source ? old_source : "") != 0;
+            if (tonieplay_source && !content_json.nocloud)
+            {
+                content_json.nocloud = true;
+            }
+        }
+        else if (tonieplay_source && !content_json.nocloud)
+        {
+            content_json.nocloud = true;
+            updated = true;
         }
     }
     if (queryGet(post_data, "tonie_model", item_data, sizeof(item_data)))
@@ -5152,6 +5320,12 @@ error_t handleApiContentJsonSet(HttpConnection *connection, const char_t *uri, c
             content_json.claimed = target_value;
             updated = true;
         }
+    }
+
+    if (tonieplay_source && !content_json.nocloud)
+    {
+        content_json.nocloud = true;
+        updated = true;
     }
 
     if (updated)

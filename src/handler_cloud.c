@@ -76,7 +76,6 @@ static void v3_native_import_library_if_enabled(client_ctx_t *client_ctx,
 {
     if (client_ctx == NULL || client_ctx->settings == NULL || ruid == NULL ||
         !client_ctx->settings->cloud.cacheContentV3 ||
-        !client_ctx->settings->cloud.cacheToLibraryV3 ||
         !v3_native_cache_active_version(
             client_ctx->settings->internal.cachedirfull,
             client_ctx->settings->internal.overlayNumber, ruid, NULL))
@@ -84,13 +83,31 @@ static void v3_native_import_library_if_enabled(client_ctx_t *client_ctx,
         return;
     }
 
-    error_t error = v3_native_cache_import_active_library(
+    bool_t tonieplay = v3_native_cache_active_is_tonieplay(
         client_ctx->settings->internal.cachedirfull,
-        client_ctx->settings->internal.librarydirfull,
         client_ctx->settings->internal.overlayNumber, ruid);
+    if ((tonieplay &&
+         !client_ctx->settings->cloud.cacheTonieplayToLibraryV3) ||
+        (!tonieplay && !client_ctx->settings->cloud.cacheToLibraryV3))
+    {
+        return;
+    }
+
+    error_t error = tonieplay
+                        ? v3_native_cache_import_active_tonieplay_library(
+                              client_ctx->settings->internal.cachedirfull,
+                              client_ctx->settings->internal.librarydirfull,
+                              client_ctx->settings->internal.overlayNumber,
+                              ruid)
+                        : v3_native_cache_import_active_library(
+                              client_ctx->settings->internal.cachedirfull,
+                              client_ctx->settings->internal.librarydirfull,
+                              client_ctx->settings->internal.overlayNumber,
+                              ruid);
     if (error != NO_ERROR)
     {
-        TRACE_WARNING("Could not import complete TB2 V3 cache into library overlay=%u rUID=%s: %s\r\n",
+        TRACE_WARNING("Could not import complete TB2 V3 %s cache into library overlay=%u rUID=%s: %s\r\n",
+                      tonieplay ? "Tonieplay" : "audio",
                       (unsigned)client_ctx->settings->internal.overlayNumber,
                       ruid, error2text(error));
     }
@@ -174,6 +191,11 @@ static void v3_native_chapter_header(void *source, HttpClientContext *cloud,
                                      const char *header, const char *value)
 {
     v3_native_chapter_cbr_t *context = source;
+    if (context->cache_enabled && header != NULL && value != NULL &&
+        !osStrcasecmp(header, "Content-Type"))
+    {
+        v3_native_cache_object_content_type(&context->cache, value);
+    }
     if (context->passthrough.connection != NULL)
     {
         cbrCloudHeaderPassthrough(&context->passthrough, cloud, header, value);
@@ -1269,6 +1291,13 @@ error_t handleCloudContentExt(HttpConnection *connection, const char_t *uri, con
         freeTonieInfo(tonieInfo);
         return error;
     }
+    if (tonieInfo->json._source_type == CT_SOURCE_TONIEPLAY_COLLECTION)
+    {
+        TRACE_WARNING("Rejecting TB2 Tonieplay collection on TB1 content path rUID=%s\r\n",
+                      ruid);
+        freeTonieInfo(tonieInfo);
+        return ERROR_ACCESS_DENIED;
+    }
     if (tonieInfo->json._source_type == CT_SOURCE_STREAM)
     {
         char *streamFileRel = &tonieInfo->json._streamFile[osStrlen(client_ctx->settings->internal.datadirfull)];
@@ -1745,6 +1774,7 @@ static const char *content_source_type_name(ct_source_t source_type)
         case CT_SOURCE_TAP_CACHED: return "tap_cached";
         case CT_SOURCE_STREAM: return "stream";
         case CT_SOURCE_NATIVE_COLLECTION: return "native_collection";
+        case CT_SOURCE_TONIEPLAY_COLLECTION: return "tonieplay_collection";
         default: return "unknown";
     }
 }
@@ -2178,6 +2208,12 @@ static bool_t freshness_get_natural_server_audio_id(tonie_info_t *tonieInfo, uin
     {
         return v3_native_library_source_audio_id(tonieInfo->json.source,
                                                   audio_id);
+    }
+    if (tonieInfo->json._source_type == CT_SOURCE_TONIEPLAY_COLLECTION &&
+        tonieInfo->json._version != 0)
+    {
+        *audio_id = tonieInfo->json._version;
+        return TRUE;
     }
 
     bool_t tap_freshness = (tonieInfo->json._source_type == CT_SOURCE_TAP_STREAM || tonieInfo->json._source_type == CT_SOURCE_TAP_CACHED) &&
@@ -4371,8 +4407,12 @@ static error_t v3_manual_download_write_result(HttpConnection *connection,
         cJSON_AddStringToObject(response, "ruid", ruid != NULL ? ruid : "") == NULL ||
         cJSON_AddNumberToObject(response, "upstreamStatus", upstream_status) == NULL ||
         cJSON_AddNumberToObject(response, "version", version) == NULL ||
+        cJSON_AddNumberToObject(response, "objectsCompleted", completed) == NULL ||
+        cJSON_AddNumberToObject(response, "objectsTotal", total) == NULL ||
         cJSON_AddNumberToObject(response, "chaptersCompleted", completed) == NULL ||
         cJSON_AddNumberToObject(response, "chaptersTotal", total) == NULL ||
+        (chapter != NULL &&
+         cJSON_AddStringToObject(response, "object", chapter) == NULL) ||
         (chapter != NULL &&
          cJSON_AddStringToObject(response, "chapter", chapter) == NULL))
     {
@@ -4574,17 +4614,18 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
     }
 
     size_t completed = 0;
-    for (size_t i = 0; i < plan.chapter_count; i++)
+    for (size_t i = 0; i < plan.object_count; i++)
     {
-        const v3_native_cache_download_chapter_t *chapter = &plan.chapters[i];
+        const v3_native_cache_download_object_t *object = &plan.objects[i];
         v3_native_cache_chapter_capture_t capture;
         char *serve_path = NULL;
         v3_native_cache_chapter_action_t action =
             v3_native_cache_chapter_prepare(settings->internal.cachedirfull,
                                             settings->internal.overlayNumber,
-                                            chapter->name, &capture,
+                                            object->name, &capture,
                                             &serve_path);
-        if (action == V3_NATIVE_CHAPTER_SERVE)
+        if (action == V3_NATIVE_CHAPTER_SERVE ||
+            action == V3_NATIVE_CHAPTER_STAGED)
         {
             osFreeMem(serve_path);
             completed++;
@@ -4595,14 +4636,16 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
             v3_native_cache_chapter_abort(&capture);
             error_t response_error = v3_manual_download_fail(
                 connection, settings, V3_MANUAL_DOWNLOAD_CHAPTER,
-                ERROR_UNEXPECTED_STATE, canonical_ruid, chapter->name, 0,
-                plan.version, completed, plan.chapter_count, TRUE);
+                ERROR_UNEXPECTED_STATE, canonical_ruid, object->name, 0,
+                plan.version, completed, plan.object_count, TRUE);
             v3_native_cache_download_plan_free(&plan);
             return response_error;
         }
 
-        char *chapter_uri = custom_asprintf("/v3/chapter/%s", chapter->name);
-        char *chapter_query = custom_asprintf("auth=%s", chapter->auth);
+        char *chapter_uri = custom_asprintf("/v3/chapter/%s", object->name);
+        char *chapter_query = object->auth[0] != '\0'
+                                  ? custom_asprintf("auth=%s", object->auth)
+                                  : strdup("");
         if (chapter_uri == NULL || chapter_query == NULL)
         {
             osFreeMem(chapter_uri);
@@ -4610,8 +4653,8 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
             v3_native_cache_chapter_abort(&capture);
             error_t response_error = v3_manual_download_fail(
                 connection, settings, V3_MANUAL_DOWNLOAD_CHAPTER,
-                ERROR_OUT_OF_MEMORY, canonical_ruid, chapter->name, 0,
-                plan.version, completed, plan.chapter_count, TRUE);
+                ERROR_OUT_OF_MEMORY, canonical_ruid, object->name, 0,
+                plan.version, completed, plan.object_count, TRUE);
             v3_native_cache_download_plan_free(&plan);
             return response_error;
         }
@@ -4631,10 +4674,10 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
             .body = v3_native_chapter_body,
             .disconnect = v3_native_chapter_disconnect,
         };
-        TRACE_INFO("Downloading TB2 V3 chapter overlay=%u rUID=%s version=%" PRIu32 " chapter=%" PRIuSIZE "/%" PRIuSIZE " name=%s bytes=%" PRIu32 "\r\n",
+        TRACE_INFO("Downloading TB2 V3 object overlay=%u rUID=%s version=%" PRIu32 " object=%" PRIuSIZE "/%" PRIuSIZE " name=%s type=%s bytes=%" PRIu32 "\r\n",
                    (unsigned)settings->internal.overlayNumber,
-                   canonical_ruid, plan.version, i + 1U, plan.chapter_count,
-                   chapter->name, chapter->file_size);
+                   canonical_ruid, plan.version, i + 1U, plan.object_count,
+                   object->name, object->type, object->file_size);
         request_error = cloud_request_tb2_get(
             settings->cloud.remote_hostname_tb2, 0, chapter_uri,
             chapter_query, identity.auth, &chapter_cbr);
@@ -4660,8 +4703,8 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
                     : V3_MANUAL_DOWNLOAD_CHAPTER;
             error_t response_error = v3_manual_download_fail(
                 connection, settings, failure_stage, chapter_error,
-                canonical_ruid, chapter->name, chapter_status, plan.version,
-                completed, plan.chapter_count, TRUE);
+                canonical_ruid, object->name, chapter_status, plan.version,
+                completed, plan.object_count, TRUE);
             v3_native_cache_download_plan_free(&plan);
             return response_error;
         }
@@ -4675,7 +4718,7 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
                            canonical_ruid, &active_version) &&
                        active_version == plan.version;
     uint32_t version = plan.version;
-    size_t total = plan.chapter_count;
+    size_t total = plan.object_count;
     v3_native_cache_download_plan_free(&plan);
     if (!activated)
     {
@@ -4686,7 +4729,7 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
                                        TRUE);
     }
 
-    TRACE_INFO("Completed TB2 manual content download overlay=%u rUID=%s version=%" PRIu32 " chapters=%" PRIuSIZE "\r\n",
+    TRACE_INFO("Completed TB2 manual content download overlay=%u rUID=%s version=%" PRIu32 " objects=%" PRIuSIZE "\r\n",
                (unsigned)settings->internal.overlayNumber, canonical_ruid,
                version, total);
     return v3_manual_download_write_result(connection,
@@ -4723,12 +4766,50 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
                                tonieInfo->json.source[0] != '\0';
 
     bool_t local_candidate = tonieInfo->json._source_type == CT_SOURCE_NATIVE_COLLECTION ||
+                             tonieInfo->json._source_type == CT_SOURCE_TONIEPLAY_COLLECTION ||
                              tonieInfo->json._source_type == CT_SOURCE_TAP_STREAM ||
                              (tonieInfo->exists && tonieInfo->valid &&
                               tonieInfo->json._source_type != CT_SOURCE_TAF_INCOMPLETE);
     if (local_candidate)
     {
         uint32_t naturalVersion = 0;
+        if (tonieInfo->json._source_type == CT_SOURCE_TONIEPLAY_COLLECTION &&
+            freshness_get_natural_server_audio_id(tonieInfo,
+                                                  &naturalVersion, NULL))
+        {
+            uint32_t contentVersion = freshness_v3_content_meta_version(
+                client_ctx->settings, tonieInfo, ruid, naturalVersion);
+            uint8_t *manifest = NULL;
+            size_t manifest_length = 0;
+            error = contentVersion == 0
+                        ? ERROR_FAILURE
+                        : v3_tonieplay_library_activate(
+                              client_ctx->settings->internal.librarydirfull,
+                              tonieInfo->json.source,
+                              client_ctx->settings->internal.overlayNumber,
+                              ruid, contentVersion, &manifest,
+                              &manifest_length);
+            if (error == NO_ERROR)
+            {
+                connection->response.keepAlive = true;
+                connection->response.noCache = true;
+                httpPrepareHeader(connection, "application/json",
+                                  manifest_length);
+                error = httpWriteResponse(connection, manifest,
+                                          manifest_length, false);
+                cJSON_free(manifest);
+                if (error == NO_ERROR)
+                {
+                    freshness_clear_cache_after_content_request(
+                        client_ctx, V3_CONTENT_META, ruid);
+                }
+                freeTonieInfo(tonieInfo);
+                return error;
+            }
+            cJSON_free(manifest);
+        }
+        v3_tonieplay_library_deactivate(
+            client_ctx->settings->internal.overlayNumber);
         v3_local_content_generation_t generation;
         osMemset(&generation, 0, sizeof(generation));
         if (!freshness_get_natural_server_audio_id(tonieInfo, &naturalVersion, NULL))
@@ -5182,6 +5263,31 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
                                   : NULL;
     if (native_name != NULL)
     {
+        char *tonieplay_path = NULL;
+        char tonieplay_content_type[V3_NATIVE_CACHE_CONTENT_TYPE_SIZE] = {0};
+        if (v3_tonieplay_library_resolve(
+                client_ctx->settings->internal.overlayNumber, native_name,
+                &tonieplay_path, tonieplay_content_type))
+        {
+            TRACE_INFO("Serve local TB2 Tonieplay object overlay=%u name=%s contentType=%s\r\n",
+                       (unsigned)client_ctx->settings->internal.overlayNumber,
+                       native_name, tonieplay_content_type);
+            connection->response.keepAlive = true;
+            connection->response.noCache = true;
+            connection->response.contentType = tonieplay_content_type;
+            error_t local_error = httpSendResponseStreamUnsafe(
+                connection, uri, tonieplay_path, false);
+            osFreeMem(tonieplay_path);
+            return local_error;
+        }
+        if (v3_tonieplay_library_route_assigned(
+                client_ctx->settings->internal.overlayNumber))
+        {
+            TRACE_DEBUG("Rejecting object outside active local Tonieplay collection overlay=%u name=%s\r\n",
+                        (unsigned)client_ctx->settings->internal.overlayNumber,
+                        native_name);
+            return v3_local_write_empty_status(connection, 404);
+        }
         native_action = v3_native_cache_chapter_prepare(
             client_ctx->settings->internal.cachedirfull,
             client_ctx->settings->internal.overlayNumber, native_name,
@@ -5194,7 +5300,10 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
                        native_capture.version, native_name);
             connection->response.keepAlive = true;
             connection->response.noCache = true;
-            connection->response.contentType = "audio/ogg";
+            connection->response.contentType =
+                native_capture.content_type[0] != '\0'
+                    ? native_capture.content_type
+                    : "application/octet-stream";
             error_t cache_error = httpSendResponseStreamUnsafe(
                 connection, uri, native_path, false);
             osFreeMem(native_path);
@@ -5208,7 +5317,8 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
             return v3_local_write_empty_status(connection, 500);
         }
         if (native_action == V3_NATIVE_CHAPTER_CAPTURE ||
-            native_action == V3_NATIVE_CHAPTER_FORWARD)
+            native_action == V3_NATIVE_CHAPTER_FORWARD ||
+            native_action == V3_NATIVE_CHAPTER_STAGED)
         {
             tonie_info_t *route_info = getTonieInfoFromRuid(
                 native_capture.ruid, false, client_ctx->settings);
@@ -5241,7 +5351,8 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
         v3_native_chapter_cbr_t cache_ctx;
         req_cbr_t cbr;
         if (native_action == V3_NATIVE_CHAPTER_CAPTURE ||
-            native_action == V3_NATIVE_CHAPTER_FORWARD)
+            native_action == V3_NATIVE_CHAPTER_FORWARD ||
+            native_action == V3_NATIVE_CHAPTER_STAGED)
         {
             osMemset(&cache_ctx, 0, sizeof(cache_ctx));
             cache_ctx.cache = native_capture;
@@ -5268,7 +5379,8 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
             client_ctx->settings->cloud.remote_hostname_tb2, 0, uri,
             queryString, NULL, &cbr);
         if (native_action == V3_NATIVE_CHAPTER_CAPTURE ||
-            native_action == V3_NATIVE_CHAPTER_FORWARD)
+            native_action == V3_NATIVE_CHAPTER_FORWARD ||
+            native_action == V3_NATIVE_CHAPTER_STAGED)
         {
             v3_native_cache_chapter_abort(&cache_ctx.cache);
         }
@@ -5279,7 +5391,8 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
     }
 
     if (native_action == V3_NATIVE_CHAPTER_CAPTURE ||
-        native_action == V3_NATIVE_CHAPTER_FORWARD)
+        native_action == V3_NATIVE_CHAPTER_FORWARD ||
+        native_action == V3_NATIVE_CHAPTER_STAGED)
     {
         v3_native_cache_chapter_abort(&native_capture);
     }

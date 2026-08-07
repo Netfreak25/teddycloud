@@ -118,9 +118,27 @@ error_t load_content_json(const char *content_path, contentJson_t *content_json,
                         }
                         else
                         {
-                            TRACE_ERROR("Invalid native library source %s: %s\r\n",
-                                        content_json->source,
-                                        error2text(collection_error));
+                            v3_tonieplay_library_collection_t tonieplay;
+                            error_t tonieplay_error =
+                                v3_tonieplay_library_collection_load(
+                                    settings->internal.librarydirfull,
+                                    content_json->source, FALSE, &tonieplay);
+                            if (tonieplay_error == NO_ERROR)
+                            {
+                                content_json->_source_type =
+                                    CT_SOURCE_TONIEPLAY_COLLECTION;
+                                content_json->_version =
+                                    tonieplay.content_version;
+                                v3_tonieplay_library_collection_free(
+                                    &tonieplay);
+                            }
+                            else
+                            {
+                                TRACE_ERROR("Invalid native library source %s: audio=%s tonieplay=%s\r\n",
+                                            content_json->source,
+                                            error2text(collection_error),
+                                            error2text(tonieplay_error));
+                            }
                         }
                     }
                     else if (isValidTaf(content_json->_source_resolved, settings->core.full_taf_validation))

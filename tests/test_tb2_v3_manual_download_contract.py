@@ -64,14 +64,15 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
         for forbidden in ("fsOpenFile", "fsWriteFile", "fsRenameFile"):
             self.assertNotIn(forbidden, self.manual)
 
-    def test_download_plan_uses_validated_names_and_bounded_auth(self):
+    def test_download_plan_uses_validated_names_and_opaque_auth(self):
         self.assertIn("V3_NATIVE_CACHE_CHAPTER_AUTH_SIZE", self.cache_header)
-        self.assertIn("v3_native_chapter_auth_is_safe", self.cache)
+        self.assertIn("V3_NATIVE_CACHE_OBJECT_AUTH_SIZE 4096", self.cache_header)
         parser_start = self.cache.index("static error_t v3_native_parse_manifest(")
         parser_end = self.cache.index("static char *v3_native_generation_dir(")
         parser = self.cache[parser_start:parser_end]
         self.assertIn("v3_native_cache_chapter_name_is_safe", parser)
-        self.assertIn("v3_native_chapter_auth_is_safe", parser)
+        self.assertIn("v3_native_object_string_fits(auth", parser)
+        self.assertNotIn("isalnum(value)", parser)
 
     def test_incomplete_download_restores_previous_active_route(self):
         restore_start = self.cloud.index(
@@ -96,6 +97,9 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
             '"upstreamStatus"',
             '"chaptersCompleted"',
             '"chaptersTotal"',
+            '"objectsCompleted"',
+            '"objectsTotal"',
+            '"object"',
         ):
             self.assertIn(field, self.cloud)
         self.assertIn("TB2 manual content download failed stage=%s", self.cloud)
