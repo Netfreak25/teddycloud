@@ -53,6 +53,7 @@ class Tb2TonieplayCacheContractTests(unittest.TestCase):
         self.assertNotIn('osStrcmp(type->valuestring, "audio")', parser)
         for field in ("name", "auth", "type", "filename", "fileSize"):
             self.assertIn(f'"{field}"', parser)
+        self.assertIn("cJSON *item = NULL;", parser)
         self.assertIn('"application/octet-stream"', parser)
         self.assertIn('"audio/ogg"', parser)
 

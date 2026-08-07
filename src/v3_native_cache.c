@@ -335,6 +335,7 @@ static error_t v3_native_parse_manifest(const uint8_t *data,
     osMemset(parsed, 0, count * sizeof(*parsed));
     size_t index = 0;
     error_t error = NO_ERROR;
+    cJSON *item = NULL;
     cJSON_ArrayForEach(item, content)
     {
         cJSON *type = cJSON_GetObjectItemCaseSensitive(item, "type");
