@@ -850,6 +850,38 @@ error_t handleApiSettingsReset(HttpConnection *connection, const char_t *uri, co
     return httpWriteResponseString(connection, response, false);
 }
 
+static bool_t api_is_native_collection_detail_path(
+    const char *native_collections_path, const char *path_absolute)
+{
+    if (native_collections_path == NULL || path_absolute == NULL)
+    {
+        return FALSE;
+    }
+
+    size_t root_length = osStrlen(native_collections_path);
+    if (osStrncmp(path_absolute, native_collections_path, root_length) ||
+        path_absolute[root_length] != '/')
+    {
+        return FALSE;
+    }
+
+    const char *hash = path_absolute + root_length + 1U;
+    if (osStrlen(hash) < V3_NATIVE_LIBRARY_HASH_HEX_LENGTH)
+    {
+        return FALSE;
+    }
+    for (size_t i = 0; i < V3_NATIVE_LIBRARY_HASH_HEX_LENGTH; i++)
+    {
+        if (!((hash[i] >= '0' && hash[i] <= '9') ||
+              (hash[i] >= 'a' && hash[i] <= 'f')))
+        {
+            return FALSE;
+        }
+    }
+    return hash[V3_NATIVE_LIBRARY_HASH_HEX_LENGTH] == '\0' ||
+           hash[V3_NATIVE_LIBRARY_HASH_HEX_LENGTH] == '/';
+}
+
 error_t handleApiFileIndexV2(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
 {
     char overlay[16];
@@ -900,6 +932,8 @@ error_t handleApiFileIndexV2(HttpConnection *connection, const char_t *uri, cons
     bool_t isNativeCollectionsRoot =
         nativeCollectionsPath != NULL &&
         !osStrcmp(pathAbsolute, nativeCollectionsPath);
+    bool_t isNativeCollectionDetail = api_is_native_collection_detail_path(
+        nativeCollectionsPath, pathAbsolute);
 
     /* Fast path for custom_img: skip TAF parsing and content.json - images need only name, date, size, isDir */
     bool_t isCustomImg = (osStrcmp(special, "custom_img") == 0);
@@ -949,9 +983,11 @@ error_t handleApiFileIndexV2(HttpConnection *connection, const char_t *uri, cons
         {
             char *source = custom_asprintf(
                 "lib://by/contentHash/%s/library-entry.json", entry.name);
+            bool_t is_native_candidate =
+                source != NULL && v3_native_library_source_is_candidate(source);
             v3_native_library_collection_t collection;
             error_t collection_error =
-                source != NULL && v3_native_library_source_is_candidate(source)
+                is_native_candidate
                     ? v3_native_library_collection_load(rootPath, source,
                                                         FALSE, &collection)
                     : ERROR_INVALID_FILE;
@@ -1143,6 +1179,26 @@ error_t handleApiFileIndexV2(HttpConnection *connection, const char_t *uri, cons
                 continue;
             }
             osFreeMem(source);
+            if (is_native_candidate)
+            {
+                /* A canonical native collection that fails validation must stay
+                 * a plain read-only directory. Passing it through the generic
+                 * content metadata scanner would interpret library-entry.json
+                 * as a Tonie content sidecar and overwrite the manifest. */
+                osFreeMem(filePathAbsolute);
+                cJSON_AddItemToArray(jsonArray, jsonEntry);
+                continue;
+            }
+        }
+
+        if (isNativeCollectionDetail)
+        {
+            /* Native manifests and Tonieplay content-meta files are data, not
+             * TeddyCloud content sidecars. Never parse or migrate them through
+             * load_content_json while browsing the read-only detail view. */
+            osFreeMem(filePathAbsolute);
+            cJSON_AddItemToArray(jsonArray, jsonEntry);
+            continue;
         }
 
         tonie_info_t *tafInfo = getTonieInfo(filePathAbsolute, false, client_ctx->settings);

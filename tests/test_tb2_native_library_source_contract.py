@@ -35,6 +35,9 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
         cls.web_player = (
             ROOT / "teddycloud_web/src/provider/AudioProvider.tsx"
         ).read_text(encoding="utf-8")
+        cls.repair_script = (
+            ROOT / "contrib/repair_tb2_native_library.py"
+        ).read_text(encoding="utf-8")
 
     @staticmethod
     def section(source: str, start: str, end: str) -> str:
@@ -159,6 +162,30 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
             '"ogg-opus"',
         ):
             self.assertIn(marker, index)
+
+    def test_file_index_never_parses_native_manifests_as_content_sidecars(self) -> None:
+        index = self.section(
+            self.api,
+            "error_t handleApiFileIndexV2(",
+            "error_t handleApiFileIndex(",
+        )
+        generic_metadata = index.index(
+            "tonie_info_t *tafInfo = getTonieInfo(filePathAbsolute"
+        )
+        self.assertLess(index.index("if (is_native_candidate)"), generic_metadata)
+        self.assertLess(index.index("if (isNativeCollectionDetail)"), generic_metadata)
+        self.assertIn("api_is_native_collection_detail_path", self.api)
+
+    def test_manual_repair_is_dry_run_and_requires_an_intact_cache_generation(self) -> None:
+        for marker in (
+            'parser.add_argument("--apply"',
+            "is_browser_overwrite",
+            "find_matching_generations",
+            "archived_chapters_match",
+            "manual recache required: Tonieplay metadata cannot be reconstructed safely",
+            "library-entry.json.before-browser-repair.bak",
+        ):
+            self.assertIn(marker, self.repair_script)
 
     def test_documentation_covers_both_generations_and_failure_policy(self) -> None:
         for marker in (
