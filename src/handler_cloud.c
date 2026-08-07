@@ -628,7 +628,19 @@ error_t handleCloudOTA(HttpConnection *connection, const char_t *uri, const char
     return ret;
 }
 
-bool checkCustomTonie(char *ruid, uint8_t *token, settings_t *settings)
+#define TONIE_UID_SUFFIX "0304E0"
+#define TONIEPLAY_UID_SUFFIX "0104E0"
+
+static bool_t ruid_has_suffix(const char *ruid, const char *suffix)
+{
+    size_t suffix_length = osStrlen(suffix);
+    return ruid != NULL && osStrlen(ruid) == TB2_RUID_HEX_LENGTH &&
+           suffix_length <= TB2_RUID_HEX_LENGTH &&
+           osStrcasecmp(ruid + TB2_RUID_HEX_LENGTH - suffix_length, suffix) == 0;
+}
+
+bool checkCustomTonie(char *ruid, uint8_t *token, settings_t *settings,
+                      bool_t allow_tonieplay_uid)
 {
     if (settings->cloud.markCustomTagByPass)
     {
@@ -649,14 +661,14 @@ bool checkCustomTonie(char *ruid, uint8_t *token, settings_t *settings)
     }
     if (settings->cloud.markCustomTagByUid)
     {
-        // Ignore TB2 special files 00000af0 (00000001)
-        if (!(ruid[0] == '0' && ruid[1] == '0' && ruid[2] == '0' && ruid[3] == '0' && ruid[4] == '0' && ruid[5] == 'a' && ruid[6] == 'f' && ruid[7] == '0'))
+        bool_t system_ruid = tb2_ruid_classify(ruid) == TB2_RUID_SYSTEM;
+        bool_t tonie_uid = ruid_has_suffix(ruid, TONIE_UID_SUFFIX);
+        bool_t tonieplay_uid = allow_tonieplay_uid &&
+                               ruid_has_suffix(ruid, TONIEPLAY_UID_SUFFIX);
+        if (!system_ruid && !tonie_uid && !tonieplay_uid)
         {
-            if (ruid[15] != '0' || ruid[14] != 'e' || ruid[13] != '4' || ruid[12] != '0' || ruid[11] != '3' || ruid[10] != '0')
-            {
-                TRACE_INFO("Found possible custom tonie by uid\r\n");
-                return true;
-            }
+            TRACE_INFO("Found possible custom tonie by uid\r\n");
+            return true;
         }
     }
     return false;
@@ -773,7 +785,7 @@ error_t handleCloudClaim(HttpConnection *connection, const char_t *uri, const ch
 
     if (tonie_cloud_access_allowed(tonieInfo))
     {
-        if (checkCustomTonie(ruid, token, client_ctx->settings) && !tonieInfo->json.cloud_override && connection->request.auth.found)
+        if (checkCustomTonie(ruid, token, client_ctx->settings, FALSE) && !tonieInfo->json.cloud_override && connection->request.auth.found)
         {
             TRACE_INFO(" >> custom tonie detected, nothing forwarded\r\n");
             markCustomTonie(tonieInfo);
@@ -812,7 +824,7 @@ error_t handleCloudClaim(HttpConnection *connection, const char_t *uri, const ch
     return ret;
 }
 
-tonie_info_t *getTonieInfoForRequest(HttpConnection *connection, const char_t *uri, int ruid_uri_begin, const char_t *queryString, client_ctx_t *client_ctx, bool_t noPassword, char *ruid, bool_t *tonie_marked, error_t *error)
+tonie_info_t *getTonieInfoForRequest(HttpConnection *connection, const char_t *uri, int ruid_uri_begin, const char_t *queryString, client_ctx_t *client_ctx, bool_t noPassword, bool_t allow_tonieplay_uid, char *ruid, bool_t *tonie_marked, error_t *error)
 {
     uint8_t *token = connection->private.authentication_token;
 
@@ -884,7 +896,7 @@ tonie_info_t *getTonieInfoForRequest(HttpConnection *connection, const char_t *u
         }
     }
 
-    if (!tonieInfo->json.nocloud && !noPassword && checkCustomTonie(ruid, token, client_ctx->settings) && !tonieInfo->json.cloud_override && connection->request.auth.found)
+    if (!tonieInfo->json.nocloud && !noPassword && checkCustomTonie(ruid, token, client_ctx->settings, allow_tonieplay_uid) && !tonieInfo->json.cloud_override && connection->request.auth.found)
     {
         TRACE_INFO(" >> custom tonie detected, nothing forwarded\r\n");
         markCustomTonie(tonieInfo);
@@ -1269,7 +1281,7 @@ error_t handleCloudContentExt(HttpConnection *connection, const char_t *uri, con
     error_t error = NO_ERROR;
     bool_t tonie_marked = false;
 
-    tonie_info_t *tonieInfo = getTonieInfoForRequest(connection, uri, ruid_begin, queryString, client_ctx, noPassword, ruid, &tonie_marked, &error);
+    tonie_info_t *tonieInfo = getTonieInfoForRequest(connection, uri, ruid_begin, queryString, client_ctx, noPassword, FALSE, ruid, &tonie_marked, &error);
 
     if (tonieInfo == NULL)
     {
@@ -4753,7 +4765,9 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
     bool_t tonie_marked = false;
     bool noPassword = false;
 
-    tonie_info_t *tonieInfo = getTonieInfoForRequest(connection, uri, RUID_URI_CONTENT_META_BEGIN, queryString, client_ctx, noPassword, ruid, &tonie_marked, &error);
+    // Normal Tonies use ...0304E0; captured official Tonieplay discs use the
+    // distinct ...0104E0 family. No other UID family is exempted here.
+    tonie_info_t *tonieInfo = getTonieInfoForRequest(connection, uri, RUID_URI_CONTENT_META_BEGIN, queryString, client_ctx, noPassword, TRUE, ruid, &tonie_marked, &error);
 
     if (tonieInfo == NULL)
     {
@@ -5016,6 +5030,7 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
                                                          queryString,
                                                          client_ctx,
                                                          false,
+                                                         TRUE,
                                                          requested_ruid,
                                                          &tonie_marked,
                                                          &error);

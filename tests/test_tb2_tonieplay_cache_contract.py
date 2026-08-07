@@ -56,6 +56,41 @@ class Tb2TonieplayCacheContractTests(unittest.TestCase):
         self.assertIn('"application/octet-stream"', parser)
         self.assertIn('"audio/ogg"', parser)
 
+    def test_v3_content_accepts_only_known_tonieplay_uid_family(self) -> None:
+        detector = self.section(
+            self.cloud,
+            '#define TONIE_UID_SUFFIX "0304E0"',
+            "static bool_t tonie_cloud_access_allowed(",
+        )
+        self.assertIn('#define TONIEPLAY_UID_SUFFIX "0104E0"', detector)
+        self.assertIn("osStrcasecmp", detector)
+        self.assertIn("settings->cloud.markCustomTagByUid", detector)
+        self.assertIn("!system_ruid && !tonie_uid && !tonieplay_uid", detector)
+        self.assertIn(
+            "allow_tonieplay_uid &&\n                               ruid_has_suffix(ruid, TONIEPLAY_UID_SUFFIX)",
+            detector,
+        )
+
+        content_meta = self.section(
+            self.cloud,
+            "error_t handleCloudContentMetaV3(",
+            "error_t handleCloudChapterV3(",
+        )
+        self.assertIn(
+            "getTonieInfoForRequest(connection, uri, RUID_URI_CONTENT_META_BEGIN, queryString, client_ctx, noPassword, TRUE",
+            content_meta,
+        )
+
+        tb1_content = self.section(
+            self.cloud,
+            "error_t handleCloudContentExt(",
+            "error_t handleCloudContent(",
+        )
+        self.assertIn(
+            "getTonieInfoForRequest(connection, uri, ruid_begin, queryString, client_ctx, noPassword, FALSE",
+            tb1_content,
+        )
+
     def test_staging_is_complete_only_for_every_object(self) -> None:
         prepare = self.section(
             self.cache,
