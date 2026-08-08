@@ -227,78 +227,31 @@ static settings_t *tb2_mqtt_settings_from_certificate(TlsContext *tls_context)
 
     const char *subject = tls_context->client_cert_subject;
     const char *issuer = tls_context->client_cert_issuer;
-    if (subject == NULL || issuer == NULL || subject[0] == '\0' || issuer[0] == '\0')
+    if (subject == NULL || subject[0] == '\0')
     {
-        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity failed reason=certificate_identity_missing\r\n");
+        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity failed reason=client_certificate_missing\r\n");
         return NULL;
     }
     TRACE_DEBUG("TB2 MQTT upstream stage=box_client_auth certificate_present=true"
                 " subject='%s' issuer='%s' serial='%s'\r\n",
-                subject, issuer, tls_context->client_cert_serial);
+                subject, issuer != NULL && issuer[0] != '\0' ? issuer : "<missing>",
+                tls_context->client_cert_serial);
 
-    char common_name[32] = "";
-    size_t subject_length = osStrlen(subject);
-    if (subject_length == 15 && osStrncmp(subject, "b'", 2) == 0 && subject[14] == '\'')
+    char common_name[13] = "";
+    settings_t *settings = settings_get_existing_tb2_from_certificate_subject(
+        subject, common_name, sizeof(common_name));
+    if (settings == NULL)
     {
-        osMemcpy(common_name, subject + 2, 12);
-        common_name[12] = '\0';
-    }
-    else if (subject_length == 12)
-    {
-        osStrncpy(common_name, subject, sizeof(common_name) - 1);
-    }
-    else
-    {
-        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity failed reason=subject_format length=%"
-                    PRIuSIZE "\r\n", subject_length);
-        return NULL;
-    }
-    char canonical_common_name[13];
-    if (!settings_canonicalize_box_id(common_name, canonical_common_name,
-                                      sizeof(canonical_common_name)))
-    {
-        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity failed reason=subject_box_id_invalid\r\n");
-        return NULL;
-    }
-    osStrcpy(common_name, canonical_common_name);
-
-    bool_t trusted_issuer = osStrstr(issuer, "Toniebox Root CA") != NULL ||
-                            osStrstr(issuer, "Toniebox SubCA") != NULL ||
-                            osStrstr(issuer, "Boxine Factory SubCA") != NULL;
-    if (!trusted_issuer)
-    {
-        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity failed reason=issuer_untrusted\r\n");
+        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity failed reason=%s"
+                    " subject='%s' issuer='%s'\r\n",
+                    common_name[0] != '\0' ? "tb2_overlay_not_found" : "subject_box_id_invalid",
+                    subject, issuer != NULL && issuer[0] != '\0' ? issuer : "<missing>");
         return NULL;
     }
 
-    settings_t *settings = get_settings_cn(common_name);
-    bool_t overlay_found = settings != NULL && settings->internal.overlayNumber > 0 &&
-                           settings->internal.config_used &&
-                           osStrcasecmp(settings->commonName, common_name) == 0;
-    if (!overlay_found)
-    {
-        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity failed reason=overlay_validation"
-                    " overlay_found=%s config_used=%s trusted_issuer=%s\r\n",
-                    overlay_found ? "true" : "false",
-                    settings != NULL && settings->internal.config_used ? "true" : "false",
-                    trusted_issuer ? "true" : "false");
-        return NULL;
-    }
-    if (settings->toniebox.boxGeneration == GENERATION_UNKNOWN)
-    {
-        settings_set_unsigned_id("toniebox.boxGeneration", GENERATION_TB2,
-                                 settings->internal.overlayNumber);
-        settings_load_certs_id(settings->internal.overlayNumber);
-        TRACE_DEBUG("TB2 MQTT upstream stage=map_box_identity generation=tb2 source=mqtt\r\n");
-    }
-    if (settings->toniebox.boxGeneration != GENERATION_TB2)
-    {
-        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity failed reason=box_generation"
-                    " actual=%u expected=%u\r\n",
-                    (unsigned)settings->toniebox.boxGeneration,
-                    (unsigned)GENERATION_TB2);
-        return NULL;
-    }
+    TRACE_DEBUG("TB2 MQTT upstream stage=map_box_identity success box=%s overlay=%u"
+                " issuer_checked=false\r\n",
+                common_name, (unsigned)settings->internal.overlayNumber);
     return settings;
 }
 
@@ -892,10 +845,10 @@ static void tb2_mqtt_status_start(void)
     osReleaseMutex(&mqtt_passthrough_status.mutex);
 }
 
-static void tb2_mqtt_status_tunneling(void)
+static void tb2_mqtt_status_connected(void)
 {
     osAcquireMutex(&mqtt_passthrough_status.mutex);
-    osStrcpy(mqtt_passthrough_status.state, "tunneling");
+    osStrcpy(mqtt_passthrough_status.state, "connected");
     osReleaseMutex(&mqtt_passthrough_status.mutex);
 }
 
@@ -924,14 +877,14 @@ static void tb2_mqtt_status_finish(bool_t success, const char *error_code)
     {
         mqtt_passthrough_status.error_code[0] = '\0';
         osStrcpy(mqtt_passthrough_status.state,
-                 mqtt_passthrough_status.active_sessions > 0 ? "tunneling" : "armed");
+                 mqtt_passthrough_status.active_sessions > 0 ? "connected" : "ready");
     }
     else if (success)
     {
         mqtt_passthrough_status.last_success = time(NULL);
         mqtt_passthrough_status.error_code[0] = '\0';
         osStrcpy(mqtt_passthrough_status.state,
-                 mqtt_passthrough_status.active_sessions > 0 ? "tunneling" : "armed");
+                 mqtt_passthrough_status.active_sessions > 0 ? "connected" : "ready");
     }
     else
     {
@@ -2238,11 +2191,10 @@ void tb2_mqtt_passthrough_deinit(void)
     }
 }
 
-bool_t tb2_mqtt_passthrough_is_armed(void)
+bool_t tb2_mqtt_passthrough_is_enabled(void)
 {
     settings_t *settings = get_settings();
-    return settings->mqtt_client_upstream.enabled &&
-           settings->mqtt_client_upstream.passthrough_enabled;
+    return settings->mqtt_client_upstream.enabled;
 }
 
 error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
@@ -2257,28 +2209,33 @@ error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
     *handled = FALSE;
     if (box_settings_out != NULL)
         *box_settings_out = NULL;
-    if (!tb2_mqtt_passthrough_is_armed())
+    if (!tb2_mqtt_passthrough_is_enabled())
     {
         return NO_ERROR;
     }
     *handled = TRUE;
-    TRACE_DEBUG("TB2 MQTT upstream stage=passthrough_start armed=true\r\n");
+    TRACE_DEBUG("TB2 MQTT upstream stage=passthrough_start enabled=true\r\n");
 
     settings_t *box_settings = tb2_mqtt_settings_from_certificate(box_tls);
-    settings_t *identity_settings = tb2_mqtt_select_identity_settings(box_settings);
-    if (box_settings == NULL || !tb2_mqtt_has_original_identity(identity_settings))
+    if (box_settings == NULL)
     {
-        TRACE_ERROR("TB2 MQTT upstream stage=map_box_identity identity_material"
-                    " settings=%s ca=%s certificate=%s key=%s\r\n",
-                    box_settings != NULL ? "available" : "unavailable",
+        tb2_mqtt_trace_error("map_box_identity", ERROR_FAILURE);
+        tb2_mqtt_status_attempt_failed("identity_unavailable");
+        return ERROR_FAILURE;
+    }
+    settings_t *identity_settings = tb2_mqtt_select_identity_settings(box_settings);
+    if (!tb2_mqtt_has_original_identity(identity_settings))
+    {
+        TRACE_ERROR("TB2 MQTT upstream stage=select_upstream_identity identity_material"
+                    " settings=available ca=%s certificate=%s key=%s\r\n",
                     identity_settings != NULL && identity_settings->internal.client_tb2.ca != NULL &&
                             identity_settings->internal.client_tb2.ca[0] != '\0' ? "available" : "missing",
                     identity_settings != NULL && identity_settings->internal.client_tb2.crt != NULL &&
                             identity_settings->internal.client_tb2.crt[0] != '\0' ? "available" : "missing",
                     identity_settings != NULL && identity_settings->internal.client_tb2.key != NULL &&
                             identity_settings->internal.client_tb2.key[0] != '\0' ? "available" : "missing");
-        tb2_mqtt_trace_error("map_box_identity", ERROR_FAILURE);
-        tb2_mqtt_status_attempt_failed("identity_unavailable");
+        tb2_mqtt_trace_error("select_upstream_identity", ERROR_FAILURE);
+        tb2_mqtt_status_attempt_failed("upstream_identity_unavailable");
         return ERROR_FAILURE;
     }
 
@@ -2326,8 +2283,8 @@ error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
     }
 
     socketSetTimeout(box_socket, TB2_MQTT_TUNNEL_IO_TIMEOUT_MS);
-    tb2_mqtt_status_tunneling();
-    TRACE_DEBUG("TB2 MQTT upstream stage=passthrough_start tunneling=true session=%s\r\n",
+    tb2_mqtt_status_connected();
+    TRACE_DEBUG("TB2 MQTT upstream stage=passthrough_start connected=true session=%s\r\n",
                 created->capture.session_id);
     *session = created;
     if (box_settings_out != NULL)
@@ -2351,7 +2308,7 @@ error_t tb2_mqtt_passthrough_task(tb2_mqtt_passthrough_session_t *session)
     {
         return ERROR_INVALID_PARAMETER;
     }
-    if (!tb2_mqtt_passthrough_is_armed())
+    if (!tb2_mqtt_passthrough_is_enabled())
     {
         return ERROR_ABORTED;
     }
@@ -2489,14 +2446,10 @@ error_t tb2_mqtt_passthrough_write_status(HttpConnection *connection)
     {
         state = "disabled";
     }
-    else if (!settings->mqtt_client_upstream.passthrough_enabled)
-    {
-        state = "standby";
-    }
     else if (mqtt_passthrough_status.active_sessions == 0 &&
              mqtt_passthrough_status.error_code[0] == '\0')
     {
-        state = "armed";
+        state = "ready";
     }
     else
     {
@@ -2504,8 +2457,9 @@ error_t tb2_mqtt_passthrough_write_status(HttpConnection *connection)
     }
 
     cJSON_AddBoolToObject(json, "enabled", settings->mqtt_client_upstream.enabled);
+    /* Deprecated compatibility alias for older WebUI clients. */
     cJSON_AddBoolToObject(json, "passthrough_enabled",
-                         settings->mqtt_client_upstream.passthrough_enabled);
+                         settings->mqtt_client_upstream.enabled);
     cJSON_AddStringToObject(json, "state", state);
     cJSON_AddStringToObject(json, "hostname", settings->mqtt_client_upstream.hostname);
     cJSON_AddNumberToObject(json, "port", settings->mqtt_client_upstream.port);

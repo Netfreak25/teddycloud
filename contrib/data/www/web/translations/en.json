@@ -1024,10 +1024,9 @@
         },
         "mqttUpstreamStatus": {
             "disabled": "ICI upstream is disabled.",
-            "standby": "ICI upstream is enabled; transparent forwarding is disabled.",
-            "armed": "ICI forwarding is armed and waiting for a TB2 connection.",
+            "ready": "ICI upstream is ready and waiting for a TB2 connection.",
             "connecting": "Connecting to {{hostname}}:{{port}}.",
-            "tunneling": "The transparent ICI tunnel to {{hostname}}:{{port}} is active.",
+            "connected": "The packet-aware ICI upstream to {{hostname}}:{{port}} is connected.",
             "error": "ICI forwarding failed ({{errorCode}})."
         },
         "teddycloudStatusOffline": "Teddycloud server offline",
@@ -1760,12 +1759,8 @@
                 "description": "Skip TLS certificate verification (insecure!)"
             },
             "mqtt_client_upstream__enabled": {
-                "label": "Enable MQTT Client",
-                "description": "Enable the Tonies ICI upstream MQTT cloud path"
-            },
-            "mqtt_client_upstream__passthrough_enabled": {
-                "label": "Enable transparent capture forwarder",
-                "description": "Forward MQTT traffic unchanged while recording a full local capture"
+                "label": "Enable ICI MQTT upstream",
+                "description": "Enable packet-aware ICI forwarding, observation, filtering and capture together"
             },
             "mqtt_client_upstream__local_control_enabled": {
                 "label": "Allow TeddyCloud control during ICI upstream",
@@ -1781,11 +1776,11 @@
             },
             "mqtt_client_upstream__capture_dir": {
                 "label": "Capture directory",
-                "description": "Directory for full MQTT passthrough captures"
+                "description": "Directory for full packet-aware ICI upstream captures"
             },
             "mqtt_client_upstream__capture_max_mib": {
                 "label": "Maximum capture size",
-                "description": "Maximum total size of completed MQTT passthrough captures in MiB"
+                "description": "Maximum total size of completed packet-aware ICI captures in MiB"
             },
             "mqtt_client_upstream__forward__claim": {
                 "label": "Claim",

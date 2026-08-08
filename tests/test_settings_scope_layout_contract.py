@@ -210,10 +210,7 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
         )
         self.assertEqual(["toniebox2."], dependency["dependentPrefixes"])
         self.assertEqual(
-            {
-                ("mqtt_client_upstream.enabled", True),
-                ("mqtt_client_upstream.passthrough_enabled", True),
-            },
+            {("mqtt_client_upstream.enabled", True)},
             {(item["setting"], item["value"]) for item in dependency["appliesWhen"]},
         )
 

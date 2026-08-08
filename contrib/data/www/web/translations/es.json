@@ -1024,10 +1024,9 @@
         },
         "mqttUpstreamStatus": {
             "disabled": "El upstream ICI está desactivado.",
-            "standby": "El upstream ICI está activado; el reenvío transparente está desactivado.",
-            "armed": "El reenvío ICI está preparado y espera una conexión TB2.",
+            "ready": "El upstream ICI está preparado y espera una conexión TB2.",
             "connecting": "Conectando con {{hostname}}:{{port}}.",
-            "tunneling": "El túnel ICI transparente a {{hostname}}:{{port}} está activo.",
+            "connected": "El upstream ICI con procesamiento de paquetes a {{hostname}}:{{port}} está conectado.",
             "error": "El reenvío ICI falló ({{errorCode}})."
         },
         "teddycloudStatusOffline": "Servidor de Teddycloud desconectado",
@@ -1760,12 +1759,8 @@
                 "description": "Omitir verificación de certificado TLS (¡inseguro!)"
             },
             "mqtt_client_upstream__enabled": {
-                "label": "Habilitar Cliente MQTT",
-                "description": "Habilitar la ruta cloud MQTT upstream de los Tonies ICI"
-            },
-            "mqtt_client_upstream__passthrough_enabled": {
-                "label": "Habilitar reenviador de captura transparente",
-                "description": "Reenviar tráfico MQTT sin cambios durante la grabación de una captura local completa"
+                "label": "Habilitar upstream MQTT ICI",
+                "description": "Habilitar conjuntamente el reenvío ICI con procesamiento de paquetes, la observación, los filtros y la captura"
             },
             "mqtt_client_upstream__local_control_enabled": {
                 "label": "Permitir el control de TeddyCloud durante el upstream ICI",
@@ -1781,11 +1776,11 @@
             },
             "mqtt_client_upstream__capture_dir": {
                 "label": "Directorio de captura",
-                "description": "Directorio para capturas completas de paso de MQTT"
+                "description": "Directorio para capturas completas del upstream ICI con procesamiento de paquetes"
             },
             "mqtt_client_upstream__capture_max_mib": {
                 "label": "Tamaño máximo de captura",
-                "description": "Tamaño total máximo de capturas de paso MQTT completadas en MiB"
+                "description": "Tamaño total máximo de capturas ICI con procesamiento de paquetes en MiB"
             },
             "mqtt_client_upstream__forward__claim": {
                 "label": "Reclamar",

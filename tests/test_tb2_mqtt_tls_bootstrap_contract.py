@@ -19,7 +19,7 @@ class Tb2MqttTlsBootstrapContractTests(unittest.TestCase):
         cls.mqtt = (ROOT / "src" / "mqtt_server.c").read_text(encoding="utf-8")
 
     def test_v21_migrates_only_exact_legacy_default_paths(self):
-        self.assertIn("#define CONFIG_VERSION 21", self.settings_header)
+        self.assertIn("#define CONFIG_VERSION 22", self.settings_header)
         self.assertIn(
             '#define MQTT_SERVER_LEGACY_CERT_PATH "certs/server/ici.pem"',
             self.settings,

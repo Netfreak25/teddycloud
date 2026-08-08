@@ -340,11 +340,7 @@ error_t handleApiGetIndex(HttpConnection *connection, const char_t *uri, const c
         cJSON_AddBoolToObject(jsonEntry, "overlayed", opt->overlayed);
         cJSON_AddBoolToObject(jsonEntry, "internal", opt->internal);
         bool_t read_only = opt->read_only;
-        if (!osStrcmp(opt->option_name, "mqtt_client_upstream.passthrough_enabled"))
-        {
-            read_only = !get_settings_ovl(overlay)->mqtt_client_upstream.enabled;
-        }
-        else if (!osStrcmp(opt->option_name, "toniebox2.cacheToLibraryV3") ||
+        if (!osStrcmp(opt->option_name, "toniebox2.cacheToLibraryV3") ||
                  !osStrcmp(opt->option_name,
                            "toniebox2.cacheTonieplayToLibraryV3"))
         {

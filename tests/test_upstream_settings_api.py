@@ -19,7 +19,6 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         "mqtt_client_upstream.capture_dir",
         "mqtt_client_upstream.capture_max_mib",
         "mqtt_client_upstream.enabled",
-        "mqtt_client_upstream.passthrough_enabled",
         "mqtt_client_upstream.local_control_enabled",
         "cloud.remote_port_tb2",
         "cloud.remote_hostname_tb2",
@@ -96,9 +95,7 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         mqtt_enabled = options["mqtt_client_upstream.enabled"]
         self.assertFalse(mqtt_enabled["valueInit"])
         self.assertFalse(mqtt_enabled["readOnly"])
-        mqtt_passthrough = options["mqtt_client_upstream.passthrough_enabled"]
-        self.assertFalse(mqtt_passthrough["valueInit"])
-        self.assertTrue(mqtt_passthrough["readOnly"])
+        self.assertNotIn("mqtt_client_upstream.passthrough_enabled", options)
         mqtt_local_control = options["mqtt_client_upstream.local_control_enabled"]
         self.assertFalse(mqtt_local_control["valueInit"])
         self.assertFalse(mqtt_local_control["readOnly"])
@@ -147,7 +144,7 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         self.assertEqual(tb2_ca["valueInit"], "certs/client_tb2/ca.der")
         self.assertNotEqual(tb1_ca["valueInit"], tb2_ca["valueInit"])
 
-    def test_mqtt_passthrough_requires_upstream_and_disables_with_it(self):
+    def test_mqtt_upstream_uses_one_public_switch(self):
         self.set_setting("mqtt_client_upstream.enabled", "false")
         status, body = self.set_setting("mqtt_client_upstream.passthrough_enabled", "true")
         self.assertEqual(status, 200)
@@ -156,12 +153,12 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         status, body = self.set_setting("mqtt_client_upstream.enabled", "true")
         self.assertEqual(status, 200)
         self.assertEqual(body.strip(), "OK")
-        status, body = self.set_setting("mqtt_client_upstream.passthrough_enabled", "true")
+        status, body = self.request("GET", "/api/mqtt-client-upstream/status")
         self.assertEqual(status, 200)
-        self.assertEqual(body.strip(), "OK")
-
-        self.set_setting("mqtt_client_upstream.enabled", "false")
-        self.assertEqual(self.get_setting("mqtt_client_upstream.passthrough_enabled"), "false")
+        payload = json.loads(body)
+        self.assertTrue(payload["enabled"])
+        self.assertTrue(payload["passthrough_enabled"])
+        self.assertIn(payload["state"], ("ready", "connecting", "connected", "error"))
 
     def test_tb2_https_modes_are_mutually_exclusive(self):
         self.set_setting("cloud.tb2_enabled", "false")
@@ -202,7 +199,6 @@ class UpstreamSettingsApiTests(unittest.TestCase):
             "mqtt_client_upstream.capture_dir": "data/diagnostics/mqtt-test-capture",
             "mqtt_client_upstream.capture_max_mib": "128",
             "mqtt_client_upstream.enabled": "true",
-            "mqtt_client_upstream.passthrough_enabled": "true",
             "mqtt_client_upstream.local_control_enabled": "true",
             "cloud.remote_port_tb2": "14443",
             "cloud.remote_hostname_tb2": "tb2-https-test.invalid",
@@ -217,8 +213,7 @@ class UpstreamSettingsApiTests(unittest.TestCase):
             "mqtt_client_upstream.hostname": "ici-runtime-only.invalid",
             "mqtt_client_upstream.capture_dir": "data/diagnostics/mqtt-runtime-only",
             "mqtt_client_upstream.capture_max_mib": "129",
-            "mqtt_client_upstream.enabled": "true",
-            "mqtt_client_upstream.passthrough_enabled": "false",
+            "mqtt_client_upstream.enabled": "false",
             "mqtt_client_upstream.local_control_enabled": "false",
             "cloud.remote_port_tb2": "14444",
             "cloud.remote_hostname_tb2": "tb2-runtime-only.invalid",

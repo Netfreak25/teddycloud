@@ -246,21 +246,18 @@ static bool_t mqtt_connection_local_control_allowed(MqttClientConnection *conn)
            conn->client_ctx.settings->mqtt_client_upstream.local_control_enabled;
 }
 
-static bool_t mqtt_connection_has_trusted_client_cert(MqttClientConnection *conn)
+static settings_t *mqtt_connection_certificate_settings(MqttClientConnection *conn,
+                                                        char *canonical_box_id,
+                                                        size_t canonical_box_id_size)
 {
-    if (conn == NULL || conn->tlsContext == NULL)
+    if (conn == NULL || conn->tlsContext == NULL || canonical_box_id == NULL)
     {
-        return FALSE;
+        return NULL;
     }
 
-    char_t *subject = conn->tlsContext->client_cert_subject;
-    char_t *issuer = conn->tlsContext->client_cert_issuer;
-    return osStrlen(issuer) > 0 &&
-           (osStrstr(issuer, "Boxine Factory SubCA") != NULL ||
-            osStrstr(issuer, "Toniebox SubCA") != NULL ||
-            osStrstr(issuer, "TeddyCloud") != NULL ||
-            osStrstr(subject, "TeddyCloud") != NULL ||
-            osStrstr(issuer, "Toniebox Root CA") != NULL);
+    return settings_get_existing_tb2_from_certificate_subject(
+        conn->tlsContext->client_cert_subject, canonical_box_id,
+        canonical_box_id_size);
 }
 
 static bool_t mqtt_promote_connection_to_box(MqttClientConnection *conn, settings_t *box_settings,
@@ -493,7 +490,11 @@ static void mqtt_connection_update_context(MqttClientConnection *conn, const cha
                 settings_t *box_settings = get_settings_cn(mac);
                 if (box_settings != NULL && box_settings->internal.config_used)
                 {
-                    if (conn->box_connection || mqtt_connection_has_trusted_client_cert(conn))
+                    char certificate_box_id[13] = "";
+                    settings_t *certificate_settings =
+                        mqtt_connection_certificate_settings(conn, certificate_box_id,
+                                                             sizeof(certificate_box_id));
+                    if (conn->box_connection || certificate_settings == box_settings)
                     {
                         bool_t was_box_connection = conn->box_connection;
                         if (mqtt_promote_connection_to_box(conn, box_settings, canonical_mac,
@@ -1420,29 +1421,14 @@ static void mqtt_connection_update_context_from_cert(MqttClientConnection *conn)
     conn->box_overlay_id = 0;
     conn->box_common_name[0] = '\0';
     conn->box_topic_id[0] = '\0';
-    if (conn->tlsContext != NULL && osStrlen(conn->tlsContext->client_cert_subject) > 0)
+    if (conn->tlsContext != NULL)
     {
-        char_t *subject = conn->tlsContext->client_cert_subject;
-
-        if (mqtt_connection_has_trusted_client_cert(conn))
+        char canonical_box_id[13] = "";
+        settings_t *box_settings = mqtt_connection_certificate_settings(
+            conn, canonical_box_id, sizeof(canonical_box_id));
+        if (box_settings != NULL)
         {
-            char_t *commonName = NULL;
-            if (osStrlen(subject) == 15 && !osStrncmp(subject, "b'", 2) && subject[14] == '\'') // tonies standard cn with b'[MAC]'
-            {
-                commonName = strdup(&subject[2]);
-                commonName[osStrlen(commonName) - 1] = '\0';
-            } else if (osStrlen(subject) == 12) {
-                commonName = strdup(subject);
-            }
-
-            if (commonName != NULL) {
-                settings_t *box_settings = get_settings_cn(commonName);
-                if (box_settings != NULL && box_settings->internal.config_used)
-                {
-                    mqtt_promote_connection_to_box(conn, box_settings, commonName, "cert");
-                }
-                osFreeMem(commonName);
-            }
+            mqtt_promote_connection_to_box(conn, box_settings, canonical_box_id, "cert");
         }
     }
 }
@@ -3352,7 +3338,7 @@ void mqtt_server_task()
                     if (!conn->mode_decided)
                     {
                         conn->mode_decided = TRUE;
-                        if (conn->tlsContext != NULL && tb2_mqtt_passthrough_is_armed())
+                        if (conn->tlsContext != NULL && tb2_mqtt_passthrough_is_enabled())
                         {
                             bool_t handled = FALSE;
                             settings_t *passthrough_box_settings = NULL;

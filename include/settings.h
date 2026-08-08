@@ -26,7 +26,7 @@
 #define TONIEBOX_CUSTOM_JSON_FILE "tonieboxes.custom.json"
 #define CONFIG_FILE "config.ini"
 #define CONFIG_OVERLAY_FILE "config.overlay.ini"
-#define CONFIG_VERSION 21
+#define CONFIG_VERSION 22
 #define MAX_OVERLAYS 16 + 1
 
 typedef enum
@@ -677,6 +677,9 @@ settings_t *get_settings();
 settings_t *get_settings_ovl(const char *overlay_unique_id);
 settings_t *get_settings_id(uint8_t settingsId);
 settings_t *get_settings_cn(const char *commonName);
+settings_t *settings_get_existing_tb2_from_certificate_subject(const char *subject,
+                                                               char *canonical_box_id,
+                                                               size_t canonical_box_id_size);
 uint8_t get_overlay_id(const char *overlay_unique_id);
 bool_t settings_canonicalize_box_id(const char *input_id, char *output_id, size_t output_size);
 

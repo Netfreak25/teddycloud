@@ -1024,10 +1024,9 @@
         },
         "mqttUpstreamStatus": {
             "disabled": "L'upstream ICI est désactivé.",
-            "standby": "L'upstream ICI est activé ; le transfert transparent est désactivé.",
-            "armed": "Le transfert ICI est prêt et attend une connexion TB2.",
+            "ready": "L'upstream ICI est prêt et attend une connexion TB2.",
             "connecting": "Connexion à {{hostname}}:{{port}} en cours.",
-            "tunneling": "Le tunnel ICI transparent vers {{hostname}}:{{port}} est actif.",
+            "connected": "L'upstream ICI avec traitement des paquets vers {{hostname}}:{{port}} est connecté.",
             "error": "Le transfert ICI a échoué ({{errorCode}})."
         },
         "teddycloudStatusOffline": "Serveur TeddyCloud hors ligne",
@@ -1760,12 +1759,8 @@
                 "description": "Ignorer la vérification du certificat TLS (non sécurisé !)"
             },
             "mqtt_client_upstream__enabled": {
-                "label": "Activer le client MQTT",
-                "description": "Activer le chemin cloud MQTT en amont des Tonies ICI"
-            },
-            "mqtt_client_upstream__passthrough_enabled": {
-                "label": "Activer le transmetteur de capture transparent",
-                "description": "Transférer le trafic MQTT inchangé tout en enregistrant une capture locale complète"
+                "label": "Activer l'upstream MQTT ICI",
+                "description": "Activer ensemble le transfert ICI avec traitement des paquets, l'observation, les filtres et la capture"
             },
             "mqtt_client_upstream__local_control_enabled": {
                 "label": "Autoriser le contrôle TeddyCloud pendant l'upstream ICI",
@@ -1781,11 +1776,11 @@
             },
             "mqtt_client_upstream__capture_dir": {
                 "label": "Répertoire de capture",
-                "description": "Répertoire pour les captures MQTT en mode passthrough complet"
+                "description": "Répertoire des captures complètes de l'upstream ICI avec traitement des paquets"
             },
             "mqtt_client_upstream__capture_max_mib": {
                 "label": "Taille maximale de capture",
-                "description": "Taille totale maximale des captures MQTT pass-through complètes en Mio"
+                "description": "Taille totale maximale des captures ICI avec traitement des paquets en Mio"
             },
             "mqtt_client_upstream__forward__claim": {
                 "label": "Revendiquer",

@@ -45,7 +45,7 @@ typedef void (*tb2_mqtt_control_observer_t)(void *context,
 error_t tb2_mqtt_passthrough_init(void);
 void tb2_mqtt_passthrough_deinit(void);
 
-bool_t tb2_mqtt_passthrough_is_armed(void);
+bool_t tb2_mqtt_passthrough_is_enabled(void);
 error_t tb2_mqtt_passthrough_start(struct _TlsContext *box_tls,
                                    struct _Socket *box_socket,
                                    tb2_mqtt_passthrough_session_t **session,

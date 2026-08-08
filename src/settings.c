@@ -34,6 +34,7 @@ static void settings_migrate_legacy_mqtt_server_files(void);
 #define CLOUD_TB2_V3_SETTING "cloud.tb2_v3_enabled"
 #define CLOUD_TB2_CAPTURE_SETTING "cloud.tb2_capture_enabled"
 #define CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING "cloud.tb2_passthrough_enabled"
+#define MQTT_UPSTREAM_LEGACY_PASSTHROUGH_SETTING "mqtt_client_upstream.passthrough_enabled"
 #define MQTT_SERVER_LEGACY_CERT_PATH "certs/server/ici.pem"
 #define MQTT_SERVER_LEGACY_KEY_PATH "certs/server/ici.key"
 #define MQTT_SERVER_CERT_PATH "certs/server_tb2/ici.pem"
@@ -424,12 +425,12 @@ static void option_map_init(uint8_t settingsId)
     OPTION_BOOL("mqtt.tls_insecure", &settings->mqtt.tls_insecure, FALSE, "Skip verification", "Skip TLS certificate verification (insecure!)", LEVEL_DETAIL)
 
     OPTION_TREE_DESC("mqtt_client_upstream", "MQTT upstream client", LEVEL_DETAIL)
-    OPTION_BOOL("mqtt_client_upstream.enabled", &settings->mqtt_client_upstream.enabled, FALSE, "Enable MQTT Client", "Enable the Tonies ICI upstream MQTT cloud path", LEVEL_DETAIL)
-    OPTION_BOOL("mqtt_client_upstream.passthrough_enabled", &settings->mqtt_client_upstream.passthrough_enabled, FALSE, "Enable transparent capture forwarder", "Forward MQTT traffic unchanged while recording a full local capture", LEVEL_DETAIL)
+    OPTION_BOOL("mqtt_client_upstream.enabled", &settings->mqtt_client_upstream.enabled, FALSE, "Enable ICI MQTT upstream", "Enable packet-aware ICI forwarding, observation, filtering and capture", LEVEL_DETAIL)
+    OPTION_INTERNAL_BOOL(MQTT_UPSTREAM_LEGACY_PASSTHROUGH_SETTING, &settings->mqtt_client_upstream.passthrough_enabled, FALSE, "Legacy MQTT upstream passthrough switch", LEVEL_NONE)
     OPTION_BOOL("mqtt_client_upstream.local_control_enabled", &settings->mqtt_client_upstream.local_control_enabled, FALSE, "Allow TeddyCloud settings and controls during ICI upstream", "Allow TeddyCloud to send local settings and app controls while the Tonies ICI upstream proxy is active", LEVEL_DETAIL)
     OPTION_UNSIGNED("mqtt_client_upstream.port", &settings->mqtt_client_upstream.port, 8883, 1, 65535, "MQTT Server port", "Port of the Tonies ICI upstream MQTT server", LEVEL_DETAIL)
     OPTION_STRING("mqtt_client_upstream.hostname", &settings->mqtt_client_upstream.hostname, "ici.tonie.cloud", "MQTT Server hostname", "Hostname of the Tonies ICI upstream MQTT server", LEVEL_DETAIL)
-    OPTION_STRING("mqtt_client_upstream.capture_dir", &settings->mqtt_client_upstream.capture_dir, "data/diagnostics/tb2-mqtt-passthrough", "Capture directory", "Directory for full MQTT passthrough captures", LEVEL_EXPERT)
+    OPTION_STRING("mqtt_client_upstream.capture_dir", &settings->mqtt_client_upstream.capture_dir, "data/diagnostics/tb2-mqtt-passthrough", "Capture directory", "Directory for full packet-aware ICI upstream captures", LEVEL_EXPERT)
     OPTION_UNSIGNED("mqtt_client_upstream.capture_max_mib", &settings->mqtt_client_upstream.capture_max_mib, 4096, 1, 65536, "Maximum capture size", "Maximum total size of completed MQTT passthrough captures in MiB", LEVEL_EXPERT)
     OPTION_TREE_DESC("mqtt_client_upstream.forward", "Bidirectional forwarding filters", LEVEL_DETAIL)
     OPTION_BOOL("mqtt_client_upstream.forward.claim", &settings->mqtt_client_upstream.forward.topics[MQTT_UPSTREAM_FORWARD_CLAIM], TRUE, "Claim", "Forward claim publishes in both directions", LEVEL_DETAIL)
@@ -853,6 +854,39 @@ static void settings_migrate_legacy_mqtt_server_paths(uint8_t settingsId)
                                     MQTT_SERVER_KEY_PATH);
 }
 
+static void settings_migrate_mqtt_upstream_mode(uint8_t settingsId)
+{
+    settings_t *settings = &Settings_Overlay[settingsId];
+    setting_item_t *enabledOption = settings_get_by_name_id(
+        "mqtt_client_upstream.enabled", settingsId);
+    setting_item_t *legacyOption = settings_get_by_name_id(
+        MQTT_UPSTREAM_LEGACY_PASSTHROUGH_SETTING, settingsId);
+
+    if (settingsId == 0)
+    {
+        settings->mqtt_client_upstream.enabled =
+            settings->mqtt_client_upstream.enabled &&
+            settings->mqtt_client_upstream.passthrough_enabled;
+    }
+    else
+    {
+        /* The upstream mode is global. Never turn legacy overlay values into
+         * an active per-box mode during migration. */
+        settings->mqtt_client_upstream.enabled =
+            Settings_Overlay[0].mqtt_client_upstream.enabled;
+        if (enabledOption != NULL)
+        {
+            enabledOption->overlayed = false;
+        }
+    }
+
+    settings->mqtt_client_upstream.passthrough_enabled = false;
+    if (legacyOption != NULL)
+    {
+        legacyOption->overlayed = false;
+    }
+}
+
 static bool settings_migrate_id(uint8_t settingsId)
 {
     settings_t *settings = &Settings_Overlay[settingsId];
@@ -896,6 +930,10 @@ static bool settings_migrate_id(uint8_t settingsId)
     if (settings->configVersion < 21)
     {
         settings_migrate_legacy_mqtt_server_paths(settingsId);
+    }
+    if (settings->configVersion < 22)
+    {
+        settings_migrate_mqtt_upstream_mode(settingsId);
     }
 
     return true;
@@ -960,6 +998,51 @@ settings_t *get_settings_cn(const char *commonName)
     }
     mutex_unlock(MUTEX_SETTINGS);
     return get_settings();
+}
+
+settings_t *settings_get_existing_tb2_from_certificate_subject(const char *subject,
+                                                               char *canonical_box_id,
+                                                               size_t canonical_box_id_size)
+{
+    if (subject == NULL || canonical_box_id == NULL || canonical_box_id_size < 13)
+    {
+        return NULL;
+    }
+
+    const char *box_id = subject;
+    char extracted_box_id[13];
+    size_t subject_length = osStrlen(subject);
+    if (subject_length == 15 && osStrncmp(subject, "b'", 2) == 0 && subject[14] == '\'')
+    {
+        osMemcpy(extracted_box_id, subject + 2, 12);
+        extracted_box_id[12] = '\0';
+        box_id = extracted_box_id;
+    }
+    else if (subject_length != 12)
+    {
+        return NULL;
+    }
+
+    if (!settings_canonicalize_box_id(box_id, canonical_box_id,
+                                      canonical_box_id_size))
+    {
+        return NULL;
+    }
+
+    mutex_lock(MUTEX_SETTINGS);
+    for (size_t i = 1; i < MAX_OVERLAYS; i++)
+    {
+        settings_t *settings = &Settings_Overlay[i];
+        if (settings->internal.config_used &&
+            settings->toniebox.boxGeneration == GENERATION_TB2 &&
+            osStrcasecmp(settings->commonName, canonical_box_id) == 0)
+        {
+            mutex_unlock(MUTEX_SETTINGS);
+            return settings;
+        }
+    }
+    mutex_unlock(MUTEX_SETTINGS);
+    return NULL;
 }
 
 uint8_t get_overlay_id(const char *overlay_unique_id)
@@ -1858,9 +1941,16 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
         return false;
     }
 
-    if (!osStrcmp(item, CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING))
+    if (!osStrcmp(item, CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING) ||
+        !osStrcmp(item, MQTT_UPSTREAM_LEGACY_PASSTHROUGH_SETTING))
     {
         TRACE_WARNING("Setting '%s' is deprecated and cannot be changed\r\n", item);
+        return false;
+    }
+
+    if (settingsId > 0 && !osStrcmp(item, "mqtt_client_upstream.enabled"))
+    {
+        TRACE_WARNING("Setting '%s' is global and cannot be overridden\r\n", item);
         return false;
     }
 
@@ -1874,24 +1964,12 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
         return true;
     }
 
-    if (settingsId == 0 && !osStrcmp(item, "mqtt_client_upstream.passthrough_enabled") &&
-        value && !Settings_Overlay[0].mqtt_client_upstream.enabled)
-    {
-        TRACE_WARNING("MQTT upstream passthrough requires mqtt_client_upstream.enabled\r\n");
-        return false;
-    }
-
     *((bool *)opt->ptr) = value;
 
     if (settings_is_tb2_https_mode(item) && value)
     {
         settings_select_tb2_https_mode(settingsId, item);
     }
-    if (settingsId == 0 && !osStrcmp(item, "mqtt_client_upstream.enabled") && !value)
-    {
-        Settings_Overlay[0].mqtt_client_upstream.passthrough_enabled = false;
-    }
-
     if (settingsId > 0)
     {
         opt->overlayed = true;

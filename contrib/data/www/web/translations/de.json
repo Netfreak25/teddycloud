@@ -1022,10 +1022,9 @@
         },
         "mqttUpstreamStatus": {
             "disabled": "Der ICI-Upstream ist deaktiviert.",
-            "standby": "Der ICI-Upstream ist aktiviert; die transparente Weiterleitung ist deaktiviert.",
-            "armed": "Die ICI-Weiterleitung ist bereit und wartet auf eine TB2-Verbindung.",
+            "ready": "Der ICI-Upstream ist bereit und wartet auf eine TB2-Verbindung.",
             "connecting": "Verbindung zu {{hostname}}:{{port}} wird hergestellt.",
-            "tunneling": "Der transparente ICI-Tunnel zu {{hostname}}:{{port}} ist aktiv.",
+            "connected": "Der paketbewusste ICI-Upstream zu {{hostname}}:{{port}} ist verbunden.",
             "error": "Die ICI-Weiterleitung ist fehlgeschlagen ({{errorCode}})."
         },
         "tb2CloudStatusOffline": "Keine HTTPS-Verbindung zum TB2-Cloud-Ziel {{hostname}}",
@@ -1761,11 +1760,7 @@
             },
             "mqtt_client_upstream__enabled": {
                 "label": "ICI-MQTT-Upstream aktivieren",
-                "description": "Den MQTT-Cloudpfad zum Tonies-ICI-Upstream aktivieren"
-            },
-            "mqtt_client_upstream__passthrough_enabled": {
-                "label": "Transparenten MQTT-Proxy aktivieren",
-                "description": "MQTT-Verkehr transparent weiterleiten und vollständig lokal aufzeichnen"
+                "description": "Paketbewusste ICI-Weiterleitung, Observer, Filter und Capture gemeinsam aktivieren"
             },
             "mqtt_client_upstream__local_control_enabled": {
                 "label": "TeddyCloud-Steuerung während ICI-Upstream erlauben",
@@ -1781,7 +1776,7 @@
             },
             "mqtt_client_upstream__capture_dir": {
                 "label": "MQTT-Aufnahmeverzeichnis",
-                "description": "Verzeichnis für vollständige Aufnahmen des transparenten MQTT-Proxys"
+                "description": "Verzeichnis für vollständige Aufnahmen des paketbewussten ICI-Upstreams"
             },
             "mqtt_client_upstream__capture_max_mib": {
                 "label": "Maximale MQTT-Aufnahmegröße",

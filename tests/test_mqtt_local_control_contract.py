@@ -48,7 +48,7 @@ class MqttLocalControlContractTests(unittest.TestCase):
     def test_direct_connections_stay_enabled_and_proxy_uses_effective_setting(self):
         gate = self.server[
             self.server.index("static bool_t mqtt_connection_local_control_allowed") :
-            self.server.index("static bool_t mqtt_connection_has_trusted_client_cert")
+            self.server.index("static settings_t *mqtt_connection_certificate_settings")
         ]
         self.assertIn("conn->passthrough == NULL", gate)
         self.assertIn(

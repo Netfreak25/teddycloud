@@ -36,13 +36,12 @@ either resolved PEM path is missing, unreadable or empty. A TLS context/setup
 failure on an accepted socket closes that socket before MQTT parsing; encrypted
 TLS bytes are therefore never treated as plaintext MQTT packets.
 
-The separate **MQTT Client Upstream** category controls the optional TB2 ICI
-packet proxy:
+The separate **MQTT Client Upstream** category controls the optional,
+packet-aware TB2 ICI upstream MITM:
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
-| `mqtt_client_upstream.enabled` | `false` | Enables the TB2 MQTT cloud path. |
-| `mqtt_client_upstream.passthrough_enabled` | `false` | Arms packet-aware forwarding and full local capture; requires `enabled=true`. |
+| `mqtt_client_upstream.enabled` | `false` | Enables packet-aware upstream forwarding, observation, filtering and capture as one global mode. |
 | `mqtt_client_upstream.local_control_enabled` | `false` | Allows local `settings/desired` and `app-control/*` publishes while the proxy is active. The value can be overridden per TB2 overlay. |
 | `mqtt_client_upstream.port` | `8883` | Tonies ICI upstream MQTT port. |
 | `mqtt_client_upstream.hostname` | `ici.tonie.cloud` | Tonies ICI upstream hostname. |
@@ -50,11 +49,17 @@ packet proxy:
 | `mqtt_client_upstream.capture_max_mib` | `4096` | Maximum total size of completed captures. |
 | `mqtt_client_upstream.forward.*` | `true` | Forwards the selected topic class in both directions. `false` suppresses it locally. |
 
+The former `mqtt_client_upstream.passthrough_enabled` option is internal,
+load-only migration input. Upgrades enable the unified mode only when both old
+switches were enabled; every other old combination migrates to disabled. The
+status API temporarily returns `passthrough_enabled` as a deprecated alias of
+`enabled` for older WebUI clients.
+
 These settings are deliberately separate from both the generic external
 `mqtt.*` client and the internal TB2-facing `mqtt_server.*` listener.
 The internal `mqtt_server` remains the incoming TLS endpoint. After that TLS
-handshake and before MQTT packet parsing, an armed forwarder maps the presented
-box certificate to an overlay and opens a second TLS connection using the
+handshake and before MQTT packet parsing, the enabled MITM maps the presented
+box certificate to an existing TB2 overlay and opens a second TLS connection using the
 original per-box identity from `core.client_cert_tb2.*`. It must never fall back
 to the TB1 `core.client_cert_tb1.*` identity. The local `mqtt_server.cert.*` ICI
 identity is never reused for the outbound role.
@@ -65,7 +70,7 @@ TeddyCloud, while DNS inside the TeddyCloud container must continue to resolve
 the public TONIES ICI and HTTPS hostnames. Pointing the container itself back to
 TeddyCloud would create a forwarding loop instead of an upstream connection.
 
-For an armed connection, decrypted MQTT application bytes are reassembled into
+For an enabled connection, decrypted MQTT application bytes are reassembled into
 complete MQTT packets in both directions. Fragmented packets and multiple
 packets in one TLS read are supported up to MQTT's own Remaining Length limit;
 there is no additional proxy packet-size limit. Packets that do not match a
@@ -178,6 +183,12 @@ certificate because none was requested. The log also marks resumed sessions.
 The incoming box certificate is logged as `stage=box_client_auth` before
 passthrough selection and is resolved through the same canonical CN-to-overlay
 mapping used by the normal MQTT server path.
+The subject must contain an exact 12-hex box ID, either raw or as `b'<ID>'`, and
+must match an existing active TB2 overlay case-insensitively. It never creates
+a new overlay. The issuer is logged but is not an admission criterion. Because
+the TLS adapter tolerates unknown CAs, this is identity mapping rather than
+complete client-certificate authentication: a certificate from an unknown
+issuer can map to a known TB2 overlay when it carries that overlay's box ID.
 The outbound client identity defaults to the global `core.client_cert_tb2.*`
 settings. A box-specific identity is selected only when at least one TB2 client
 certificate file or data setting is actively overridden in that box overlay;
@@ -186,8 +197,8 @@ keep these TB2 settings inherited instead of activating empty per-box paths.
 
 The separate **ICI Upstream** navbar tag polls
 `GET /api/mqtt-client-upstream/status` every five seconds. States are
-`disabled`, `standby`, `armed`, `connecting`, `tunneling` and `error`; only an
-active tunnel is green. The API contains no credential values, certificate
+`disabled`, `ready`, `connecting`, `connected` and `error`; only a connected
+upstream is green. The API contains no credential values, certificate
 paths, payloads or box identifiers.
 
 Each session writes `session.json` and a full Base64 `traffic.jsonl` capture.
@@ -287,17 +298,11 @@ Mapping sources:
 - TLS client certificate on MQTT `CONNECT`
 - The `<box_cn>` segment in topics matching `toniebox/<box_cn>/...`
 
-The certificate mapping accepts client certificate issuers/subjects containing
-one of these strings:
-
-- `Boxine Factory SubCA`
-- `Toniebox SubCA`
-- `TeddyCloud`
-- `Toniebox Root CA`
-
 The supported certificate common-name formats are the Tonies style
-`b'<MAC>'` form and a raw 12-character box common name. A successful lookup via
-`get_settings_cn()` sets:
+`b'<MAC>'` form and a raw 12-character hexadecimal box common name. The subject
+must map case-insensitively to an existing active TB2 overlay. Unknown issuers
+are accepted for mapping and logged, but unknown IDs, malformed IDs and
+non-TB2 overlays are rejected. A successful lookup sets:
 
 - `conn->client_ctx.settings`
 - `conn->client_ctx.settingsNoOverlay`
@@ -319,13 +324,10 @@ overlay identity matching is not.
 
 Box-only actions such as settings request/confirm handling require
 `conn->box_connection`. Certificate mapping sets that flag immediately when the
-certificate common name resolves to a known overlay. Topic-based mapping may
-also promote the connection to `conn->box_connection`, but only when the TLS
-client certificate issuer/subject is trusted and the `toniebox/<box_cn>/...`
-topic common name resolves to a known overlay. This lets real TB2 ICI sessions
-recover when the certificate subject is not one of the older exact common-name
-formats, without letting an unauthenticated MQTT client become a box just by
-choosing a topic name.
+certificate subject resolves to a known TB2 overlay. Topic-based mapping may
+also promote the connection, but only when that topic resolves to the same
+overlay as the presented certificate. An unauthenticated MQTT client therefore
+cannot become a box merely by choosing a topic name.
 
 While a mapped box connection is active, the MQTT server updates the existing
 WebUI state anchors `internal.online` and `internal.last_connection` on the
