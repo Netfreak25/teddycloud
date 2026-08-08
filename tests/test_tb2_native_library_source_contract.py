@@ -35,6 +35,10 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
         cls.web_player = (
             ROOT / "teddycloud_web/src/provider/AudioProvider.tsx"
         ).read_text(encoding="utf-8")
+        cls.web_columns = (
+            ROOT
+            / "teddycloud_web/src/components/tonies/filebrowser/helper/Columns.tsx"
+        ).read_text(encoding="utf-8")
         cls.repair_script = (
             ROOT / "contrib/repair_tb2_native_library.py"
         ).read_text(encoding="utf-8")
@@ -175,6 +179,27 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
         self.assertLess(index.index("if (is_native_candidate)"), generic_metadata)
         self.assertLess(index.index("if (isNativeCollectionDetail)"), generic_metadata)
         self.assertIn("api_is_native_collection_detail_path", self.api)
+
+    def test_content_json_loader_rejects_native_library_metadata(self) -> None:
+        for marker in (
+            "content_json_is_native_library_metadata",
+            '"library-entry.json"',
+            '"content-meta.json"',
+            "return ERROR_ACCESS_DENIED",
+        ):
+            self.assertIn(marker, self.content)
+
+    def test_select_browser_parent_directory_is_clickable(self) -> None:
+        name_content = self.web_columns.index("const nameContent =")
+        directory_branch = self.web_columns.index(
+            ') : record?.isDir ? (', name_content
+        )
+        next_branch = self.web_columns.index(
+            ") : (", directory_branch + 1
+        )
+        directory_render = self.web_columns[directory_branch:next_branch]
+        self.assertIn("handleDirClick(record.name)", directory_render)
+        self.assertIn('role="button"', directory_render)
 
     def test_manual_doctor_is_dry_run_and_gates_recache_explicitly(self) -> None:
         for marker in (

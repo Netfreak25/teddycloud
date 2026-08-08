@@ -11,6 +11,56 @@
 #include "json_helper.h"
 #include "v3_native_cache.h"
 
+static bool_t content_json_is_native_library_metadata(const char *json_path,
+                                                      const settings_t *settings)
+{
+    if (json_path == NULL || settings == NULL ||
+        settings->internal.librarydirfull == NULL)
+    {
+        return FALSE;
+    }
+
+    char *prefix = custom_asprintf("%s%cby%ccontentHash%c",
+                                   settings->internal.librarydirfull,
+                                   PATH_SEPARATOR, PATH_SEPARATOR,
+                                   PATH_SEPARATOR);
+    if (prefix == NULL)
+    {
+        return FALSE;
+    }
+
+    size_t prefix_length = osStrlen(prefix);
+    bool_t protected_path = FALSE;
+    if (!osStrncmp(json_path, prefix, prefix_length))
+    {
+        const char *relative = json_path + prefix_length;
+        bool_t canonical_hash =
+            osStrlen(relative) > V3_NATIVE_LIBRARY_HASH_HEX_LENGTH;
+        for (size_t i = 0; i < V3_NATIVE_LIBRARY_HASH_HEX_LENGTH; i++)
+        {
+            if (!canonical_hash)
+            {
+                break;
+            }
+            char digit = relative[i];
+            if (!((digit >= '0' && digit <= '9') ||
+                  (digit >= 'a' && digit <= 'f')))
+            {
+                canonical_hash = FALSE;
+                break;
+            }
+        }
+
+        const char *filename = relative + V3_NATIVE_LIBRARY_HASH_HEX_LENGTH;
+        protected_path = canonical_hash && *filename == PATH_SEPARATOR &&
+                         (!osStrcmp(filename + 1, "library-entry.json") ||
+                          !osStrcmp(filename + 1, "content-meta.json"));
+    }
+
+    osFreeMem(prefix);
+    return protected_path;
+}
+
 error_t load_content_json(const char *content_path, contentJson_t *content_json, bool create_if_missing, settings_t *settings)
 {
     char *jsonPath = custom_asprintf("%s.json", content_path);
@@ -37,6 +87,14 @@ error_t load_content_json(const char *content_path, contentJson_t *content_json,
     content_json->_create_if_missing = create_if_missing;
 
     osMemset(&content_json->_tap, 0, sizeof(tonie_audio_playlist_t));
+
+    if (content_json_is_native_library_metadata(jsonPath, settings))
+    {
+        TRACE_WARNING("Refusing to parse protected TB2 library metadata as content JSON: %s\r\n",
+                      jsonPath);
+        osFreeMem(jsonPath);
+        return ERROR_ACCESS_DENIED;
+    }
 
     if (fsFileExists(jsonPath))
     {

@@ -67,6 +67,15 @@ to hidden staging, compares the copy, writes metadata last and then renames the
 complete directory. Existing inconsistent collections are rejected rather
 than overwritten.
 
+`library-entry.json` and Tonieplay `content-meta.json` are protected metadata,
+not normal Tonie content sidecars. The generic content-JSON loader rejects
+these canonical `by/contentHash/<hash>` paths before parsing or writing them.
+This protects the manifest even when an older API or another browser caller
+reaches the collection outside the specialized V2 library listing. The WebUI
+also makes directory names, including `..`, directly clickable in selection
+dialogs; opening a collection can therefore never trap the source picker in
+its read-only detail directory.
+
 ## Manual generation-aware download
 
 The existing content-download API keeps the TB1 V1/V2 TAF path unchanged. For
@@ -399,6 +408,13 @@ The marker is cleared only when the local MQTT observer receives playback state 
 - Loads or creates generation descriptors for content-meta.
 - Parses hashed and legacy chapter names, applies the transition gate and keeps local misses local.
 - Returns `416` for resumed legacy requests and delegates hashed objects to the existing unchanged immutable-file streamer.
+
+### `src/contentJson.c`
+
+- Rejects native `library-entry.json` and Tonieplay `content-meta.json` paths
+  before the generic content-sidecar migration can rewrite them.
+- Keeps recovery explicit: an already damaged manifest remains the cache/library
+  doctor's responsibility and is never guessed from directory contents.
 
 ### `include/settings.h` and `src/settings.c`
 
