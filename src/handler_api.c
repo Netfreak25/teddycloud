@@ -29,6 +29,7 @@
 #include "content_playlist.h"
 #include "mqtt_server.h"
 #include "toniebox_state.h"
+#include "v3_local_content.h"
 #include "v3_native_cache.h"
 
 error_t parsePostData(HttpConnection *connection, char_t *post_data, size_t buffer_size)
@@ -5437,6 +5438,7 @@ static void api_add_content_playlist(cJSON *json_entry,
     }
 
     cJSON *playlist = cJSON_AddObjectToObject(json_entry, "playlist");
+    cJSON_AddStringToObject(playlist, "kind", "direct_taf");
     cJSON_AddBoolToObject(playlist, "editable", TRUE);
     cJSON_AddNumberToObject(playlist, "chapterCount", chapter_count);
     cJSON_AddStringToObject(playlist, "title",
@@ -5484,7 +5486,91 @@ static void api_add_content_playlist(cJSON *json_entry,
     content_playlist_free(&saved);
 }
 
-error_t getTagInfoJson(char ruid[17], cJSON *jsonTarget, client_ctx_t *client_ctx)
+static void api_add_tap_playlist(cJSON *json_entry,
+                                 tonie_info_t *taf_info,
+                                 settings_t *settings,
+                                 const char *ruid,
+                                 bool_t requested_version_valid,
+                                 uint32_t requested_version)
+{
+    if (taf_info == NULL || settings == NULL || ruid == NULL ||
+        (taf_info->json._source_type != CT_SOURCE_TAP_STREAM &&
+         taf_info->json._source_type != CT_SOURCE_TAP_CACHED))
+    {
+        return;
+    }
+
+    v3_local_tap_state_t state;
+    osMemset(&state, 0, sizeof(state));
+    bool_t state_valid = v3_local_tap_state_load(settings->internal.cachedirfull,
+                                                 settings->internal.overlayNumber,
+                                                 ruid,
+                                                 &state) == NO_ERROR &&
+                         state.valid;
+    uint32_t content_version = requested_version_valid
+                                   ? requested_version
+                                   : (state_valid && state.playing_version != 0
+                                          ? state.playing_version
+                                          : (state_valid ? state.prepared_version : 0));
+
+    v3_local_content_generation_t generation;
+    osMemset(&generation, 0, sizeof(generation));
+    bool_t generation_valid = content_version != 0 &&
+                              v3_local_content_generation_load(settings->internal.cachedirfull,
+                                                               settings->internal.overlayNumber,
+                                                               ruid,
+                                                               content_version,
+                                                               &generation) == NO_ERROR &&
+                              generation.source_kind == V3_LOCAL_CONTENT_SOURCE_TAP;
+    if (!generation_valid)
+    {
+        v3_local_content_generation_free(&generation);
+        return;
+    }
+
+    cJSON *playlist = cJSON_AddObjectToObject(json_entry, "playlist");
+    cJSON_AddStringToObject(playlist, "kind", "tap");
+    cJSON_AddBoolToObject(playlist, "editable", FALSE);
+    cJSON_AddNumberToObject(playlist, "contentVersion", content_version);
+    cJSON_AddNumberToObject(playlist, "shuffleMode", generation.shuffle_mode);
+    cJSON_AddStringToObject(playlist, "editTarget",
+                            generation.source_path != NULL
+                                ? generation.source_path
+                                : (taf_info->json.source != NULL ? taf_info->json.source : ""));
+    cJSON_AddStringToObject(playlist, "title",
+                            generation.title != NULL
+                                ? generation.title
+                                : (taf_info->json._tap.name != NULL
+                                       ? taf_info->json._tap.name
+                                       : ""));
+
+    size_t chapter_count = generation.chapter_count;
+    cJSON_AddNumberToObject(playlist, "chapterCount", chapter_count);
+
+    cJSON *tracks = cJSON_AddArrayToObject(playlist, "tracks");
+    for (size_t i = 0; i < chapter_count; i++)
+    {
+        const char *title = generation.chapters[i].title != NULL
+                                ? generation.chapters[i].title
+                                : "";
+        cJSON_AddItemToArray(tracks, cJSON_CreateString(title));
+    }
+
+    cJSON *durations = cJSON_AddArrayToObject(playlist, "durations");
+    for (size_t i = 0; i < generation.chapter_count; i++)
+    {
+        cJSON_AddItemToArray(durations,
+                             cJSON_CreateNumber(generation.chapters[i].duration_seconds));
+    }
+
+    v3_local_content_generation_free(&generation);
+}
+
+error_t getTagInfoJson(char ruid[17],
+                       cJSON *jsonTarget,
+                       client_ctx_t *client_ctx,
+                       bool_t content_version_valid,
+                       uint32_t content_version)
 {
     error_t error = NO_ERROR;
     /* build filename with 8 chars of the taf/json */
@@ -5569,7 +5655,16 @@ error_t getTagInfoJson(char ruid[17], cJSON *jsonTarget, client_ctx_t *client_ct
             addToniesJsonInfoJson(item, contentJson.tonie_model, jsonEntry);
 
             toniesJson_item_t *item2 = tonies_byModel(contentJson._source_model);
-            api_add_content_playlist(jsonEntry, tafInfo, client_ctx->settings);
+            if (tafInfo->json._source_type == CT_SOURCE_TAP_STREAM ||
+                tafInfo->json._source_type == CT_SOURCE_TAP_CACHED)
+            {
+                api_add_tap_playlist(jsonEntry, tafInfo, client_ctx->settings, ruid,
+                                     content_version_valid, content_version);
+            }
+            else
+            {
+                api_add_content_playlist(jsonEntry, tafInfo, client_ctx->settings);
+            }
             if (tafInfo->exists && item != item2)
             {
                 cJSON *jsonSourceInfo = cJSON_CreateObject();
@@ -5620,9 +5715,27 @@ error_t handleApiTagInfo(HttpConnection *connection, const char_t *uri, const ch
         return ERROR_FAILURE;
     }
 
+    char content_version_text[16];
+    bool_t content_version_valid = queryGet(queryString, "contentVersion",
+                                            content_version_text,
+                                            sizeof(content_version_text));
+    uint32_t content_version = 0;
+    if (content_version_valid)
+    {
+        char *end = NULL;
+        unsigned long parsed = strtoul(content_version_text, &end, 10);
+        if (content_version_text[0] == '\0' || end == NULL || *end != '\0' ||
+            parsed > UINT32_MAX)
+        {
+            return ERROR_INVALID_REQUEST;
+        }
+        content_version = (uint32_t)parsed;
+    }
+
     cJSON *json = cJSON_CreateObject();
 
-    error_t error = getTagInfoJson(ruid, json, client_ctx);
+    error_t error = getTagInfoJson(ruid, json, client_ctx,
+                                   content_version_valid, content_version);
     if (error != NO_ERROR)
     {
         cJSON_Delete(json);
@@ -5714,7 +5827,7 @@ error_t handleApiTagIndex(HttpConnection *connection, const char_t *uri, const c
                 ruid[i] = tolower(ruid[i]);
             }
 
-            if (getTagInfoJson(ruid, jsonArray, client_ctx) == NO_ERROR)
+            if (getTagInfoJson(ruid, jsonArray, client_ctx, FALSE, 0) == NO_ERROR)
             {
                 break;
             }

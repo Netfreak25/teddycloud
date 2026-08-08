@@ -24,6 +24,14 @@ class ContentPlaylistContractTests(unittest.TestCase):
         cls.drawer = (
             WEB / "src/components/tonieboxes/tonieboxcard/live/ChapterDrawer.tsx"
         ).read_text(encoding="utf-8")
+        cls.card = (
+            WEB / "src/components/tonieboxes/tonieboxcard/TonieboxCard.tsx"
+        ).read_text(encoding="utf-8")
+        cls.web_api = (WEB / "src/api/apis/TeddyCloudApi.ts").read_text(encoding="utf-8")
+        cls.tap_editor = (
+            WEB
+            / "src/components/tonies/filebrowser/modals/TeddyAudioPlaylistEditorModal.tsx"
+        ).read_text(encoding="utf-8")
 
     def test_metadata_identity_uses_taf_audio_id_and_sha1(self):
         self.assertIn('"%s%c%08" PRIX32 "-%s.json"', self.playlist)
@@ -51,12 +59,41 @@ class ContentPlaylistContractTests(unittest.TestCase):
         self.assertIn('REQ_POST, "/api/content/playlist/"', self.server)
 
     def test_custom_playlist_does_not_reuse_original_tonie_tracks(self):
-        custom_start = self.controls.index("if (tonie?.playlist?.editable)")
+        custom_start = self.controls.index(
+            'if (tonie?.playlist?.kind === "direct_taf" || tonie?.playlist?.editable)'
+        )
         original_start = self.controls.index("const trackCount = Math.max", custom_start)
         custom_path = self.controls[custom_start:original_start]
         self.assertIn("tonie.playlist.chapterCount", custom_path)
         self.assertIn("tonie.trackSeconds.length || sourceTracks.length", custom_path)
         self.assertNotIn("assignedTracks", custom_path)
+
+    def test_active_tap_playlist_uses_the_reported_content_version(self):
+        tap_api = self.api[
+            self.api.index("static void api_add_tap_playlist") :
+            self.api.index("error_t getTagInfoJson")
+        ]
+        self.assertIn("requested_version_valid", tap_api)
+        self.assertIn("state.playing_version", tap_api)
+        self.assertIn("state.prepared_version", tap_api)
+        self.assertIn("v3_local_content_generation_load", tap_api)
+        self.assertIn("if (!generation_valid)", tap_api)
+        self.assertIn('cJSON_AddStringToObject(playlist, "kind", "tap")', tap_api)
+        self.assertIn('queryGet(queryString, "contentVersion"', self.api)
+        self.assertIn("currentContentVersion", self.card)
+        self.assertIn("contentVersion=${encodeURIComponent(contentVersion)}", self.web_api)
+
+    def test_tap_playlist_and_drawer_share_the_resolved_generation_tracks(self):
+        self.assertIn('if (tonie?.playlist?.kind === "tap")', self.controls)
+        self.assertIn("tracks={tracks}", self.controls)
+        self.assertIn("trackDurations={tonie?.playlist?.durations}", self.controls)
+        self.assertIn("onEditExternal={tapEditRoute ? editTap : undefined}", self.controls)
+        self.assertIn("onClick={onEditExternal ?? startEditing}", self.drawer)
+
+    def test_tap_editor_changes_audio_id_only_for_semantic_changes(self):
+        self.assertIn("shuffle: Number(initialValues.shuffle ?? 0)", self.tap_editor)
+        self.assertIn("comparable(values) !== comparable(initialValuesObj)", self.tap_editor)
+        self.assertIn("previous + 1", self.tap_editor)
 
     def test_editor_saves_title_and_all_chapter_titles_together(self):
         self.assertIn("editPlaylist", self.drawer)
@@ -103,11 +140,15 @@ class ContentPlaylistContractTests(unittest.TestCase):
             "playlistSavedDetails",
             "playlistTitle",
             "savePlaylist",
+            "shuffleModes",
         }
         for locale_path in (WEB / "public/translations").glob("*.json"):
             locale = json.loads(locale_path.read_text(encoding="utf-8"))
             live = locale["tonieboxes"]["live"]
             self.assertFalse(required - live.keys(), locale_path.name)
+            tap_editor = locale["tonies"]["tapEditor"]
+            self.assertIn("shuffle", tap_editor, locale_path.name)
+            self.assertIn("shuffleModes", tap_editor, locale_path.name)
 
 
 if __name__ == "__main__":
