@@ -35,6 +35,13 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
         cls.web_player = (
             ROOT / "teddycloud_web/src/provider/AudioProvider.tsx"
         ).read_text(encoding="utf-8")
+        cls.web_card = (
+            ROOT
+            / "teddycloud_web/src/components/tonies/toniecard/TonieCard.tsx"
+        ).read_text(encoding="utf-8")
+        cls.web_native_audio = (
+            ROOT / "teddycloud_web/src/utils/audio/nativeCollection.ts"
+        ).read_text(encoding="utf-8")
         cls.web_columns = (
             ROOT
             / "teddycloud_web/src/components/tonies/filebrowser/helper/Columns.tsx"
@@ -234,6 +241,12 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
         self.assertIn("playPlaybackItem", self.web_player)
         self.assertIn("NATIVE_COLLECTION_ROOT_PATH", self.web_browser)
         self.assertIn("closeNativeCollectionDetail", self.web_browser)
+
+    def test_assigned_native_collection_uses_multichapter_player(self) -> None:
+        self.assertIn("isNativeCollectionSource", self.web_card)
+        self.assertIn("loadNativeCollectionFromSource", self.web_card)
+        self.assertIn("playPlaybackItem", self.web_card)
+        self.assertIn("library-entry.json", self.web_native_audio)
 
 
 if __name__ == "__main__":
