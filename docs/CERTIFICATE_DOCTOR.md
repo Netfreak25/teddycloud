@@ -39,12 +39,14 @@ The backing endpoint is:
 GET /api/diagnostics/certificates
 ```
 
-It invokes the installed doctor with a fixed command and accepts no request
-parameters. Doctor exit codes 0, 1 and 2 are valid diagnostic results and are
-returned with HTTP 200. Missing prerequisites, malformed JSON or output beyond
-the fixed safety limit are reported as technical API errors. The endpoint and
-page do not expose certificate or private-key contents and cannot repair,
-upload, move or delete files.
+It invokes the installed doctor through `bash` with the fixed base path
+`/teddycloud` and accepts no request parameters. Calling it through `bash` is
+intentional because packaged diagnostic scripts are installed read-only and do
+not require an executable file mode. Doctor exit codes 0, 1 and 2 are valid
+diagnostic results and are returned with HTTP 200. Missing prerequisites,
+malformed JSON or output beyond the fixed safety limit are reported as
+technical API errors. The endpoint and page do not expose certificate or
+private-key contents and cannot repair, upload, move or delete files.
 
 The JSON document has `schemaVersion: 1` and contains:
 

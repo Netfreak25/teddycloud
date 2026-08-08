@@ -36,7 +36,8 @@
 #include "v3_native_cache.h"
 
 #define CERTIFICATE_DOCTOR_OUTPUT_LIMIT (1024U * 1024U)
-#define CERTIFICATE_DOCTOR_COMMAND "verify-tc-certificates.sh --base-path . --json --no-color"
+#define CERTIFICATE_DOCTOR_COMMAND                                                                    \
+    "bash /usr/local/bin/verify-tc-certificates.sh --base-path /teddycloud --json --no-color"
 
 static error_t api_write_certificate_doctor_error(HttpConnection *connection,
                                                    uint_t status_code,

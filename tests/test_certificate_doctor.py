@@ -78,7 +78,7 @@ class CertificateDoctorStaticContractTests(unittest.TestCase):
         server = (ROOT / "src" / "server.c").read_text(encoding="utf-8")
         self.assertIn('"/api/diagnostics/certificates"', server)
         self.assertIn(
-            '#define CERTIFICATE_DOCTOR_COMMAND "verify-tc-certificates.sh --base-path . --json --no-color"',
+            '"bash /usr/local/bin/verify-tc-certificates.sh --base-path /teddycloud --json --no-color"',
             handler,
         )
         self.assertIn("(void)queryString;", handler)
