@@ -4,6 +4,10 @@ This is the canonical description of TeddyCloud's local TB2 V3 content path. It 
 
 The transparent TB2 proxy is not part of this path. Local content routing is implemented by the content-aware V3 cloud path.
 
+The observed Tonieplay download protocol and the current gaps between its
+heterogeneous object model and this audio-oriented cache are documented in
+[`TB2_TONIEPLAY_DOWNLOADS.md`](TB2_TONIEPLAY_DOWNLOADS.md).
+
 ## Native TONIES original-content cache
 
 `toniebox2.cacheContentV3` enables a physically separate cache for unmodified
