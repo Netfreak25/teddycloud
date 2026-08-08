@@ -37,6 +37,7 @@ class CertificateDoctorStaticContractTests(unittest.TestCase):
         script = DOCTOR.read_text(encoding="utf-8")
         for marker in (
             "--base-path",
+            "--verbose",
             "--no-color",
             "NO_COLOR",
             "OpenSSL is required",
@@ -167,6 +168,47 @@ class CertificateDoctorBehaviorTests(unittest.TestCase):
         return cert_der, key_der
 
     @classmethod
+    def _create_intermediate(
+        cls,
+        directory: Path,
+        stem: str,
+        subject: str,
+        ca: Path,
+        ca_key: Path,
+    ) -> tuple[Path, Path]:
+        key = directory / f"{stem}-key.pem"
+        csr = directory / f"{stem}.csr"
+        cert = directory / f"{stem}.pem"
+        extensions = directory / f"{stem}.ext"
+        extensions.write_text(
+            "basicConstraints=critical,CA:TRUE,pathlen:0\n"
+            "keyUsage=critical,keyCertSign,cRLSign\n",
+            encoding="ascii",
+        )
+        cls._openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(key), cwd=directory)
+        cls._openssl("req", "-new", "-key", str(key), "-subj", subject, "-out", str(csr), cwd=directory)
+        cls._openssl(
+            "x509",
+            "-req",
+            "-sha256",
+            "-days",
+            "3650",
+            "-in",
+            str(csr),
+            "-CA",
+            str(ca),
+            "-CAkey",
+            str(ca_key),
+            "-CAcreateserial",
+            "-extfile",
+            str(extensions),
+            "-out",
+            str(cert),
+            cwd=directory,
+        )
+        return cert, key
+
+    @classmethod
     def _create_valid_fixture(cls, base: Path) -> None:
         config = base / "config"
         certs = base / "certs"
@@ -251,8 +293,11 @@ class CertificateDoctorBehaviorTests(unittest.TestCase):
         shutil.copytree(self.fixture, destination)
         return destination
 
-    def _doctor(self, base: Path) -> subprocess.CompletedProcess[str]:
-        return run("bash", str(DOCTOR), "--base-path", str(base), "--no-color")
+    def _doctor(self, base: Path, *, verbose: bool = False) -> subprocess.CompletedProcess[str]:
+        args = ["bash", str(DOCTOR), "--base-path", str(base), "--no-color"]
+        if verbose:
+            args.append("--verbose")
+        return run(*args)
 
     def test_valid_tb1_tb2_roles_and_shared_mqtt_identity(self) -> None:
         result = self._doctor(self.fixture)
@@ -260,8 +305,15 @@ class CertificateDoctorBehaviorTests(unittest.TestCase):
         self.assertIn("TB1 HTTPS server", result.stdout)
         self.assertIn("TB2 HTTPS server", result.stdout)
         self.assertIn("TB2 ICI-MQTT server", result.stdout)
-        self.assertIn("shares the effective TB2 TONIES client identity", result.stdout)
-        self.assertIn("ERROR=0", result.stdout)
+        self.assertIn("shares the TB2 TONIES identity", result.stdout)
+        self.assertIn("Findings: WARN=0 ERROR=0", result.stdout)
+        self.assertNotIn("fingerprint=", result.stdout)
+
+    def test_verbose_mode_keeps_details_and_deduplicates_required_sans(self) -> None:
+        result = self._doctor(self.fixture, verbose=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("fingerprint=", result.stdout)
+        self.assertEqual(result.stdout.count("TB2 HTTPS server: SAN contains tbs2.tonie.cloud"), 1)
 
     def test_partial_overlay_override_is_an_error(self) -> None:
         base = self._copy_fixture("partial")
@@ -318,8 +370,40 @@ class CertificateDoctorBehaviorTests(unittest.TestCase):
         shutil.copy2(base / "certs" / "server_tb2" / "ici.pem", legacy_server / "ici.pem")
         result = self._doctor(base)
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("Identical legacy duplicate", result.stdout)
-        self.assertIn("server/ici.pem and server_tb2/ici.pem", result.stdout)
+        self.assertIn("Legacy client: 1 identical duplicate file(s)", result.stdout)
+        self.assertIn("Legacy server: 1 identical duplicate file(s)", result.stdout)
+
+        verbose = self._doctor(base, verbose=True)
+        self.assertIn("Identical legacy duplicate", verbose.stdout)
+        self.assertIn("server/ici.pem and server_tb2/ici.pem", verbose.stdout)
+
+    def test_missing_factory_intermediate_is_informational(self) -> None:
+        base = self._copy_fixture("missing-intermediate")
+        work = base / "fixture-work"
+        root, root_key = self._create_ca(work, "factory-root", "/CN=TONIES Root CA/O=tonies GmbH/C=DE")
+        intermediate, intermediate_key = self._create_intermediate(
+            work,
+            "factory-subca",
+            "/CN=TONIES Factory SubCA/O=tonies GmbH/C=DE",
+            root,
+            root_key,
+        )
+        leaf, leaf_key = self._create_leaf(
+            work,
+            "factory-client",
+            "/CN=BBBBBBBBBBBB/O=tonies GmbH",
+            intermediate,
+            intermediate_key,
+            der=True,
+        )
+        self._openssl("x509", "-in", str(root), "-outform", "DER", "-out", str(base / "certs/client_tb2/ca.der"), cwd=work)
+        shutil.copy2(leaf, base / "certs/client_tb2/client.der")
+        shutil.copy2(leaf_key, base / "certs/client_tb2/private.der")
+
+        result = self._doctor(base, verbose=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("intermediate certificate is not included", result.stdout)
+        self.assertNotIn("leaf certificate does not verify against the configured CA", result.stdout)
 
     def test_unknown_generation_gets_certificate_based_recommendation(self) -> None:
         base = self._copy_fixture("unknown")
@@ -362,7 +446,7 @@ class CertificateDoctorBehaviorTests(unittest.TestCase):
         result = self._doctor(base)
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertNotIn("  ERROR ", result.stdout)
-        self.assertIn("role is disabled", result.stdout)
+        self.assertIn("disabled, generation=UNKNOWN", result.stdout)
 
 
 if __name__ == "__main__":

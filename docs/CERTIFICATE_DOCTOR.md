@@ -18,7 +18,10 @@ bash /usr/local/bin/verify-tc-certificates.sh --base-path /teddycloud
 ```
 
 `--no-color` disables ANSI colors. The standard `NO_COLOR` environment variable
-does the same. `--help` lists the public options and exit codes.
+does the same. The default report is deliberately compact: one line per role
+and box overlay, followed by a deduplicated list of findings. Use
+`--verbose` when every certificate property, fingerprint and individual check
+is needed. `--help` lists the public options and exit codes.
 
 ## Roles
 
@@ -48,7 +51,8 @@ configured set the doctor checks:
 
 - non-empty, readable PEM or DER input;
 - matching certificate and private-key public keys;
-- a leaf chain that verifies against the configured CA;
+- a leaf chain that verifies against the configured CA where the complete chain
+  is locally available;
 - `CA:TRUE` on the CA and no CA role on a leaf;
 - current validity and an expiry warning within 30 days;
 - required DNS SANs for the configured TB2 HTTPS and ICI hostnames;
@@ -62,6 +66,17 @@ certificate settings are never printed. Raw settings are materialized only in a
 mode-0700 temporary directory for validation and are deleted on exit.
 
 Optional build artefacts such as `.srl` and `.csr` are deliberately not required.
+
+Factory client certificates can be issued by an intermediate CA that is not
+stored in TeddyCloud. If the configured root and leaf are both unambiguously
+from the expected Boxine or TONIES generation, the doctor reports that missing
+intermediate as information instead of declaring the identity broken. A wrong
+generation, direct-signature failure or key mismatch remains an error.
+
+Some preserved TB1 server CAs use a legacy X.509 encoding rejected by current
+OpenSSL versions. The compact report marks this as a warning and never rewrites
+the certificate. `--verbose` shows the exact affected path. TeddyCloud's runtime
+use and a modern OpenSSL parse are separate facts in this case.
 
 ## Effective configuration
 
@@ -103,9 +118,12 @@ Identical files at both locations are reported as duplicates. Different files
 for the same relative role are errors, and the report states whether either path
 is selected by the effective configuration.
 
-Repeated CA files in per-box directories are normal and are not treated as
-identity duplicates. Repeated leaf certificates or private keys are reported,
-as are TB1/TB2 certificates placed below the wrong canonical tree.
+Repeated CA, leaf and private-key files can be normal when a global identity was
+copied into a per-box directory. They remain visible in `--verbose` output but
+do not create a warning by themselves. TB1/TB2 certificates placed below the
+wrong canonical tree are still reported as generation mistakes. Legacy
+duplicates are summarized by directory in compact mode and listed file by file
+with `--verbose`.
 
 ## Status and exit codes
 
@@ -114,7 +132,9 @@ as are TB1/TB2 certificates placed below the wrong canonical tree.
 - `ERROR`: invalid material, contradictory configuration or a broken active role.
 - `INFO`: role, path or effective-selection context.
 
-The final line summarizes `OK`, `WARN` and `ERROR` counts. Exit codes are:
+The compact summary separates role/overlay status from diagnostic findings.
+Verbose mode additionally shows the raw count of all individual checks. Exit
+codes are unchanged:
 
 | Code | Meaning |
 |---|---|
@@ -123,16 +143,22 @@ The final line summarizes `OK`, `WARN` and `ERROR` counts. Exit codes are:
 | `2` | at least one certificate or configuration error |
 | `3` | missing prerequisite or unreadable base configuration |
 
-Example shape (fingerprints and subjects vary):
+Compact example:
 
 ```text
-TB2 ICI-MQTT server
-  INFO  ... leaf PEM fingerprint=0123456789ABCDEF ...
-  OK    ... SAN contains ici.tonie.cloud
-  OK    ... leaf certificate and private key match
+Certificate roles
+-----------------
+  OK    TB2 HTTPS server - active, generation=LOCAL, CN=tbs2.tonie.cloud, certs/server_tb2/teddy-cert.pem
+  OK    TB2 ICI-MQTT server - active, generation=LOCAL, CN=ici.tonie.cloud, certs/server_tb2/ici.pem
+
+Findings
+--------
+  WARN  Legacy client: 3 identical duplicate file(s) (details: --verbose)
 
 Summary
-  OK=42 WARN=0 ERROR=0 INFO=18
+  Roles/overlays: OK=7 WARN=0 ERROR=0 INFO=1
+  Findings: WARN=1 ERROR=0
+  Run again with --verbose for all individual checks.
   This doctor made no changes.
 ```
 

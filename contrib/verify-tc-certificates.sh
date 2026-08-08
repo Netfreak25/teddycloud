@@ -8,18 +8,20 @@ set -u
 
 BASE_PATH="${TEDDYCLOUD_BASE_PATH:-/teddycloud}"
 USE_COLOR=1
+VERBOSE=0
 WARN_DAYS=30
 WARN_SECONDS=$((WARN_DAYS * 24 * 60 * 60))
 
 usage() {
     cat <<'EOF'
-Usage: verify-tc-certificates.sh [--base-path DIR] [--no-color] [--help]
+Usage: verify-tc-certificates.sh [--base-path DIR] [--verbose] [--no-color] [--help]
 
 Read-only validation of TeddyCloud TB1/TB2 server, upstream client and local
 fake-client certificates, including their effective overlay configuration.
 
 Options:
   --base-path DIR  TeddyCloud base directory (default: /teddycloud)
+  --verbose        Show every individual cryptographic check
   --no-color       Disable ANSI colors (NO_COLOR is also honored)
   --help           Show this help
 
@@ -43,6 +45,10 @@ while (($#)); do
             ;;
         --no-color)
             USE_COLOR=0
+            shift
+            ;;
+        --verbose)
+            VERBOSE=1
             shift
             ;;
         --help|-h)
@@ -113,6 +119,25 @@ OK_COUNT=0
 WARN_COUNT=0
 ERROR_COUNT=0
 INFO_COUNT=0
+ROLE_OK_COUNT=0
+ROLE_WARN_COUNT=0
+ROLE_ERROR_COUNT=0
+ROLE_INFO_COUNT=0
+
+declare -a COMPACT_FINDINGS=()
+declare -A COMPACT_FINDING_SEEN=()
+
+print_status() {
+    local level="$1"
+    shift
+    local color="$C_INFO"
+    case "$level" in
+        OK) color="$C_OK" ;;
+        WARN) color="$C_WARN" ;;
+        ERROR) color="$C_ERROR" ;;
+    esac
+    printf '  %b%-5s%b %s\n' "$color" "$level" "$C_RESET" "$*"
+}
 
 report() {
     local level="$1"
@@ -124,7 +149,15 @@ report() {
         ERROR) color="$C_ERROR"; ERROR_COUNT=$((ERROR_COUNT + 1)) ;;
         INFO) INFO_COUNT=$((INFO_COUNT + 1)) ;;
     esac
-    printf '  %b%-5s%b %s\n' "$color" "$level" "$C_RESET" "$*"
+    if ((VERBOSE)); then
+        printf '  %b%-5s%b %s\n' "$color" "$level" "$C_RESET" "$*"
+    elif [[ "$level" == WARN || "$level" == ERROR ]]; then
+        local finding_key="$level|$*"
+        if [[ -z "${COMPACT_FINDING_SEEN["$finding_key"]:-}" ]]; then
+            COMPACT_FINDING_SEEN["$finding_key"]=1
+            COMPACT_FINDINGS+=("$finding_key")
+        fi
+    fi
 }
 
 issue() {
@@ -138,8 +171,27 @@ issue() {
 }
 
 section() {
+    ((VERBOSE)) || return 0
     printf '\n%s\n' "$1"
     printf '%*s\n' "${#1}" '' | tr ' ' '-'
+}
+
+compact_section() {
+    ((VERBOSE)) && return 0
+    printf '\n%s\n' "$1"
+    printf '%*s\n' "${#1}" '' | tr ' ' '-'
+}
+
+compact_result() {
+    local level="$1"
+    shift
+    case "$level" in
+        OK) ROLE_OK_COUNT=$((ROLE_OK_COUNT + 1)) ;;
+        WARN) ROLE_WARN_COUNT=$((ROLE_WARN_COUNT + 1)) ;;
+        ERROR) ROLE_ERROR_COUNT=$((ROLE_ERROR_COUNT + 1)) ;;
+        INFO) ROLE_INFO_COUNT=$((ROLE_INFO_COUNT + 1)) ;;
+    esac
+    ((VERBOSE)) || print_status "$level" "$*"
 }
 
 declare -A DEFAULTS=()
@@ -153,6 +205,39 @@ declare -A KEY_IDENTITY_PATH=()
 declare -A SET_GENERATION=()
 declare -A SET_CN=()
 declare -A SET_COMPLETE=()
+declare -A SET_WARN_START=()
+declare -A SET_ERROR_START=()
+declare -A SET_RESULT=()
+
+update_set_result() {
+    local set_id="$1"
+    if ((ERROR_COUNT > ${SET_ERROR_START["$set_id"]:-0})); then
+        SET_RESULT["$set_id"]=ERROR
+    elif ((WARN_COUNT > ${SET_WARN_START["$set_id"]:-0})); then
+        SET_RESULT["$set_id"]=WARN
+    else
+        SET_RESULT["$set_id"]=OK
+    fi
+}
+
+compact_set_result() {
+    local set_id="$1"
+    local role="$2"
+    local active="$3"
+    local path="$4"
+    local result="${SET_RESULT["$set_id"]:-INFO}"
+    local generation="${SET_GENERATION["$set_id"]:-UNKNOWN}"
+    local cn="${SET_CN["$set_id"]:-}"
+    local state=disabled
+    ((active)) && state=active
+    if [[ "${SET_COMPLETE["$set_id"]:-0}" == 0 && "$result" == OK ]]; then
+        result=INFO
+    fi
+    local details="$state, generation=$generation"
+    [[ -n "$cn" ]] && details="$details, CN=$cn"
+    [[ -n "$path" ]] && details="$details, $path"
+    compact_result "$result" "$role - $details"
+}
 
 set_default() {
     DEFAULTS["$1"]="$2"
@@ -433,6 +518,25 @@ classify_ca_textual() {
     fi
 }
 
+classify_leaf_textual() {
+    local cert_pem="$1"
+    local subject issuer combined
+    cert_subject "$cert_pem"
+    subject="$REPLY"
+    cert_issuer "$cert_pem"
+    issuer="$REPLY"
+    combined="${subject,,} ${issuer,,}"
+    if [[ "$combined" == *boxine* ]]; then
+        REPLY=TB1
+    elif [[ "$combined" == *tonies* || "$combined" == *'tonie cloud'* ]]; then
+        REPLY=TB2
+    elif [[ "$combined" == *teddycloud* || "$combined" == *'team revvox'* ]]; then
+        REPLY=LOCAL
+    else
+        REPLY=UNKNOWN
+    fi
+}
+
 classify_ca() {
     local ca_pem="$1"
     local fp subject issuer combined
@@ -500,13 +604,13 @@ register_identity() {
     key_fp="$REPLY"
     previous="${CERT_IDENTITY_PATH["$cert_fp"]:-}"
     if [[ -n "$previous" && "$previous" != "$display" ]]; then
-        report WARN "$role: duplicate leaf identity at $display (also $previous)"
+        report INFO "$role: repeated leaf identity at $display (also $previous)"
     else
         CERT_IDENTITY_PATH["$cert_fp"]="$display"
     fi
     previous="${KEY_IDENTITY_PATH["$key_fp"]:-}"
     if [[ -n "$previous" && "$previous" != "$display" ]]; then
-        report WARN "$role: duplicate private-key identity at $display (also $previous)"
+        report INFO "$role: repeated private-key identity at $display (also $previous)"
     else
         KEY_IDENTITY_PATH["$key_fp"]="$display"
     fi
@@ -517,11 +621,15 @@ check_required_sans() {
     local active="$2"
     local cert_pem="$3"
     local names_csv="$4"
-    local san_text host
+    local san_text host host_key
+    local -A seen_names=()
     san_text="$(openssl x509 -in "$cert_pem" -noout -ext subjectAltName 2>/dev/null || true)"
     IFS=',' read -r -a required_names <<< "$names_csv"
     for host in "${required_names[@]}"; do
         [[ -n "$host" ]] || continue
+        host_key="${host,,}"
+        [[ -z "${seen_names["$host_key"]:-}" ]] || continue
+        seen_names["$host_key"]=1
         if grep -Eiq "DNS:${host//./\\.}([,[:space:]]|$)" <<< "$san_text"; then
             report OK "$role: SAN contains $host"
         else
@@ -576,7 +684,11 @@ check_cert_set() {
     local directory_id="${14}"
     local ca_state cert_state key_state present_count=0
     local ca_pem='' cert_pem='' key_pem='' ca_format cert_format key_format
-    local subject issuer fp cn canonical_cn generation cert_pub key_pub ca_key_usage
+    local subject issuer fp cn canonical_cn generation=UNKNOWN leaf_generation=UNKNOWN
+    local cert_pub key_pub ca_key_usage ca_subject verify_output
+
+    SET_WARN_START["$set_id"]="$WARN_COUNT"
+    SET_ERROR_START["$set_id"]="$ERROR_COUNT"
 
     file_state "$ca_path"; ca_state="$REPLY"; [[ "$ca_state" == present ]] && present_count=$((present_count + 1))
     file_state "$cert_path"; cert_state="$REPLY"; [[ "$cert_state" == present ]] && present_count=$((present_count + 1))
@@ -590,6 +702,7 @@ check_cert_set() {
         else
             report INFO "$role: certificate set is absent and the role is disabled"
         fi
+        update_set_result "$set_id"
         return
     fi
     if ((present_count != 3)); then
@@ -625,7 +738,11 @@ check_cert_set() {
                 report OK "$role: detected generation $generation"
             fi
         else
-            issue "$active" "$role: CA is not readable as PEM or DER: $ca_display"
+            if [[ "$set_id" == server-tb1 ]]; then
+                report WARN "$role: OpenSSL cannot parse the legacy TB1 CA at $ca_display; keep its bytes unchanged and inspect details with --verbose"
+            else
+                issue "$active" "$role: CA is not readable as PEM or DER: $ca_display"
+            fi
         fi
     fi
 
@@ -637,6 +754,7 @@ check_cert_set() {
             cert_issuer "$cert_pem"; issuer="$REPLY"
             cert_cn "$cert_pem"; cn="$REPLY"
             SET_CN["$set_id"]="$cn"
+            classify_leaf_textual "$cert_pem"; leaf_generation="$REPLY"
             report INFO "$role: leaf $cert_format fingerprint=$fp subject=$subject issuer=$issuer path=$cert_display"
             if openssl x509 -in "$cert_pem" -noout -ext basicConstraints 2>/dev/null | grep -q 'CA:TRUE'; then
                 issue "$active" "$role: leaf certificate is incorrectly marked as a CA"
@@ -661,6 +779,9 @@ check_cert_set() {
                     report INFO "$role: local fake-client CN is not a box ID (CN=$cn)"
                 fi
             fi
+            if [[ "$kind" == client && "$expected_generation" != ANY && "$leaf_generation" != "$expected_generation" ]]; then
+                issue "$active" "$role: detected leaf generation $leaf_generation, expected $expected_generation"
+            fi
         else
             issue "$active" "$role: leaf certificate is not readable as PEM or DER: $cert_display"
         fi
@@ -676,10 +797,17 @@ check_cert_set() {
     fi
 
     if [[ -n "$ca_pem" && -n "$cert_pem" ]]; then
-        if openssl verify -CAfile "$ca_pem" "$cert_pem" >/dev/null 2>&1; then
+        if verify_output="$(openssl verify -CAfile "$ca_pem" "$cert_pem" 2>&1)"; then
             report OK "$role: leaf certificate verifies against the configured CA"
         else
-            issue "$active" "$role: leaf certificate does not verify against the configured CA"
+            cert_subject "$ca_pem"; ca_subject="$REPLY"
+            cert_issuer "$cert_pem"; issuer="$REPLY"
+            if [[ "$kind" == client && "$issuer" != "$ca_subject" && "$generation" == "$expected_generation" && "$leaf_generation" == "$expected_generation" ]] \
+                && grep -Eqi 'unable to get local issuer certificate|unable to verify the first certificate' <<< "$verify_output"; then
+                report INFO "$role: leaf was issued by $issuer; its intermediate certificate is not included, so the full chain cannot be verified locally"
+            else
+                issue "$active" "$role: leaf certificate does not verify against the configured CA"
+            fi
         fi
     fi
     if [[ -n "$cert_pem" && -n "$key_pem" ]]; then
@@ -698,6 +826,7 @@ check_cert_set() {
     else
         SET_COMPLETE["$set_id"]=0
     fi
+    update_set_result "$set_id"
 }
 
 component_is_overridden() {
@@ -733,6 +862,7 @@ check_legacy_tree() {
     local legacy="$CERT_ROOT/$legacy_name"
     local canonical="$CERT_ROOT/$canonical_name"
     local source rel target configured target_root target_name
+    local missing_count=0 identical_count=0 conflict_count=0
     [[ -d "$legacy" ]] || return
     while IFS= read -r source; do
         [[ "${source##*/}" == .gitkeep ]] && continue
@@ -745,15 +875,23 @@ check_legacy_tree() {
         fi
         target="$target_root/$rel"
         if [[ ! -e "$target" ]]; then
-            report WARN "Legacy $legacy_name/$rel has no canonical $target_name counterpart; migration recommended"
+            missing_count=$((missing_count + 1))
+            ((VERBOSE)) && report WARN "Legacy $legacy_name/$rel has no canonical $target_name counterpart; migration recommended"
         elif cmp -s -- "$source" "$target"; then
-            report WARN "Identical legacy duplicate: $legacy_name/$rel and $target_name/$rel"
+            identical_count=$((identical_count + 1))
+            ((VERBOSE)) && report WARN "Identical legacy duplicate: $legacy_name/$rel and $target_name/$rel"
         else
             configured_path_state "$source"; configured="legacy-configured=$REPLY"
             configured_path_state "$target"; configured="$configured canonical-configured=$REPLY"
-            report ERROR "Conflicting legacy/canonical files: $legacy_name/$rel != $target_name/$rel ($configured)"
+            conflict_count=$((conflict_count + 1))
+            ((VERBOSE)) && report ERROR "Conflicting legacy/canonical files: $legacy_name/$rel != $target_name/$rel ($configured)"
         fi
     done < <(find "$legacy" -type f -print 2>/dev/null | sort)
+    if ((!VERBOSE)); then
+        ((missing_count == 0)) || report WARN "Legacy $legacy_name: $missing_count file(s) have no canonical counterpart; migration recommended (details: --verbose)"
+        ((identical_count == 0)) || report WARN "Legacy $legacy_name: $identical_count identical duplicate file(s) (details: --verbose)"
+        ((conflict_count == 0)) || report ERROR "Legacy $legacy_name: $conflict_count file(s) conflict with their canonical counterpart (details: --verbose)"
+    fi
 }
 
 check_ca_representations() {
@@ -767,7 +905,11 @@ check_ca_representations() {
         return
     fi
     if ! normalize_cert "$pem"; then
-        report ERROR "$root_name: ca-root.pem is not a readable certificate"
+        if [[ "$root_name" == server_tb1 ]]; then
+            report INFO "$root_name: modern OpenSSL cannot parse the legacy ca-root.pem representation; bytes were left unchanged"
+        else
+            report ERROR "$root_name: ca-root.pem is not a readable certificate"
+        fi
         return
     fi
     pem_normalized="$NORMALIZED_PATH"
@@ -878,6 +1020,7 @@ else
 fi
 effective '' mqtt_server.enabled; is_true "$REPLY" && MQTT_SERVER_ACTIVE=1 || MQTT_SERVER_ACTIVE=0
 
+compact_section 'Certificate roles'
 section 'Server certificate roles'
 resolve_material '' core.server_cert.file.ca core.server_cert.data.ca; tb1_server_ca="$RESOLVED_PATH"; tb1_server_ca_display="$RESOLVED_DISPLAY"
 resolve_material '' core.server_cert.file.crt core.server_cert.data.crt; tb1_server_crt="$RESOLVED_PATH"; tb1_server_crt_display="$RESOLVED_DISPLAY"
@@ -889,6 +1032,8 @@ if [[ "${SET_COMPLETE[server-tb1]:-0}" == 1 ]]; then
     resolve_material '' core.server_cert.file.ca_key core.server_cert.data.ca_key
     normalize_cert "$tb1_server_ca" && check_ca_key_pair 'TB1 HTTPS server' "$TB1_SERVER_ACTIVE" "$NORMALIZED_PATH" "$RESOLVED_PATH" "$RESOLVED_DISPLAY"
 fi
+update_set_result server-tb1
+compact_set_result server-tb1 'TB1 HTTPS server' "$TB1_SERVER_ACTIVE" "$tb1_server_crt_display"
 
 effective '' core.server_cert_tb2.hostname; https_hostname="$REPLY"
 resolve_material '' core.server_cert_tb2.file.ca core.server_cert_tb2.data.ca; tb2_server_ca="$RESOLVED_PATH"; tb2_server_ca_display="$RESOLVED_DISPLAY"
@@ -901,6 +1046,8 @@ if [[ "${SET_COMPLETE[server-tb2-https]:-0}" == 1 ]]; then
     resolve_material '' core.server_cert_tb2.file.ca_key core.server_cert_tb2.data.ca_key
     normalize_cert "$tb2_server_ca" && check_ca_key_pair 'TB2 HTTPS server' "$TB2_SERVER_ACTIVE" "$NORMALIZED_PATH" "$RESOLVED_PATH" "$RESOLVED_DISPLAY"
 fi
+update_set_result server-tb2-https
+compact_set_result server-tb2-https 'TB2 HTTPS server' "$TB2_SERVER_ACTIVE" "$tb2_server_crt_display"
 
 effective '' mqtt_server.hostname; mqtt_hostname="$REPLY"
 resolve_file_only '' mqtt_server.cert.crt; mqtt_server_crt="$RESOLVED_PATH"; mqtt_server_crt_display="$RESOLVED_DISPLAY"
@@ -909,6 +1056,7 @@ check_cert_set server-tb2-mqtt 'TB2 ICI-MQTT server' "$MQTT_SERVER_ACTIVE" LOCAL
     "$tb2_server_ca" "$tb2_server_ca_display" "$mqtt_server_crt" "$mqtt_server_crt_display" \
     "$mqtt_server_key" "$mqtt_server_key_display" server \
     "$mqtt_hostname,ici.tonie.cloud,ici.dev.tonie.cloud,ici.stage.tonie.cloud" '' ''
+compact_set_result server-tb2-mqtt 'TB2 ICI-MQTT server' "$MQTT_SERVER_ACTIVE" "$mqtt_server_crt_display"
 
 section 'Global upstream client identities'
 resolve_material '' core.client_cert_tb1.file.ca core.client_cert_tb1.data.ca; tb1_client_ca="$RESOLVED_PATH"; tb1_client_ca_display="$RESOLVED_DISPLAY"
@@ -917,6 +1065,7 @@ resolve_material '' core.client_cert_tb1.file.key core.client_cert_tb1.data.key;
 check_cert_set client-tb1-global 'TB1 Boxine upstream client (global)' "$TB1_UPSTREAM_ACTIVE" TB1 \
     "$tb1_client_ca" "$tb1_client_ca_display" "$tb1_client_crt" "$tb1_client_crt_display" \
     "$tb1_client_key" "$tb1_client_key_display" client '' '' ''
+compact_set_result client-tb1-global 'TB1 Boxine upstream client' "$TB1_UPSTREAM_ACTIVE" "$tb1_client_crt_display"
 
 resolve_material '' core.client_cert_tb2.file.ca core.client_cert_tb2.data.ca; tb2_client_ca="$RESOLVED_PATH"; tb2_client_ca_display="$RESOLVED_DISPLAY"
 resolve_material '' core.client_cert_tb2.file.crt core.client_cert_tb2.data.crt; tb2_client_crt="$RESOLVED_PATH"; tb2_client_crt_display="$RESOLVED_DISPLAY"
@@ -924,10 +1073,13 @@ resolve_material '' core.client_cert_tb2.file.key core.client_cert_tb2.data.key;
 check_cert_set client-tb2-global 'TB2 TONIES upstream client (global)' "$TB2_UPSTREAM_ACTIVE" TB2 \
     "$tb2_client_ca" "$tb2_client_ca_display" "$tb2_client_crt" "$tb2_client_crt_display" \
     "$tb2_client_key" "$tb2_client_key_display" client '' '' ''
+compact_set_result client-tb2-global 'TB2 TONIES upstream client' "$TB2_UPSTREAM_ACTIVE" "$tb2_client_crt_display"
 if is_true "$mqtt_upstream_value"; then
     report INFO 'TB2 ICI-MQTT client: active; shares the effective TB2 TONIES client identity above'
+    compact_result INFO 'TB2 ICI-MQTT client - active, shares the TB2 TONIES identity'
 else
     report INFO 'TB2 ICI-MQTT client: disabled; shares the effective TB2 TONIES client identity when enabled'
+    compact_result INFO 'TB2 ICI-MQTT client - disabled, shares the TB2 TONIES identity when enabled'
 fi
 
 section 'Configured local fake-client identity'
@@ -937,10 +1089,13 @@ resolve_material '' core.client_cert_fake.file.key core.client_cert_fake.data.ke
 check_cert_set fake-global 'Local fake client (configured global)' 0 LOCAL \
     "$fake_client_ca" "$fake_client_ca_display" "$fake_client_crt" "$fake_client_crt_display" \
     "$fake_client_key" "$fake_client_key_display" fake '' '' ''
+compact_set_result fake-global 'Local fake client' 0 "$fake_client_crt_display"
 
+compact_section 'Box overlays'
 section 'Effective box overlays'
 if ((${#OVERLAY_IDS[@]} == 0)); then
     report INFO 'No box overlays are configured'
+    compact_result INFO 'No box overlays are configured'
 fi
 while IFS= read -r overlay_id; do
     [[ -n "$overlay_id" ]] || continue
@@ -955,6 +1110,7 @@ while IFS= read -r overlay_id; do
     report INFO "Overlay $overlay_id: box=$box_id configured-generation=$box_generation"
 
     selected_generation="$box_generation"
+    overlay_generation_note=''
     if [[ "$box_generation" == UNKNOWN ]]; then
         tb1_overrides=0; tb2_overrides=0
         for component in ca crt key; do
@@ -963,12 +1119,15 @@ while IFS= read -r overlay_id; do
         done
         if ((tb1_overrides > 0 && tb2_overrides == 0)); then
             selected_generation=TB1; prefix=core.client_cert_tb1
+            overlay_generation_note='; recommendation boxGeneration=TB1'
             report INFO "Overlay $overlay_id: recommendation boxGeneration=TB1 based on its explicit certificate settings"
         elif ((tb2_overrides > 0 && tb1_overrides == 0)); then
             selected_generation=TB2; prefix=core.client_cert_tb2
+            overlay_generation_note='; recommendation boxGeneration=TB2'
             report INFO "Overlay $overlay_id: recommendation boxGeneration=TB2 based on its explicit certificate settings"
         else
             report WARN "Overlay $overlay_id: boxGeneration is unknown; no unique certificate-based recommendation is possible"
+            compact_result WARN "Overlay $overlay_id - boxGeneration unknown, no unique certificate recommendation"
             continue
         fi
     fi
@@ -979,6 +1138,7 @@ while IFS= read -r overlay_id; do
     done
     if ((override_count == 0)); then
         report OK "Overlay $overlay_id: uses the shared global $selected_generation client identity"
+        compact_result OK "Overlay $overlay_id - $selected_generation, shared global identity"
         continue
     fi
     if ((override_count != 3)); then
@@ -1003,9 +1163,14 @@ while IFS= read -r overlay_id; do
         "$overlay_ca" "$overlay_ca_display" "$overlay_crt" "$overlay_crt_display" \
         "$overlay_key" "$overlay_key_display" client '' "$box_id" "$path_box_id"
     detected="${SET_GENERATION["overlay:$overlay_id"]:-UNKNOWN}"
+    if ((override_count != 3)); then
+        SET_RESULT["overlay:$overlay_id"]=ERROR
+    fi
     if [[ "$box_generation" != UNKNOWN && "$detected" != UNKNOWN && "$detected" != "$box_generation" ]]; then
         report ERROR "Overlay $overlay_id: boxGeneration=$box_generation conflicts with certificate generation=$detected"
+        SET_RESULT["overlay:$overlay_id"]=ERROR
     fi
+    compact_set_result "overlay:$overlay_id" "Overlay $overlay_id $selected_generation$overlay_generation_note" "$overlay_active" "$overlay_crt_display"
 done < <(printf '%s\n' "${!OVERLAY_IDS[@]}" | sort)
 
 section 'Canonical and legacy directory inventory'
@@ -1032,8 +1197,26 @@ inventory_fake_tree client_tb1
 inventory_fake_tree client_tb2
 inventory_fake_tree client
 
-section 'Summary'
-printf '  OK=%d WARN=%d ERROR=%d INFO=%d\n' "$OK_COUNT" "$WARN_COUNT" "$ERROR_COUNT" "$INFO_COUNT"
+if ((VERBOSE)); then
+    section 'Summary'
+    printf '  OK=%d WARN=%d ERROR=%d INFO=%d\n' "$OK_COUNT" "$WARN_COUNT" "$ERROR_COUNT" "$INFO_COUNT"
+else
+    compact_section 'Findings'
+    if ((${#COMPACT_FINDINGS[@]} == 0)); then
+        print_status OK 'No certificate or configuration problems found.'
+    else
+        for finding in "${COMPACT_FINDINGS[@]}"; do
+            level="${finding%%|*}"
+            message="${finding#*|}"
+            print_status "$level" "$message"
+        done
+    fi
+    compact_section 'Summary'
+    printf '  Roles/overlays: OK=%d WARN=%d ERROR=%d INFO=%d\n' \
+        "$ROLE_OK_COUNT" "$ROLE_WARN_COUNT" "$ROLE_ERROR_COUNT" "$ROLE_INFO_COUNT"
+    printf '  Findings: WARN=%d ERROR=%d\n' "$WARN_COUNT" "$ERROR_COUNT"
+    printf '  Run again with --verbose for all individual checks.\n'
+fi
 printf '  Base path: %s\n' "$BASE_PATH"
 printf '  This doctor made no changes.\n'
 
