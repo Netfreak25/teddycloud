@@ -108,6 +108,13 @@
             "overlaysTitle": "Toniebox overlays",
             "findingsTitle": "Qaghmey tu'lu'bogh",
             "detailsTitle": "De' Hoch",
+            "detailSummary": "{{errors}} Qagh · {{warnings}} yIqIm · {{ok}} Qap · {{info}} De'",
+            "detailSections": {
+                "problems": "Qaghmey yIqIm je",
+                "information": "De'",
+                "successful": "Qapbogh pojmey"
+            },
+            "pathUnavailable": "He Sovlu'be'",
             "noFindings": "certificate Qagh configuration Qagh ghap tu'lu'be'.",
             "noOverlays": "Toniebox overlay tu'lu'be'.",
             "summary": {

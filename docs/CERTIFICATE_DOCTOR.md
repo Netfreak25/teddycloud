@@ -29,9 +29,12 @@ WebUI. `--help` lists the public options and exit codes.
 The same read-only diagnosis is available under **Settings -> Diagnostics**.
 The page runs the doctor once when opened and again only when **Check again** is
 selected. Its summary, certificate roles, effective box-overlay identities and
-findings use the same checks and messages as the command-line report. The
-**Full details** section expands the already loaded result; it does not start a
-second check.
+findings use the same checks and messages as the command-line report. Findings
+show their certificate/configuration path whenever one can be determined. The
+**Full details** section groups the already loaded checks by certificate role,
+inventory set or overlay. Problems are shown first, while informational and
+successful checks remain separately collapsible. Expanding details does not
+start a second check.
 
 The backing endpoint is:
 
@@ -52,8 +55,13 @@ The JSON document has `schemaVersion: 1` and contains:
 
 - the overall result and compact counters;
 - all configured certificate roles and effective overlay identities;
-- deduplicated findings for the overview;
-- every individual check for the expandable detail view.
+- deduplicated findings for the overview, including `scope` and `path`;
+- every individual check for the hierarchical detail view, also including
+  `scope` and `path`.
+
+All status values are canonical lowercase values: `ok`, `warning`, `error` or
+`info`. The WebUI additionally normalizes legacy spellings such as `WARN` or
+`warn` so mixed-version deployments never expose translation keys to users.
 
 Unknown additive fields may be ignored. A client must reject an unknown schema
 version instead of guessing its meaning.

@@ -1047,6 +1047,13 @@
             "overlaysTitle": "Configurations des box",
             "findingsTitle": "Anomalies",
             "detailsTitle": "Détails complets",
+            "detailSummary": "{{errors}} erreurs · {{warnings}} avertissements · {{ok}} OK · {{info}} info",
+            "detailSections": {
+                "problems": "Erreurs et avertissements",
+                "information": "Informations",
+                "successful": "Vérifications réussies"
+            },
+            "pathUnavailable": "Aucun chemin univoque",
             "noFindings": "Aucun problème de certificat ou de configuration détecté.",
             "noOverlays": "Aucune configuration spécifique de box.",
             "summary": {

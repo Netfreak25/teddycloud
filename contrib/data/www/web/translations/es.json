@@ -1047,6 +1047,13 @@
             "overlaysTitle": "Configuraciones de cajas",
             "findingsTitle": "Incidencias",
             "detailsTitle": "Detalles completos",
+            "detailSummary": "{{errors}} errores · {{warnings}} advertencias · {{ok}} OK · {{info}} info",
+            "detailSections": {
+                "problems": "Errores y advertencias",
+                "information": "Información",
+                "successful": "Comprobaciones correctas"
+            },
+            "pathUnavailable": "No hay una ruta inequívoca",
             "noFindings": "No se encontraron problemas de certificados o configuración.",
             "noOverlays": "No hay configuraciones específicas de cajas.",
             "summary": {

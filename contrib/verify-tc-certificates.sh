@@ -151,6 +151,15 @@ declare -a OVERLAY_STATUS=()
 declare -a OVERLAY_CN=()
 declare -a OVERLAY_PATH=()
 
+normalize_severity() {
+    case "${1^^}" in
+        OK) printf 'ok' ;;
+        WARN|WARNING) printf 'warning' ;;
+        ERROR) printf 'error' ;;
+        *) printf 'info' ;;
+    esac
+}
+
 print_status() {
     local level="$1"
     shift
@@ -280,7 +289,7 @@ compact_set_result() {
         ROLE_IDS+=("$set_id")
         ROLE_LABELS+=("$role")
         ROLE_ACTIVE+=("$active")
-        ROLE_STATUS+=("${result,,}")
+        ROLE_STATUS+=("$(normalize_severity "$result")")
         ROLE_GENERATION+=("$generation")
         ROLE_CN+=("$cn")
         ROLE_PATH+=("$path")
@@ -298,7 +307,7 @@ record_role() {
     ROLE_IDS+=("$id")
     ROLE_LABELS+=("$label")
     ROLE_ACTIVE+=("$active")
-    ROLE_STATUS+=("$status")
+    ROLE_STATUS+=("$(normalize_severity "$status")")
     ROLE_GENERATION+=("$generation")
     ROLE_CN+=("$cn")
     ROLE_PATH+=("$path")
@@ -310,7 +319,7 @@ record_overlay() {
     OVERLAY_CONFIGURED_GENERATION+=("$3")
     OVERLAY_SELECTED_GENERATION+=("$4")
     OVERLAY_IDENTITY_SOURCE+=("$5")
-    OVERLAY_STATUS+=("$6")
+    OVERLAY_STATUS+=("$(normalize_severity "$6")")
     OVERLAY_CN+=("$7")
     OVERLAY_PATH+=("$8")
 }
@@ -336,6 +345,74 @@ json_bool() {
         printf true
     else
         printf false
+    fi
+}
+
+diagnostic_scope() {
+    local message="$1"
+    if [[ "$message" == *": "* ]]; then
+        printf '%s' "${message%%: *}"
+    elif [[ "$message" == Legacy\ */* ]]; then
+        local legacy_path="${message#Legacy }"
+        printf 'Legacy %s' "${legacy_path%%/*}"
+    else
+        printf 'General'
+    fi
+}
+
+diagnostic_path() {
+    local message="$1"
+    local scope="$2"
+    local candidate=''
+    local token=''
+    local index=0
+
+    for token in $message; do
+        token="${token#\(}"
+        token="${token#\[}"
+        token="${token#\"}"
+        token="${token#CA=}"
+        token="${token#cert=}"
+        token="${token#key=}"
+        case "$token" in
+            /teddycloud/*|certs/*|config/*)
+                candidate="$token"
+                ;;
+            client/*|client_tb1/*|client_tb2/*|server/*|server_tb1/*|server_tb2/*)
+                candidate="certs/$token"
+                ;;
+        esac
+        if [[ -n "$candidate" ]]; then
+            while [[ -n "$candidate" ]]; do
+                case "${candidate: -1}" in
+                    ','|';'|':'|')'|']'|'"') candidate="${candidate%?}" ;;
+                    *) break ;;
+                esac
+            done
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+
+    if [[ "$scope" == Inventory\ * ]]; then
+        printf 'certs/%s' "${scope#Inventory }"
+    elif [[ "$scope" == Legacy\ * ]]; then
+        printf 'certs/%s' "${scope#Legacy }"
+    elif [[ "$scope" == server_tb1 || "$scope" == server_tb2 || "$scope" == client_tb1 || "$scope" == client_tb2 ]]; then
+        printf 'certs/%s' "$scope"
+    else
+        for ((index = 0; index < ${#ROLE_LABELS[@]}; index++)); do
+            if [[ "${ROLE_LABELS[$index]}" == "$scope" && -n "${ROLE_PATH[$index]}" ]]; then
+                printf '%s' "${ROLE_PATH[$index]}"
+                return 0
+            fi
+        done
+        for ((index = 0; index < ${#OVERLAY_KEYS[@]}; index++)); do
+            if [[ "Overlay ${OVERLAY_KEYS[$index]}" == "$scope" && -n "${OVERLAY_PATH[$index]}" ]]; then
+                printf '%s' "${OVERLAY_PATH[$index]}"
+                return 0
+            fi
+        done
     fi
 }
 
@@ -1316,13 +1393,14 @@ inventory_fake_tree client_tb2
 inventory_fake_tree client
 
 emit_json() {
-    local result=ok clean_roles=0 index finding level message comma status
+    local result=ok clean_roles=0 index finding level message comma status severity scope path
     if ((ERROR_COUNT > 0)); then
         result=error
     elif ((WARN_COUNT > 0)); then
         result=warning
     fi
     for status in "${ROLE_STATUS[@]}"; do
+        status="$(normalize_severity "$status")"
         [[ "$status" == ok || "$status" == info ]] && clean_roles=$((clean_roles + 1))
     done
 
@@ -1337,7 +1415,7 @@ emit_json() {
         printf '%s{"id":' "$comma"; json_string "${ROLE_IDS[$index]}"
         printf ',"label":'; json_string "${ROLE_LABELS[$index]}"
         printf ',"active":'; json_bool "${ROLE_ACTIVE[$index]}"
-        printf ',"status":'; json_string "${ROLE_STATUS[$index]}"
+        printf ',"status":'; json_string "$(normalize_severity "${ROLE_STATUS[$index]}")"
         printf ',"generation":'; json_string "${ROLE_GENERATION[$index]}"
         printf ',"cn":'; json_string "${ROLE_CN[$index]}"
         printf ',"path":'; json_string "${ROLE_PATH[$index]}"
@@ -1354,7 +1432,7 @@ emit_json() {
         printf ',"configuredGeneration":'; json_string "${OVERLAY_CONFIGURED_GENERATION[$index]}"
         printf ',"selectedGeneration":'; json_string "${OVERLAY_SELECTED_GENERATION[$index]}"
         printf ',"identitySource":'; json_string "${OVERLAY_IDENTITY_SOURCE[$index]}"
-        printf ',"status":'; json_string "${OVERLAY_STATUS[$index]}"
+        printf ',"status":'; json_string "$(normalize_severity "${OVERLAY_STATUS[$index]}")"
         printf ',"cn":'; json_string "${OVERLAY_CN[$index]}"
         printf ',"path":'; json_string "${OVERLAY_PATH[$index]}"
         printf '}'
@@ -1368,8 +1446,13 @@ emit_json() {
         finding="${COMPACT_FINDINGS[$index]}"
         level="${finding%%|*}"
         message="${finding#*|}"
-        printf '%s{"severity":' "$comma"; json_string "${level,,}"
-        printf ',"code":'; json_string "doctor.${level,,}.$(printf '%03d' $((index + 1)))"
+        severity="$(normalize_severity "$level")"
+        scope="$(diagnostic_scope "$message")"
+        path="$(diagnostic_path "$message" "$scope")"
+        printf '%s{"severity":' "$comma"; json_string "$severity"
+        printf ',"code":'; json_string "doctor.$severity.$(printf '%03d' $((index + 1)))"
+        printf ',"scope":'; json_string "$scope"
+        printf ',"path":'; json_string "$path"
         printf ',"message":'; json_string "$message"
         printf '}'
         comma=','
@@ -1379,9 +1462,15 @@ emit_json() {
     printf ',"checks":['
     comma=''
     for ((index = 0; index < ${#CHECK_LEVELS[@]}; index++)); do
+        message="${CHECK_MESSAGES[$index]}"
+        severity="$(normalize_severity "${CHECK_LEVELS[$index]}")"
+        scope="$(diagnostic_scope "$message")"
+        path="$(diagnostic_path "$message" "$scope")"
         printf '%s{"id":%d,"severity":' "$comma" "$((index + 1))"
-        json_string "${CHECK_LEVELS[$index],,}"
-        printf ',"message":'; json_string "${CHECK_MESSAGES[$index]}"
+        json_string "$severity"
+        printf ',"scope":'; json_string "$scope"
+        printf ',"path":'; json_string "$path"
+        printf ',"message":'; json_string "$message"
         printf '}'
         comma=','
     done

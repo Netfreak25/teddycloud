@@ -1047,6 +1047,13 @@
             "overlaysTitle": "Box-Overlays",
             "findingsTitle": "Auffälligkeiten",
             "detailsTitle": "Vollständige Details",
+            "detailSummary": "{{errors}} Fehler · {{warnings}} Warnungen · {{ok}} OK · {{info}} Info",
+            "detailSections": {
+                "problems": "Fehler und Warnungen",
+                "information": "Informationen",
+                "successful": "Erfolgreiche Prüfungen"
+            },
+            "pathUnavailable": "Kein eindeutiger Pfad",
             "noFindings": "Keine Zertifikats- oder Konfigurationsprobleme gefunden.",
             "noOverlays": "Es sind keine Box-Overlays konfiguriert.",
             "summary": {

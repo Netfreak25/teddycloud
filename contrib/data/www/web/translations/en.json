@@ -1047,6 +1047,13 @@
             "overlaysTitle": "Box overlays",
             "findingsTitle": "Findings",
             "detailsTitle": "Full details",
+            "detailSummary": "{{errors}} errors · {{warnings}} warnings · {{ok}} OK · {{info}} info",
+            "detailSections": {
+                "problems": "Errors and warnings",
+                "information": "Information",
+                "successful": "Successful checks"
+            },
+            "pathUnavailable": "No unambiguous path",
             "noFindings": "No certificate or configuration problems found.",
             "noOverlays": "No box overlays are configured.",
             "summary": {

@@ -105,14 +105,19 @@ class CertificateDoctorStaticContractTests(unittest.TestCase):
         for marker in (
             "AbortController",
             "controllerRef.current?.abort()",
+            "normalizeCertificateDoctorReport",
+            "groupChecks",
             'xs={12}',
             'scroll={{ x: 900 }}',
             'settings.diagnostics.rolesTitle',
             'settings.diagnostics.overlaysTitle',
             'settings.diagnostics.findingsTitle',
             'settings.diagnostics.detailsTitle',
+            'settings.diagnostics.pathUnavailable',
+            'settings.diagnostics.detailSections.problems',
         ):
             self.assertIn(marker, component)
+        self.assertNotIn("pageSize: 25", component)
 
         for language in ("de", "en", "es", "fr", "tlh"):
             payload = json.loads(
@@ -123,6 +128,8 @@ class CertificateDoctorStaticContractTests(unittest.TestCase):
             diagnostics = payload["settings"]["diagnostics"]
             self.assertTrue(diagnostics["navigationTitle"])
             self.assertTrue(diagnostics["readOnlyDescription"])
+            self.assertTrue(diagnostics["detailSections"]["problems"])
+            self.assertTrue(diagnostics["pathUnavailable"])
 
 
 @unittest.skipIf(os.name == "nt", "behavioral doctor fixtures run in Linux/WSL")
@@ -392,6 +399,18 @@ class CertificateDoctorBehaviorTests(unittest.TestCase):
             },
         )
         self.assertEqual(len(payload["overlays"]), 2)
+        canonical_statuses = {"ok", "warning", "error", "info"}
+        for collection, field in (
+            (payload["roles"], "status"),
+            (payload["overlays"], "status"),
+            (payload["findings"], "severity"),
+            (payload["checks"], "severity"),
+        ):
+            self.assertTrue(all(entry[field] in canonical_statuses for entry in collection))
+        self.assertTrue(all("scope" in check and "path" in check for check in payload["checks"]))
+        self.assertTrue(
+            all("scope" in finding and "path" in finding for finding in payload["findings"])
+        )
         serialized = result.stdout.upper()
         self.assertNotIn("BEGIN PRIVATE KEY", serialized)
         self.assertNotIn("BEGIN CERTIFICATE", serialized)
@@ -408,6 +427,13 @@ class CertificateDoctorBehaviorTests(unittest.TestCase):
         self.assertTrue(
             any('missing"certificate.der' in check["message"] for check in payload["checks"])
         )
+        path_check = next(
+            check
+            for check in payload["checks"]
+            if 'missing"certificate.der' in check["message"]
+        )
+        self.assertEqual(path_check["scope"], "Legacy client")
+        self.assertIn("certs/client", path_check["path"])
 
     def test_partial_overlay_override_is_an_error(self) -> None:
         base = self._copy_fixture("partial")
