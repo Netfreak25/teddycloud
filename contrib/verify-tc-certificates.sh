@@ -9,12 +9,13 @@ set -u
 BASE_PATH="${TEDDYCLOUD_BASE_PATH:-/teddycloud}"
 USE_COLOR=1
 VERBOSE=0
+JSON_MODE=0
 WARN_DAYS=30
 WARN_SECONDS=$((WARN_DAYS * 24 * 60 * 60))
 
 usage() {
     cat <<'EOF'
-Usage: verify-tc-certificates.sh [--base-path DIR] [--verbose] [--no-color] [--help]
+Usage: verify-tc-certificates.sh [--base-path DIR] [--verbose] [--json] [--no-color] [--help]
 
 Read-only validation of TeddyCloud TB1/TB2 server, upstream client and local
 fake-client certificates, including their effective overlay configuration.
@@ -22,6 +23,7 @@ fake-client certificates, including their effective overlay configuration.
 Options:
   --base-path DIR  TeddyCloud base directory (default: /teddycloud)
   --verbose        Show every individual cryptographic check
+  --json           Emit the complete machine-readable diagnosis as JSON
   --no-color       Disable ANSI colors (NO_COLOR is also honored)
   --help           Show this help
 
@@ -49,6 +51,11 @@ while (($#)); do
             ;;
         --verbose)
             VERBOSE=1
+            shift
+            ;;
+        --json)
+            JSON_MODE=1
+            USE_COLOR=0
             shift
             ;;
         --help|-h)
@@ -126,6 +133,23 @@ ROLE_INFO_COUNT=0
 
 declare -a COMPACT_FINDINGS=()
 declare -A COMPACT_FINDING_SEEN=()
+declare -a CHECK_LEVELS=()
+declare -a CHECK_MESSAGES=()
+declare -a ROLE_IDS=()
+declare -a ROLE_LABELS=()
+declare -a ROLE_ACTIVE=()
+declare -a ROLE_STATUS=()
+declare -a ROLE_GENERATION=()
+declare -a ROLE_CN=()
+declare -a ROLE_PATH=()
+declare -a OVERLAY_KEYS=()
+declare -a OVERLAY_BOX_IDS=()
+declare -a OVERLAY_CONFIGURED_GENERATION=()
+declare -a OVERLAY_SELECTED_GENERATION=()
+declare -a OVERLAY_IDENTITY_SOURCE=()
+declare -a OVERLAY_STATUS=()
+declare -a OVERLAY_CN=()
+declare -a OVERLAY_PATH=()
 
 print_status() {
     local level="$1"
@@ -149,7 +173,11 @@ report() {
         ERROR) color="$C_ERROR"; ERROR_COUNT=$((ERROR_COUNT + 1)) ;;
         INFO) INFO_COUNT=$((INFO_COUNT + 1)) ;;
     esac
-    if ((VERBOSE)); then
+    if ((JSON_MODE)); then
+        CHECK_LEVELS+=("$level")
+        CHECK_MESSAGES+=("$*")
+    fi
+    if ((VERBOSE && !JSON_MODE)); then
         printf '  %b%-5s%b %s\n' "$color" "$level" "$C_RESET" "$*"
     elif [[ "$level" == WARN || "$level" == ERROR ]]; then
         local finding_key="$level|$*"
@@ -157,6 +185,17 @@ report() {
             COMPACT_FINDING_SEEN["$finding_key"]=1
             COMPACT_FINDINGS+=("$finding_key")
         fi
+    fi
+}
+
+report_detail() {
+    local level="$1"
+    shift
+    if ((JSON_MODE)); then
+        CHECK_LEVELS+=("$level")
+        CHECK_MESSAGES+=("$*")
+    elif ((VERBOSE)); then
+        report "$level" "$*"
     fi
 }
 
@@ -171,13 +210,13 @@ issue() {
 }
 
 section() {
-    ((VERBOSE)) || return 0
+    ((VERBOSE && !JSON_MODE)) || return 0
     printf '\n%s\n' "$1"
     printf '%*s\n' "${#1}" '' | tr ' ' '-'
 }
 
 compact_section() {
-    ((VERBOSE)) && return 0
+    ((VERBOSE || JSON_MODE)) && return 0
     printf '\n%s\n' "$1"
     printf '%*s\n' "${#1}" '' | tr ' ' '-'
 }
@@ -191,7 +230,7 @@ compact_result() {
         ERROR) ROLE_ERROR_COUNT=$((ROLE_ERROR_COUNT + 1)) ;;
         INFO) ROLE_INFO_COUNT=$((ROLE_INFO_COUNT + 1)) ;;
     esac
-    ((VERBOSE)) || print_status "$level" "$*"
+    ((VERBOSE || JSON_MODE)) || print_status "$level" "$*"
 }
 
 declare -A DEFAULTS=()
@@ -237,6 +276,67 @@ compact_set_result() {
     [[ -n "$cn" ]] && details="$details, CN=$cn"
     [[ -n "$path" ]] && details="$details, $path"
     compact_result "$result" "$role - $details"
+    if [[ "$set_id" != overlay:* ]]; then
+        ROLE_IDS+=("$set_id")
+        ROLE_LABELS+=("$role")
+        ROLE_ACTIVE+=("$active")
+        ROLE_STATUS+=("${result,,}")
+        ROLE_GENERATION+=("$generation")
+        ROLE_CN+=("$cn")
+        ROLE_PATH+=("$path")
+    fi
+}
+
+record_role() {
+    local id="$1"
+    local label="$2"
+    local active="$3"
+    local status="$4"
+    local generation="$5"
+    local cn="$6"
+    local path="$7"
+    ROLE_IDS+=("$id")
+    ROLE_LABELS+=("$label")
+    ROLE_ACTIVE+=("$active")
+    ROLE_STATUS+=("$status")
+    ROLE_GENERATION+=("$generation")
+    ROLE_CN+=("$cn")
+    ROLE_PATH+=("$path")
+}
+
+record_overlay() {
+    OVERLAY_KEYS+=("$1")
+    OVERLAY_BOX_IDS+=("$2")
+    OVERLAY_CONFIGURED_GENERATION+=("$3")
+    OVERLAY_SELECTED_GENERATION+=("$4")
+    OVERLAY_IDENTITY_SOURCE+=("$5")
+    OVERLAY_STATUS+=("$6")
+    OVERLAY_CN+=("$7")
+    OVERLAY_PATH+=("$8")
+}
+
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    printf '%s' "$value"
+}
+
+json_string() {
+    printf '"'
+    json_escape "$1"
+    printf '"'
+}
+
+json_bool() {
+    if (($1)); then
+        printf true
+    else
+        printf false
+    fi
 }
 
 set_default() {
@@ -876,15 +976,15 @@ check_legacy_tree() {
         target="$target_root/$rel"
         if [[ ! -e "$target" ]]; then
             missing_count=$((missing_count + 1))
-            ((VERBOSE)) && report WARN "Legacy $legacy_name/$rel has no canonical $target_name counterpart; migration recommended"
+            report_detail WARN "Legacy $legacy_name/$rel has no canonical $target_name counterpart; migration recommended"
         elif cmp -s -- "$source" "$target"; then
             identical_count=$((identical_count + 1))
-            ((VERBOSE)) && report WARN "Identical legacy duplicate: $legacy_name/$rel and $target_name/$rel"
+            report_detail WARN "Identical legacy duplicate: $legacy_name/$rel and $target_name/$rel"
         else
             configured_path_state "$source"; configured="legacy-configured=$REPLY"
             configured_path_state "$target"; configured="$configured canonical-configured=$REPLY"
             conflict_count=$((conflict_count + 1))
-            ((VERBOSE)) && report ERROR "Conflicting legacy/canonical files: $legacy_name/$rel != $target_name/$rel ($configured)"
+            report_detail ERROR "Conflicting legacy/canonical files: $legacy_name/$rel != $target_name/$rel ($configured)"
         fi
     done < <(find "$legacy" -type f -print 2>/dev/null | sort)
     if ((!VERBOSE)); then
@@ -1077,9 +1177,13 @@ compact_set_result client-tb2-global 'TB2 TONIES upstream client' "$TB2_UPSTREAM
 if is_true "$mqtt_upstream_value"; then
     report INFO 'TB2 ICI-MQTT client: active; shares the effective TB2 TONIES client identity above'
     compact_result INFO 'TB2 ICI-MQTT client - active, shares the TB2 TONIES identity'
+    record_role client-tb2-mqtt 'TB2 ICI-MQTT client' 1 "${SET_RESULT[client-tb2-global]:-info}" \
+        "${SET_GENERATION[client-tb2-global]:-UNKNOWN}" "${SET_CN[client-tb2-global]:-}" "$tb2_client_crt_display"
 else
     report INFO 'TB2 ICI-MQTT client: disabled; shares the effective TB2 TONIES client identity when enabled'
     compact_result INFO 'TB2 ICI-MQTT client - disabled, shares the TB2 TONIES identity when enabled'
+    record_role client-tb2-mqtt 'TB2 ICI-MQTT client' 0 info \
+        "${SET_GENERATION[client-tb2-global]:-UNKNOWN}" "${SET_CN[client-tb2-global]:-}" "$tb2_client_crt_display"
 fi
 
 section 'Configured local fake-client identity'
@@ -1128,6 +1232,7 @@ while IFS= read -r overlay_id; do
         else
             report WARN "Overlay $overlay_id: boxGeneration is unknown; no unique certificate-based recommendation is possible"
             compact_result WARN "Overlay $overlay_id - boxGeneration unknown, no unique certificate recommendation"
+            record_overlay "$overlay_id" "$box_id" UNKNOWN UNKNOWN unknown warning '' ''
             continue
         fi
     fi
@@ -1138,7 +1243,17 @@ while IFS= read -r overlay_id; do
     done
     if ((override_count == 0)); then
         report OK "Overlay $overlay_id: uses the shared global $selected_generation client identity"
-        compact_result OK "Overlay $overlay_id - $selected_generation, shared global identity"
+        if [[ "$selected_generation" == TB1 ]]; then
+            global_set_id=client-tb1-global
+            global_crt_display="$tb1_client_crt_display"
+        else
+            global_set_id=client-tb2-global
+            global_crt_display="$tb2_client_crt_display"
+        fi
+        global_status="${SET_RESULT["$global_set_id"]:-OK}"
+        compact_result "$global_status" "Overlay $overlay_id - $selected_generation, shared global identity"
+        record_overlay "$overlay_id" "$box_id" "$box_generation" "$selected_generation" shared \
+            "${global_status,,}" "${SET_CN["$global_set_id"]:-}" "$global_crt_display"
         continue
     fi
     if ((override_count != 3)); then
@@ -1171,6 +1286,9 @@ while IFS= read -r overlay_id; do
         SET_RESULT["overlay:$overlay_id"]=ERROR
     fi
     compact_set_result "overlay:$overlay_id" "Overlay $overlay_id $selected_generation$overlay_generation_note" "$overlay_active" "$overlay_crt_display"
+    overlay_result="${SET_RESULT["overlay:$overlay_id"]:-INFO}"
+    record_overlay "$overlay_id" "$box_id" "$box_generation" "$selected_generation" override \
+        "${overlay_result,,}" "${SET_CN["overlay:$overlay_id"]:-}" "$overlay_crt_display"
 done < <(printf '%s\n' "${!OVERLAY_IDS[@]}" | sort)
 
 section 'Canonical and legacy directory inventory'
@@ -1197,7 +1315,82 @@ inventory_fake_tree client_tb1
 inventory_fake_tree client_tb2
 inventory_fake_tree client
 
-if ((VERBOSE)); then
+emit_json() {
+    local result=ok clean_roles=0 index finding level message comma status
+    if ((ERROR_COUNT > 0)); then
+        result=error
+    elif ((WARN_COUNT > 0)); then
+        result=warning
+    fi
+    for status in "${ROLE_STATUS[@]}"; do
+        [[ "$status" == ok || "$status" == info ]] && clean_roles=$((clean_roles + 1))
+    done
+
+    printf '{"schemaVersion":1,"result":'
+    json_string "$result"
+    printf ',"summary":{"roles":%d,"ok":%d,"warnings":%d,"errors":%d}' \
+        "${#ROLE_IDS[@]}" "$clean_roles" "$WARN_COUNT" "$ERROR_COUNT"
+
+    printf ',"roles":['
+    comma=''
+    for ((index = 0; index < ${#ROLE_IDS[@]}; index++)); do
+        printf '%s{"id":' "$comma"; json_string "${ROLE_IDS[$index]}"
+        printf ',"label":'; json_string "${ROLE_LABELS[$index]}"
+        printf ',"active":'; json_bool "${ROLE_ACTIVE[$index]}"
+        printf ',"status":'; json_string "${ROLE_STATUS[$index]}"
+        printf ',"generation":'; json_string "${ROLE_GENERATION[$index]}"
+        printf ',"cn":'; json_string "${ROLE_CN[$index]}"
+        printf ',"path":'; json_string "${ROLE_PATH[$index]}"
+        printf '}'
+        comma=','
+    done
+    printf ']'
+
+    printf ',"overlays":['
+    comma=''
+    for ((index = 0; index < ${#OVERLAY_KEYS[@]}; index++)); do
+        printf '%s{"id":' "$comma"; json_string "${OVERLAY_KEYS[$index]}"
+        printf ',"boxId":'; json_string "${OVERLAY_BOX_IDS[$index]}"
+        printf ',"configuredGeneration":'; json_string "${OVERLAY_CONFIGURED_GENERATION[$index]}"
+        printf ',"selectedGeneration":'; json_string "${OVERLAY_SELECTED_GENERATION[$index]}"
+        printf ',"identitySource":'; json_string "${OVERLAY_IDENTITY_SOURCE[$index]}"
+        printf ',"status":'; json_string "${OVERLAY_STATUS[$index]}"
+        printf ',"cn":'; json_string "${OVERLAY_CN[$index]}"
+        printf ',"path":'; json_string "${OVERLAY_PATH[$index]}"
+        printf '}'
+        comma=','
+    done
+    printf ']'
+
+    printf ',"findings":['
+    comma=''
+    for ((index = 0; index < ${#COMPACT_FINDINGS[@]}; index++)); do
+        finding="${COMPACT_FINDINGS[$index]}"
+        level="${finding%%|*}"
+        message="${finding#*|}"
+        printf '%s{"severity":' "$comma"; json_string "${level,,}"
+        printf ',"code":'; json_string "doctor.${level,,}.$(printf '%03d' $((index + 1)))"
+        printf ',"message":'; json_string "$message"
+        printf '}'
+        comma=','
+    done
+    printf ']'
+
+    printf ',"checks":['
+    comma=''
+    for ((index = 0; index < ${#CHECK_LEVELS[@]}; index++)); do
+        printf '%s{"id":%d,"severity":' "$comma" "$((index + 1))"
+        json_string "${CHECK_LEVELS[$index],,}"
+        printf ',"message":'; json_string "${CHECK_MESSAGES[$index]}"
+        printf '}'
+        comma=','
+    done
+    printf ']}\n'
+}
+
+if ((JSON_MODE)); then
+    emit_json
+elif ((VERBOSE)); then
     section 'Summary'
     printf '  OK=%d WARN=%d ERROR=%d INFO=%d\n' "$OK_COUNT" "$WARN_COUNT" "$ERROR_COUNT" "$INFO_COUNT"
 else
@@ -1217,8 +1410,10 @@ else
     printf '  Findings: WARN=%d ERROR=%d\n' "$WARN_COUNT" "$ERROR_COUNT"
     printf '  Run again with --verbose for all individual checks.\n'
 fi
-printf '  Base path: %s\n' "$BASE_PATH"
-printf '  This doctor made no changes.\n'
+if ((!JSON_MODE)); then
+    printf '  Base path: %s\n' "$BASE_PATH"
+    printf '  This doctor made no changes.\n'
+fi
 
 if ((ERROR_COUNT > 0)); then
     exit 2

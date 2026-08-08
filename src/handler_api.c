@@ -7,6 +7,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 
 #include "path.h"
 #include "path_ext.h"
@@ -31,6 +34,137 @@
 #include "toniebox_state.h"
 #include "v3_local_content.h"
 #include "v3_native_cache.h"
+
+#define CERTIFICATE_DOCTOR_OUTPUT_LIMIT (1024U * 1024U)
+#define CERTIFICATE_DOCTOR_COMMAND "verify-tc-certificates.sh --base-path . --json --no-color"
+
+static error_t api_write_certificate_doctor_error(HttpConnection *connection,
+                                                   uint_t status_code,
+                                                   const char *code,
+                                                   const char *message)
+{
+    cJSON *json = cJSON_CreateObject();
+    if (json == NULL)
+    {
+        return ERROR_OUT_OF_MEMORY;
+    }
+    cJSON_AddStringToObject(json, "error", code);
+    cJSON_AddStringToObject(json, "message", message);
+    char *json_string = cJSON_PrintUnformatted(json);
+    cJSON_Delete(json);
+    if (json_string == NULL)
+    {
+        return ERROR_OUT_OF_MEMORY;
+    }
+    httpPrepareHeader(connection, "application/json; charset=utf-8",
+                      osStrlen(json_string));
+    connection->response.statusCode = status_code;
+    return httpWriteResponse(connection, json_string, osStrlen(json_string), true);
+}
+
+static int api_certificate_doctor_exit_code(int process_status)
+{
+#ifdef _WIN32
+    return process_status;
+#else
+    if (process_status < 0 || !WIFEXITED(process_status))
+    {
+        return -1;
+    }
+    return WEXITSTATUS(process_status);
+#endif
+}
+
+error_t handleApiCertificateDiagnostics(HttpConnection *connection,
+                                        const char_t *uri,
+                                        const char_t *queryString,
+                                        client_ctx_t *client_ctx)
+{
+    (void)uri;
+    (void)queryString;
+    (void)client_ctx;
+
+    FILE *pipe = osPopen(CERTIFICATE_DOCTOR_COMMAND, "r");
+    if (pipe == NULL)
+    {
+        return api_write_certificate_doctor_error(
+            connection, 503, "doctor_unavailable",
+            "Certificate doctor is not available");
+    }
+
+    char *output = osAllocMem(CERTIFICATE_DOCTOR_OUTPUT_LIMIT + 1U);
+    if (output == NULL)
+    {
+        osPclose(pipe);
+        return api_write_certificate_doctor_error(
+            connection, 500, "doctor_memory_error",
+            "Certificate doctor output could not be allocated");
+    }
+
+    size_t output_length = 0;
+    while (output_length < CERTIFICATE_DOCTOR_OUTPUT_LIMIT)
+    {
+        size_t read_length = fread(
+            output + output_length, 1,
+            CERTIFICATE_DOCTOR_OUTPUT_LIMIT - output_length, pipe);
+        output_length += read_length;
+        if (read_length == 0)
+        {
+            break;
+        }
+    }
+    bool_t output_too_large =
+        output_length == CERTIFICATE_DOCTOR_OUTPUT_LIMIT && fgetc(pipe) != EOF;
+    int process_status = osPclose(pipe);
+    int exit_code = api_certificate_doctor_exit_code(process_status);
+    output[output_length] = '\0';
+
+    if (output_too_large)
+    {
+        osFreeMem(output);
+        return api_write_certificate_doctor_error(
+            connection, 500, "doctor_output_too_large",
+            "Certificate doctor output exceeded the safety limit");
+    }
+    if (exit_code < 0 || exit_code == 3 || exit_code > 3)
+    {
+        osFreeMem(output);
+        return api_write_certificate_doctor_error(
+            connection, 503, "doctor_execution_failed",
+            "Certificate doctor could not complete its checks");
+    }
+
+    const char *parse_end = NULL;
+    cJSON *json = cJSON_ParseWithLengthOpts(output, output_length, &parse_end, 0);
+    const char *output_end = output + output_length;
+    while (parse_end != NULL && parse_end < output_end &&
+           isspace((unsigned char)*parse_end))
+    {
+        parse_end++;
+    }
+    bool_t valid_json = json != NULL && cJSON_IsObject(json) &&
+                        parse_end == output_end;
+    osFreeMem(output);
+    if (!valid_json)
+    {
+        cJSON_Delete(json);
+        return api_write_certificate_doctor_error(
+            connection, 500, "doctor_invalid_output",
+            "Certificate doctor returned invalid JSON");
+    }
+
+    char *json_string = cJSON_PrintUnformatted(json);
+    cJSON_Delete(json);
+    if (json_string == NULL)
+    {
+        return api_write_certificate_doctor_error(
+            connection, 500, "doctor_memory_error",
+            "Certificate doctor response could not be created");
+    }
+    httpPrepareHeader(connection, "application/json; charset=utf-8",
+                      osStrlen(json_string));
+    return httpWriteResponse(connection, json_string, osStrlen(json_string), true);
+}
 
 error_t parsePostData(HttpConnection *connection, char_t *post_data, size_t buffer_size)
 {

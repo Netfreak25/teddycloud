@@ -21,7 +21,40 @@ bash /usr/local/bin/verify-tc-certificates.sh --base-path /teddycloud
 does the same. The default report is deliberately compact: one line per role
 and box overlay, followed by a deduplicated list of findings. Use
 `--verbose` when every certificate property, fingerprint and individual check
-is needed. `--help` lists the public options and exit codes.
+is needed. `--json` emits the complete machine-readable diagnosis used by the
+WebUI. `--help` lists the public options and exit codes.
+
+## Web diagnostics
+
+The same read-only diagnosis is available under **Settings -> Diagnostics**.
+The page runs the doctor once when opened and again only when **Check again** is
+selected. Its summary, certificate roles, effective box-overlay identities and
+findings use the same checks and messages as the command-line report. The
+**Full details** section expands the already loaded result; it does not start a
+second check.
+
+The backing endpoint is:
+
+```text
+GET /api/diagnostics/certificates
+```
+
+It invokes the installed doctor with a fixed command and accepts no request
+parameters. Doctor exit codes 0, 1 and 2 are valid diagnostic results and are
+returned with HTTP 200. Missing prerequisites, malformed JSON or output beyond
+the fixed safety limit are reported as technical API errors. The endpoint and
+page do not expose certificate or private-key contents and cannot repair,
+upload, move or delete files.
+
+The JSON document has `schemaVersion: 1` and contains:
+
+- the overall result and compact counters;
+- all configured certificate roles and effective overlay identities;
+- deduplicated findings for the overview;
+- every individual check for the expandable detail view.
+
+Unknown additive fields may be ignored. A client must reject an unknown schema
+version instead of guessing its meaning.
 
 ## Roles
 

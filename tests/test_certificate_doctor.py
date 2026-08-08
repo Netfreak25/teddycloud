@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -38,6 +39,7 @@ class CertificateDoctorStaticContractTests(unittest.TestCase):
         for marker in (
             "--base-path",
             "--verbose",
+            "--json",
             "--no-color",
             "NO_COLOR",
             "OpenSSL is required",
@@ -70,6 +72,17 @@ class CertificateDoctorStaticContractTests(unittest.TestCase):
             self.assertIn(f"set_default {key} {value}", script)
             self.assertIn(f'"{key}"', settings)
             self.assertIn(f'"{value}"', settings)
+
+    def test_certificate_diagnostics_api_is_fixed_and_read_only(self) -> None:
+        handler = (ROOT / "src" / "handler_api.c").read_text(encoding="utf-8")
+        server = (ROOT / "src" / "server.c").read_text(encoding="utf-8")
+        self.assertIn('"/api/diagnostics/certificates"', server)
+        self.assertIn(
+            '#define CERTIFICATE_DOCTOR_COMMAND "verify-tc-certificates.sh --base-path . --json --no-color"',
+            handler,
+        )
+        self.assertIn("(void)queryString;", handler)
+        self.assertIn("CERTIFICATE_DOCTOR_OUTPUT_LIMIT", handler)
 
 
 @unittest.skipIf(os.name == "nt", "behavioral doctor fixtures run in Linux/WSL")
@@ -299,6 +312,9 @@ class CertificateDoctorBehaviorTests(unittest.TestCase):
             args.append("--verbose")
         return run(*args)
 
+    def _doctor_json(self, base: Path) -> subprocess.CompletedProcess[str]:
+        return run("bash", str(DOCTOR), "--base-path", str(base), "--json", "--no-color")
+
     def test_valid_tb1_tb2_roles_and_shared_mqtt_identity(self) -> None:
         result = self._doctor(self.fixture)
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -314,6 +330,44 @@ class CertificateDoctorBehaviorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("fingerprint=", result.stdout)
         self.assertEqual(result.stdout.count("TB2 HTTPS server: SAN contains tbs2.tonie.cloud"), 1)
+
+    def test_json_mode_contains_compact_and_detailed_diagnosis(self) -> None:
+        result = self._doctor_json(self.fixture)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["schemaVersion"], 1)
+        self.assertEqual(payload["result"], "ok")
+        self.assertEqual(payload["summary"]["roles"], len(payload["roles"]))
+        self.assertGreater(len(payload["checks"]), 10)
+        self.assertEqual(
+            {entry["id"] for entry in payload["roles"]},
+            {
+                "server-tb1",
+                "server-tb2-https",
+                "server-tb2-mqtt",
+                "client-tb1-global",
+                "client-tb2-global",
+                "client-tb2-mqtt",
+                "fake-global",
+            },
+        )
+        self.assertEqual(len(payload["overlays"]), 2)
+        serialized = result.stdout.upper()
+        self.assertNotIn("BEGIN PRIVATE KEY", serialized)
+        self.assertNotIn("BEGIN CERTIFICATE", serialized)
+
+    def test_json_mode_escapes_diagnostic_messages(self) -> None:
+        base = self._copy_fixture("json-escaping")
+        legacy = base / "certs" / "client"
+        legacy.mkdir()
+        (legacy / 'missing"certificate.der').write_bytes(b"fixture")
+        result = self._doctor_json(base)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["result"], "warning")
+        self.assertTrue(
+            any('missing"certificate.der' in check["message"] for check in payload["checks"])
+        )
 
     def test_partial_overlay_override_is_an_error(self) -> None:
         base = self._copy_fixture("partial")
