@@ -108,7 +108,17 @@ but never interrupt the live TONIES response.
 TB2 library manifests damaged by the former file-browser sidecar bug. Its
 default mode is read-only. It scans cache generations once, derives audio and
 Tonieplay collection hashes from the exact stored bytes, validates every
-archived library object and reports which manifests can be reconstructed.
+archived library object and reports which manifests can be reconstructed or
+restored.
+
+An audio collection does not require a remaining V3 cache generation when all
+archived chapters use the canonical
+`teddycloud_<sha256>_<index>.opus` format. The doctor verifies contiguous
+indices, every embedded and actual SHA-256, every size and the collection hash
+before reconstructing metadata. A valid pre-repair backup supplies chapter
+names and origins. Otherwise the names become `Chapter N`, `origins` remains
+empty and the entry is marked `recovered: true`. A regular later import may add
+the real origin without replacing the verified chapter files.
 
 `--apply` writes only byte-verified repairs and preserves the damaged manifest
 as `library-entry.json.before-browser-repair.bak`. `--recache` additionally asks
@@ -117,6 +127,18 @@ it is rejected unless `--apply` is also present. Recache never changes a
 Tonie's source or NoCloud policy. Tags that are not already eligible for an
 original-content download remain unresolved instead of being forced through
 TONIES.
+
+Differences in Tonieplay collections are reported individually for manifest,
+object count and filenames, missing or extra objects, sizes and SHA-256 values.
+Normal `--apply` never changes chapter, manifest or object bytes. The explicit
+`--apply --restore-files` mode may replace them only from cache generations
+whose collection hash and payload are exact and whose duplicate matches are
+byte-identical. Before replacement it copies the complete collection to
+`library/.doctor-backups/<UTC>/<contentHash>/`, builds and validates a complete
+staging directory and swaps the directory atomically. The same explicit mode
+can restore damaged audio chapters. Failure leaves the original collection in
+place or restores it before returning an error. `--restore-files` can be
+combined with `--recache` when a matching generation first has to be fetched.
 
 For Docker, run the doctor in a temporary Python container with the TeddyCloud
 volumes attached. Use read-only volumes for diagnosis. Recache needs the live

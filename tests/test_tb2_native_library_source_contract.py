@@ -212,15 +212,29 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
         for marker in (
             '"--apply"',
             '"--recache"',
+            '"--restore-files"',
             'parser.error("--recache requires --apply',
+            '"--restore-files requires --apply because it replaces collection files"',
             "is_browser_overwrite",
             "build_cache_index",
             "archived_audio_matches",
             "archived_tonieplay_matches",
+            "reconstruct_archived_audio",
+            "restore_collection_files",
+            '".doctor-backups"',
             "recache_until_resolved",
             "library-entry.json.before-browser-repair.bak",
         ):
             self.assertIn(marker, self.repair_script)
+
+    def test_recovered_audio_collection_accepts_empty_origins(self) -> None:
+        matcher = self.section(
+            self.native,
+            "static bool_t v3_native_library_entry_matches(",
+            "static bool_t v3_native_library_origin_matches(",
+        )
+        self.assertIn("cJSON_IsArray(origins);", matcher)
+        self.assertNotIn("cJSON_GetArraySize(origins) > 0", matcher)
 
     def test_documentation_covers_both_generations_and_failure_policy(self) -> None:
         for marker in (

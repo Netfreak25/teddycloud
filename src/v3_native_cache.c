@@ -1145,7 +1145,7 @@ static bool_t v3_native_library_entry_matches(
                        content_hash) &&
                    cJSON_IsArray(entries) &&
                    cJSON_GetArraySize(entries) == (int)chapter_count &&
-                   cJSON_IsArray(origins) && cJSON_GetArraySize(origins) > 0;
+                   cJSON_IsArray(origins);
 
     for (size_t i = 0; valid && i < chapter_count; i++)
     {

@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Diagnose and repair TB2 native cache/library collections.
 
-The doctor is read-only by default. It repairs only collections whose archived
-bytes exactly reproduce an intact TeddyCloud V3 cache generation. With the
-explicit ``--apply --recache`` combination it may ask the running TeddyCloud
-server to download eligible original TB2 content, then repeats the same byte
-validation before writing a repaired library manifest.
+The doctor is read-only by default. Audio metadata can be reconstructed from
+content-addressed chapter files alone. Replacing damaged collection files is a
+separate, explicit operation and requires an exact TeddyCloud V3 cache match.
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
+import re
 import shutil
 import ssl
 import struct
@@ -39,6 +39,10 @@ METADATA_KEYS = (
     "title",
     "name",
 )
+AUDIO_CHAPTER_PATTERN = re.compile(
+    r"^teddycloud_([0-9a-f]{64})_([0-9]+)\.opus$"
+)
+ENTRY_BACKUP_NAME = "library-entry.json.before-browser-repair.bak"
 
 
 def sha256_file(path: Path) -> tuple[str, int]:
@@ -191,6 +195,7 @@ def load_cache_generation(generation_dir: Path) -> dict[str, Any] | None:
             "contentHash": audio_collection_hash(chapters),
             "origin": origin,
             "chapters": chapters,
+            "cachePaths": [item["cachePath"] for item in cached_objects],
         }
 
     manifest_path = generation_dir / "manifest.json"
@@ -241,6 +246,7 @@ def load_cache_generation(generation_dir: Path) -> dict[str, Any] | None:
         "manifest": manifest,
         "manifestJson": manifest_json,
         "objects": objects,
+        "cachePaths": [item["cachePath"] for item in cached_objects],
     }
 
 
@@ -282,51 +288,97 @@ def format_origins(origins: list[dict[str, Any]]) -> str:
     )
 
 
+def archived_audio_differences(
+    collection_dir: Path, chapters: list[dict[str, Any]]
+) -> list[str]:
+    differences: list[str] = []
+    chapter_dir = collection_dir / "chapters"
+    if not chapter_dir.is_dir():
+        return ["chapters directory is missing"]
+    expected = {Path(chapter["path"]).name for chapter in chapters}
+    actual = {path.name for path in chapter_dir.iterdir() if path.is_file()}
+    for name in sorted(expected - actual):
+        differences.append(f"chapter is missing: {name}")
+    for name in sorted(actual - expected):
+        differences.append(f"unexpected chapter: {name}")
+    for chapter in chapters:
+        path = collection_dir / chapter["path"]
+        if not path.is_file():
+            continue
+        file_hash, size = sha256_file(path)
+        if size != chapter["fileSize"]:
+            differences.append(
+                f"chapter size differs: {path.name} "
+                f"expected={chapter['fileSize']} actual={size}"
+            )
+        if file_hash != chapter["sha256"]:
+            differences.append(f"chapter SHA-256 differs: {path.name}")
+    return differences
+
+
 def archived_audio_matches(
     collection_dir: Path, chapters: list[dict[str, Any]]
 ) -> bool:
-    chapter_dir = collection_dir / "chapters"
-    if not chapter_dir.is_dir():
-        return False
-    expected = {Path(chapter["path"]).name for chapter in chapters}
-    actual = {path.name for path in chapter_dir.iterdir() if path.is_file()}
-    if actual != expected:
-        return False
-    for chapter in chapters:
-        path = collection_dir / chapter["path"]
+    return not archived_audio_differences(collection_dir, chapters)
+
+
+def archived_tonieplay_differences(
+    collection_dir: Path, generation: dict[str, Any]
+) -> list[str]:
+    differences: list[str] = []
+    manifest_path = collection_dir / "content-meta.json"
+    try:
+        manifest = manifest_path.read_bytes()
+    except OSError:
+        differences.append("content-meta.json is missing or unreadable")
+    else:
+        if manifest != generation["manifest"]:
+            differences.append(
+                "content-meta.json differs "
+                f"expected_sha256={hashlib.sha256(generation['manifest']).hexdigest()} "
+                f"actual_sha256={hashlib.sha256(manifest).hexdigest()}"
+            )
+    object_dir = collection_dir / "objects"
+    if not object_dir.is_dir():
+        return differences + ["objects directory is missing"]
+    expected = {Path(item["path"]).name for item in generation["objects"]}
+    actual = {path.name for path in object_dir.iterdir() if path.is_file()}
+    if len(actual) != len(expected):
+        differences.append(
+            f"object count differs: expected={len(expected)} actual={len(actual)}"
+        )
+    for name in sorted(expected - actual):
+        differences.append(f"object is missing: {name}")
+    for name in sorted(actual - expected):
+        differences.append(f"unexpected object: {name}")
+    for item in generation["objects"]:
+        path = collection_dir / item["path"]
+        if not path.is_file():
+            continue
         file_hash, size = sha256_file(path)
-        if file_hash != chapter["sha256"] or size != chapter["fileSize"]:
-            return False
-    return True
+        if size != item["fileSize"]:
+            differences.append(
+                f"object size differs: {path.name} "
+                f"expected={item['fileSize']} actual={size}"
+            )
+        if file_hash != item["sha256"]:
+            differences.append(f"object SHA-256 differs: {path.name}")
+    return differences
 
 
 def archived_tonieplay_matches(
     collection_dir: Path, generation: dict[str, Any]
 ) -> bool:
-    manifest_path = collection_dir / "content-meta.json"
-    try:
-        if manifest_path.read_bytes() != generation["manifest"]:
-            return False
-    except OSError:
-        return False
-    object_dir = collection_dir / "objects"
-    if not object_dir.is_dir():
-        return False
-    expected = {Path(item["path"]).name for item in generation["objects"]}
-    actual = {path.name for path in object_dir.iterdir() if path.is_file()}
-    if actual != expected:
-        return False
-    for item in generation["objects"]:
-        file_hash, size = sha256_file(collection_dir / item["path"])
-        if file_hash != item["sha256"] or size != item["fileSize"]:
-            return False
-    return True
+    return not archived_tonieplay_differences(collection_dir, generation)
 
 
 def build_audio_entry(
-    content_hash: str, generation: dict[str, Any], origins: list[dict[str, Any]]
+    content_hash: str,
+    generation: dict[str, Any],
+    origins: list[dict[str, Any]],
+    recovered: bool = False,
 ) -> dict[str, Any]:
-    return {
+    entry: dict[str, Any] = {
         "schemaVersion": AUDIO_LIBRARY_SCHEMA,
         "origin": "tonies",
         "boxGeneration": "tb2",
@@ -335,6 +387,9 @@ def build_audio_entry(
         "chapters": generation["chapters"],
         "origins": origins,
     }
+    if recovered:
+        entry["recovered"] = True
+    return entry
 
 
 def build_tonieplay_entry(
@@ -364,24 +419,263 @@ def build_tonieplay_entry(
     return entry
 
 
-def write_repaired_entry(collection_dir: Path, repaired: dict[str, Any]) -> str:
-    entry_path = collection_dir / "library-entry.json"
-    backup = collection_dir / "library-entry.json.before-browser-repair.bak"
-    if not backup.exists():
-        shutil.copy2(entry_path, backup)
-    temporary = collection_dir / f".library-entry.json.repair-{os.getpid()}.tmp"
+def valid_origins(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    origins: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            return []
+        overlay = item.get("overlay")
+        ruid = item.get("ruid")
+        version = item.get("contentVersion")
+        if (
+            not isinstance(overlay, int)
+            or overlay < 0
+            or not isinstance(ruid, str)
+            or len(ruid) != 16
+            or any(character not in "0123456789abcdefABCDEF" for character in ruid)
+            or not isinstance(version, int)
+            or not 0 <= version <= 0xFFFFFFFF
+        ):
+            return []
+        origins.append(
+            {
+                "overlay": overlay,
+                "ruid": ruid.upper(),
+                "contentVersion": version,
+            }
+        )
+    return origins
+
+
+def recover_audio_metadata(
+    collection_dir: Path, chapters: list[dict[str, Any]]
+) -> tuple[list[str], list[dict[str, Any]]]:
+    backup = read_json(collection_dir / ENTRY_BACKUP_NAME)
+    entries = backup.get("chapters") if backup else None
+    if (
+        not isinstance(backup, dict)
+        or backup.get("schemaVersion") != AUDIO_LIBRARY_SCHEMA
+        or backup.get("boxGeneration") != "tb2"
+        or backup.get("format") != "ogg-opus"
+        or backup.get("contentHash") != collection_dir.name
+        or not isinstance(entries, list)
+        or len(entries) != len(chapters)
+    ):
+        return [], []
+
+    names: list[str] = []
+    for index, (entry, chapter) in enumerate(zip(entries, chapters)):
+        expected_path = chapter["path"]
+        if (
+            not isinstance(entry, dict)
+            or entry.get("index") != index
+            or entry.get("sha256") != chapter["sha256"]
+            or entry.get("fileSize") != chapter["fileSize"]
+            or entry.get("path") != expected_path
+            or not isinstance(entry.get("originalName"), str)
+            or not entry["originalName"]
+        ):
+            return [], []
+        names.append(entry["originalName"])
+    return names, valid_origins(backup.get("origins"))
+
+
+def reconstruct_archived_audio(
+    collection_dir: Path,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], str]:
+    chapter_dir = collection_dir / "chapters"
+    if not chapter_dir.is_dir():
+        return None, [], "chapters directory is missing"
+
+    parsed: list[tuple[int, str, Path]] = []
+    for path in sorted(chapter_dir.iterdir()):
+        if not path.is_file():
+            return None, [], f"unexpected chapter entry: {path.name}"
+        match = AUDIO_CHAPTER_PATTERN.fullmatch(path.name)
+        if match is None:
+            return None, [], f"unexpected chapter filename: {path.name}"
+        embedded_hash, index_text = match.groups()
+        index = int(index_text)
+        if index_text != f"{index:02d}":
+            return None, [], f"non-canonical chapter index: {path.name}"
+        parsed.append((index, embedded_hash, path))
+    if not parsed:
+        return None, [], "chapters directory is empty"
+
+    parsed.sort(key=lambda item: item[0])
+    indices = [item[0] for item in parsed]
+    if indices != list(range(len(parsed))):
+        return None, [], "chapter indices are not contiguous from zero"
+
+    chapters: list[dict[str, Any]] = []
+    for index, embedded_hash, path in parsed:
+        actual_hash, size = sha256_file(path)
+        if actual_hash != embedded_hash:
+            return None, [], f"chapter filename SHA-256 differs: {path.name}"
+        expected_name = f"teddycloud_{actual_hash}_{index:02d}.opus"
+        if path.name != expected_name:
+            return None, [], f"non-canonical chapter filename: {path.name}"
+        chapters.append(
+            {
+                "index": index,
+                "originalName": f"Chapter {index + 1}",
+                "sha256": actual_hash,
+                "fileSize": size,
+                "path": f"chapters/{expected_name}",
+            }
+        )
+
+    computed_hash = audio_collection_hash(chapters)
+    if computed_hash != collection_dir.name:
+        return (
+            None,
+            [],
+            "archived chapters calculate to a different collection hash "
+            f"({computed_hash})",
+        )
+
+    names, origins = recover_audio_metadata(collection_dir, chapters)
+    if names:
+        for chapter, name in zip(chapters, names):
+            chapter["originalName"] = name
+    generation = {
+        "kind": "audio",
+        "contentHash": computed_hash,
+        "chapters": chapters,
+    }
+    return generation, origins, ""
+
+
+def generation_payload_signature(generation: dict[str, Any]) -> tuple[Any, ...]:
+    if generation["kind"] == "audio":
+        return (
+            "audio",
+            json.dumps(generation["chapters"], sort_keys=True),
+        )
+    return (
+        "tonieplay",
+        generation["manifest"],
+        json.dumps(generation["objects"], sort_keys=True),
+        generation["contentType"],
+        generation["version"],
+    )
+
+
+def consistent_cache_generation(
+    matches: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, str]:
+    if not matches:
+        return None, "no matching intact V3 generation found"
+    kinds = {match["kind"] for match in matches}
+    if len(kinds) != 1:
+        return None, "cache hash resolves to conflicting content kinds"
+    signature = generation_payload_signature(matches[0])
+    if any(generation_payload_signature(match) != signature for match in matches[1:]):
+        return None, "matching cache generations disagree on content or metadata"
+    return matches[0], ""
+
+
+def format_differences(differences: list[str]) -> str:
+    return "; ".join(differences)
+
+
+def write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.repair-{os.getpid()}.tmp")
     temporary.write_text(
-        json.dumps(repaired, ensure_ascii=False, separators=(",", ":")),
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
-    os.replace(temporary, entry_path)
+    os.replace(temporary, path)
+
+
+def write_repaired_entry(collection_dir: Path, repaired: dict[str, Any]) -> str:
+    entry_path = collection_dir / "library-entry.json"
+    backup = collection_dir / ENTRY_BACKUP_NAME
+    if entry_path.exists() and not backup.exists():
+        shutil.copy2(entry_path, backup)
+    write_json_atomic(entry_path, repaired)
     return backup.name
+
+
+def doctor_backup_path(library_root: Path, content_hash: str) -> Path:
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y%m%dT%H%M%S.%fZ"
+    )
+    return library_root / ".doctor-backups" / timestamp / content_hash
+
+
+def restore_collection_files(
+    collection_dir: Path,
+    generation: dict[str, Any],
+    origins: list[dict[str, Any]],
+) -> Path:
+    library_root = collection_dir.parents[2]
+    stage_root = library_root / ".doctor-staging"
+    stage = stage_root / f"{collection_dir.name}-{os.getpid()}"
+    displaced = stage_root / f"{collection_dir.name}-original-{os.getpid()}"
+    backup = doctor_backup_path(library_root, collection_dir.name)
+    shutil.rmtree(stage, ignore_errors=True)
+    shutil.rmtree(displaced, ignore_errors=True)
+    stage.mkdir(parents=True)
+
+    try:
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(collection_dir, backup)
+
+        if generation["kind"] == "audio":
+            chapter_dir = stage / "chapters"
+            chapter_dir.mkdir()
+            for source, chapter in zip(
+                generation["cachePaths"], generation["chapters"]
+            ):
+                shutil.copy2(source, stage / chapter["path"])
+            entry = build_audio_entry(
+                collection_dir.name, generation, origins
+            )
+            differences = archived_audio_differences(
+                stage, generation["chapters"]
+            )
+        else:
+            object_dir = stage / "objects"
+            object_dir.mkdir()
+            (stage / "content-meta.json").write_bytes(generation["manifest"])
+            for source, item in zip(
+                generation["cachePaths"], generation["objects"]
+            ):
+                shutil.copy2(source, stage / item["path"])
+            entry = build_tonieplay_entry(
+                collection_dir.name, generation, origins
+            )
+            differences = archived_tonieplay_differences(stage, generation)
+        if differences:
+            raise OSError(
+                "staged restore validation failed: "
+                + format_differences(differences)
+            )
+        write_json_atomic(stage / "library-entry.json", entry)
+
+        os.replace(collection_dir, displaced)
+        try:
+            os.replace(stage, collection_dir)
+        except OSError:
+            os.replace(displaced, collection_dir)
+            raise
+        shutil.rmtree(displaced, ignore_errors=True)
+        return backup
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        if displaced.exists() and not collection_dir.exists():
+            os.replace(displaced, collection_dir)
+        raise
 
 
 def diagnose_collection(
     collection_dir: Path,
     cache_index: dict[str, list[dict[str, Any]]],
     apply: bool,
+    restore_files: bool = False,
 ) -> tuple[str, bool]:
     content_hash = collection_dir.name
     if not is_canonical_hash(content_hash):
@@ -390,33 +684,78 @@ def diagnose_collection(
         return "skip: manifest is not the recognized browser-overwrite damage", False
 
     matches = cache_index.get(content_hash, [])
-    if not matches:
-        return "recache required: no matching intact V3 generation found", False
-    kinds = {match["kind"] for match in matches}
-    if len(kinds) != 1:
-        return "blocked: cache hash resolves to conflicting content kinds", False
-    generation = matches[0]
-    if generation["kind"] == "audio" and any(
-        match["chapters"] != generation["chapters"] for match in matches[1:]
-    ):
-        return "blocked: matching audio caches disagree on original names", False
+    generation, cache_error = consistent_cache_generation(matches)
+
+    if generation is None and matches:
+        return f"blocked: {cache_error}", False
+
+    if generation is None:
+        reconstructed, origins, reconstruction_error = reconstruct_archived_audio(
+            collection_dir
+        )
+        if reconstructed is not None:
+            repaired = build_audio_entry(
+                content_hash,
+                reconstructed,
+                origins,
+                recovered=not origins,
+            )
+            details = (
+                f"audio reconstructed from archive, "
+                f"{len(reconstructed['chapters'])} chapters"
+            )
+            origin_text = format_origins(origins)
+            if not apply:
+                return f"would repair: {details}, origins=[{origin_text}]", True
+            backup = write_repaired_entry(collection_dir, repaired)
+            return (
+                f"repaired: {details}, origins=[{origin_text}], backup={backup}",
+                True,
+            )
+
+        if (collection_dir / "chapters").exists():
+            return (
+                "blocked: archived audio cannot be reconstructed: "
+                + reconstruction_error,
+                False,
+            )
+        return f"recache required: {cache_error}", False
+
     origins = origins_for(matches)
     if not origins:
         return "blocked: matching cache has no valid origin metadata", False
 
     if generation["kind"] == "audio":
-        if not archived_audio_matches(collection_dir, generation["chapters"]):
-            return "blocked: archived chapters differ from the intact cache", False
+        differences = archived_audio_differences(
+            collection_dir, generation["chapters"]
+        )
         repaired = build_audio_entry(content_hash, generation, origins)
         details = f"audio, {len(generation['chapters'])} chapters"
     else:
-        if not archived_tonieplay_matches(collection_dir, generation):
-            return (
-                "blocked: archived Tonieplay manifest or objects differ from cache",
-                False,
-            )
+        differences = archived_tonieplay_differences(collection_dir, generation)
         repaired = build_tonieplay_entry(content_hash, generation, origins)
         details = f"Tonieplay, {len(generation['objects'])} objects"
+
+    if differences:
+        difference_text = format_differences(differences)
+        if not apply:
+            return (
+                f"would restore files: {details}, differences=[{difference_text}]; "
+                "requires --apply --restore-files",
+                True,
+            )
+        if not restore_files:
+            return (
+                f"blocked: collection files differ from exact cache: "
+                f"{difference_text}; use --apply --restore-files",
+                False,
+            )
+        backup = restore_collection_files(collection_dir, generation, origins)
+        return (
+            f"restored files: {details}, origins=[{format_origins(origins)}], "
+            f"backup={backup}",
+            True,
+        )
 
     if not apply:
         return (
@@ -514,7 +853,9 @@ def unresolved_hashes(
     return {
         path.name
         for path in candidates
-        if is_canonical_hash(path.name) and path.name not in cache_index
+        if is_canonical_hash(path.name)
+        and path.name not in cache_index
+        and reconstruct_archived_audio(path)[0] is None
     }
 
 
@@ -526,7 +867,10 @@ def recache_until_resolved(
     cache_index = build_cache_index(cache_root)
     remaining = unresolved_hashes(candidates, cache_index)
     if not remaining:
-        print("Recache: every damaged collection already has an intact cache match.")
+        print(
+            "Recache: every damaged collection is locally repairable "
+            "or already has an intact cache match."
+        )
         return cache_index
 
     downloads = api.eligible_tb2_downloads()
@@ -590,6 +934,11 @@ def main() -> int:
         action="store_true",
         help="ask TeddyCloud to download eligible original TB2 content",
     )
+    parser.add_argument(
+        "--restore-files",
+        action="store_true",
+        help="replace damaged collection files from one exact V3 cache match",
+    )
     parser.add_argument("--api-url", default="https://127.0.0.1:8443")
     parser.add_argument(
         "--api-header",
@@ -603,6 +952,10 @@ def main() -> int:
 
     if args.recache and not args.apply:
         parser.error("--recache requires --apply because it changes the V3 cache")
+    if args.restore_files and not args.apply:
+        parser.error(
+            "--restore-files requires --apply because it replaces collection files"
+        )
 
     collection_root = args.library_root.resolve() / "by" / "contentHash"
     cache_root = args.cache_root.resolve()
@@ -636,7 +989,7 @@ def main() -> int:
     for collection_dir in candidates:
         try:
             result, can_repair = diagnose_collection(
-                collection_dir, cache_index, args.apply
+                collection_dir, cache_index, args.apply, args.restore_files
             )
         except OSError as error:
             result, can_repair = f"blocked: filesystem error: {error}", False
