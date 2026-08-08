@@ -13,6 +13,9 @@ literals, empty labels, labels longer than 63 characters and labels beginning
 or ending with a hyphen are rejected. They are global server settings and
 cannot be overridden per box.
 
+For a read-only check of these server roles together with TB1/TB2 upstream and
+overlay identities, see [CERTIFICATE_DOCTOR.md](CERTIFICATE_DOCTOR.md).
+
 ## Reconciliation
 
 At startup and after a hostname change, TeddyCloud checks the affected leaf:
