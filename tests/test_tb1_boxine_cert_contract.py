@@ -29,7 +29,7 @@ class Tb1BoxineCertificateContractTests(unittest.TestCase):
         self.assertNotIn("boxGeneration", callback)
 
     def test_v20_keeps_legacy_tb1_migration_before_loading_certificates(self):
-        self.assertIn("#define CONFIG_VERSION 22", self.settings_header)
+        self.assertIn("#define CONFIG_VERSION 23", self.settings_header)
         self.assertIn('OPTION_INTERNAL_STRING("core.client_cert.file.ca"', self.settings)
         self.assertIn('OPTION_STRING("core.client_cert_tb1.file.ca"', self.settings)
         self.assertIn('"core.client_cert.file.ca",', self.settings)

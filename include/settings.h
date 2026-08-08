@@ -26,7 +26,7 @@
 #define TONIEBOX_CUSTOM_JSON_FILE "tonieboxes.custom.json"
 #define CONFIG_FILE "config.ini"
 #define CONFIG_OVERLAY_FILE "config.overlay.ini"
-#define CONFIG_VERSION 22
+#define CONFIG_VERSION 23
 #define MAX_OVERLAYS 16 + 1
 
 typedef enum
@@ -76,6 +76,7 @@ typedef struct
     bool enabled;
     bool tb2_enabled;
     bool tb2_v3_enabled;
+    /* Load-only compatibility value for configuration versions below 23. */
     bool tb2_capture_enabled;
     /* Load-only compatibility value for configuration versions below 20. */
     bool tb2_passthrough_enabled;

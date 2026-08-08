@@ -71,6 +71,8 @@ static uint16_t settings_size = 0;
 static char *config_file_path = NULL;
 static char *config_overlay_file_path = NULL;
 static uint32_t settings_source_config_version = CONFIG_VERSION;
+static bool settings_tb2_proxy_loaded[MAX_OVERLAYS];
+static bool settings_tb2_v3_loaded[MAX_OVERLAYS];
 DateTime settings_last_load;
 DateTime settings_last_load_ovl;
 
@@ -323,9 +325,9 @@ static void option_map_init(uint8_t settingsId)
 
     OPTION_TREE_DESC("cloud", "Cloud", LEVEL_BASIC)
     OPTION_BOOL("cloud.enabled", &settings->cloud.enabled, FALSE, "Enable TB1 HTTPS Upstream", "Enable HTTPS forwarding to Boxine/Toniecloud for TB1", LEVEL_BASIC)
-    OPTION_BOOL(CLOUD_TB2_PROXY_SETTING, &settings->cloud.tb2_enabled, FALSE, "Enable transparent TB2 HTTPS proxy", "Forward decrypted TB2 HTTPS traffic unchanged to the upstream server", LEVEL_BASIC)
-    OPTION_BOOL(CLOUD_TB2_V3_SETTING, &settings->cloud.tb2_v3_enabled, FALSE, "Enable TB2 v3 cloud path", "Handle and forward supported TB2 v3 HTTPS endpoints", LEVEL_BASIC)
-    OPTION_BOOL(CLOUD_TB2_CAPTURE_SETTING, &settings->cloud.tb2_capture_enabled, TRUE, "Capture transparent TB2 HTTPS traffic", "Write the complete unredacted transparent TB2 HTTPS traffic capture", LEVEL_DETAIL)
+    OPTION_BOOL(CLOUD_TB2_PROXY_SETTING, &settings->cloud.tb2_enabled, FALSE, "Enable transparent TB2 HTTPS proxy", "Forward decrypted TB2 HTTPS traffic unchanged and capture it completely", LEVEL_BASIC)
+    OPTION_BOOL(CLOUD_TB2_V3_SETTING, &settings->cloud.tb2_v3_enabled, TRUE, "Enable TB2 v3 cloud path", "Handle and forward supported TB2 v3 HTTPS endpoints", LEVEL_BASIC)
+    OPTION_INTERNAL_BOOL(CLOUD_TB2_CAPTURE_SETTING, &settings->cloud.tb2_capture_enabled, TRUE, "Legacy TB2 HTTPS capture switch", LEVEL_NONE)
     OPTION_INTERNAL_BOOL(CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING, &settings->cloud.tb2_passthrough_enabled, FALSE, "Legacy TB2 HTTPS passthrough switch", LEVEL_NONE)
     OPTION_STRING("cloud.remote_hostname", &settings->cloud.remote_hostname, "prod.de.tbs.toys", "Cloud hostname", "Hostname of remote cloud server", LEVEL_EXPERT)
     OPTION_STRING("cloud.remote_hostname_tb2", &settings->cloud.remote_hostname_tb2, "tbs2.tonie.cloud", "TB2 HTTPS server hostname", "Hostname of the TB2 HTTPS upstream server", LEVEL_EXPERT)
@@ -719,6 +721,22 @@ static bool settings_is_tb2_https_mode(const char *item)
            (!osStrcmp(item, CLOUD_TB2_PROXY_SETTING) || !osStrcmp(item, CLOUD_TB2_V3_SETTING));
 }
 
+static void settings_note_tb2_https_mode_loaded(uint8_t settingsId, const char *item)
+{
+    if (settingsId >= MAX_OVERLAYS || item == NULL)
+    {
+        return;
+    }
+    if (!osStrcmp(item, CLOUD_TB2_PROXY_SETTING))
+    {
+        settings_tb2_proxy_loaded[settingsId] = true;
+    }
+    else if (!osStrcmp(item, CLOUD_TB2_V3_SETTING))
+    {
+        settings_tb2_v3_loaded[settingsId] = true;
+    }
+}
+
 static void settings_select_tb2_https_mode(uint8_t settingsId, const char *selectedMode)
 {
     settings_t *settings = &Settings_Overlay[settingsId];
@@ -887,6 +905,61 @@ static void settings_migrate_mqtt_upstream_mode(uint8_t settingsId)
     }
 }
 
+static void settings_migrate_tb2_https_capture(uint8_t settingsId)
+{
+    settings_t *settings = &Settings_Overlay[settingsId];
+
+    /* Versions before 20 are translated by settings_migrate_tb2_https_modes().
+     * Starting with version 20 both mode settings were persisted explicitly. */
+    if (settings->configVersion >= 20)
+    {
+        setting_item_t *proxyOption = settings_get_by_name_id(CLOUD_TB2_PROXY_SETTING,
+                                                               settingsId);
+        setting_item_t *v3Option = settings_get_by_name_id(CLOUD_TB2_V3_SETTING, settingsId);
+
+        if (settingsId == 0)
+        {
+            if (!settings_tb2_proxy_loaded[settingsId])
+            {
+                settings->cloud.tb2_enabled = false;
+            }
+            if (!settings_tb2_v3_loaded[settingsId])
+            {
+                settings->cloud.tb2_v3_enabled = false;
+            }
+        }
+        else
+        {
+            if (!settings_tb2_proxy_loaded[settingsId])
+            {
+                settings->cloud.tb2_enabled = Settings_Overlay[0].cloud.tb2_enabled;
+                if (proxyOption != NULL)
+                {
+                    proxyOption->overlayed = false;
+                }
+            }
+            if (!settings_tb2_v3_loaded[settingsId])
+            {
+                settings->cloud.tb2_v3_enabled = Settings_Overlay[0].cloud.tb2_v3_enabled;
+                if (v3Option != NULL)
+                {
+                    v3Option->overlayed = false;
+                }
+            }
+        }
+    }
+
+    /* Capture is mandatory whenever transparent mode is selected. Keep the
+     * legacy value loadable for migration, but discard it afterwards. */
+    settings->cloud.tb2_capture_enabled = true;
+    setting_item_t *captureOption = settings_get_by_name_id(CLOUD_TB2_CAPTURE_SETTING,
+                                                             settingsId);
+    if (captureOption != NULL)
+    {
+        captureOption->overlayed = false;
+    }
+}
+
 static bool settings_migrate_id(uint8_t settingsId)
 {
     settings_t *settings = &Settings_Overlay[settingsId];
@@ -934,6 +1007,10 @@ static bool settings_migrate_id(uint8_t settingsId)
     if (settings->configVersion < 22)
     {
         settings_migrate_mqtt_upstream_mode(settingsId);
+    }
+    if (settings->configVersion < 23)
+    {
+        settings_migrate_tb2_https_capture(settingsId);
     }
 
     return true;
@@ -1561,7 +1638,17 @@ static error_t settings_load_ovl(bool overlay)
 
     if (overlay)
     {
+        for (uint8_t i = 1; i < MAX_OVERLAYS; i++)
+        {
+            settings_tb2_proxy_loaded[i] = false;
+            settings_tb2_v3_loaded[i] = false;
+        }
         overlay_settings_init();
+    }
+    else
+    {
+        settings_tb2_proxy_loaded[0] = false;
+        settings_tb2_v3_loaded[0] = false;
     }
     if (!fsFileExists(config_path))
     {
@@ -1658,9 +1745,19 @@ static error_t settings_load_ovl(bool overlay)
                         {
                         case TYPE_BOOL:
                             if (strcmp(value_str, "true") == 0)
+                            {
                                 *((bool *)opt->ptr) = true;
+                                settings_note_tb2_https_mode_loaded(
+                                    overlay ? get_overlay_id(overlay_unique_id) : 0,
+                                    option_name);
+                            }
                             else if (strcmp(value_str, "false") == 0)
+                            {
                                 *((bool *)opt->ptr) = false;
+                                settings_note_tb2_https_mode_loaded(
+                                    overlay ? get_overlay_id(overlay_unique_id) : 0,
+                                    option_name);
+                            }
                             else
                                 TRACE_WARNING("Invalid boolean value '%s' for setting '%s'\r\n", value_str, option_name);
                             TRACE_DEBUG("%s=%s\r\n", opt->option_name, *((bool *)opt->ptr) ? "true" : "false");
@@ -1941,7 +2038,8 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
         return false;
     }
 
-    if (!osStrcmp(item, CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING) ||
+    if (!osStrcmp(item, CLOUD_TB2_CAPTURE_SETTING) ||
+        !osStrcmp(item, CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING) ||
         !osStrcmp(item, MQTT_UPSTREAM_LEGACY_PASSTHROUGH_SETTING))
     {
         TRACE_WARNING("Setting '%s' is deprecated and cannot be changed\r\n", item);

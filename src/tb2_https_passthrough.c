@@ -43,7 +43,6 @@
 
 typedef struct
 {
-    bool_t enabled;
     char session_id[48];
     char directory[512];
     char traffic_path[576];
@@ -250,12 +249,6 @@ static error_t tb2_capture_open(tb2_capture_t *capture, settings_t *settings)
 {
     osMemset(capture, 0, sizeof(*capture));
     capture->started_at = time(NULL);
-    if (!settings->cloud.tb2_capture_enabled)
-    {
-        osStrcpy(capture->session_id, "uncaptured");
-        return NO_ERROR;
-    }
-    capture->enabled = TRUE;
 
     char *root = tb2_resolve_capture_root(settings);
     if (root == NULL)
@@ -328,11 +321,6 @@ static error_t tb2_capture_open(tb2_capture_t *capture, settings_t *settings)
 static error_t tb2_capture_chunk(tb2_capture_t *capture, const char *direction,
                                  const uint8_t *data, size_t length)
 {
-    if (!capture->enabled)
-    {
-        return NO_ERROR;
-    }
-
     size_t encoded_length = 0;
     base64Encode(data, length, NULL, &encoded_length);
     char *encoded = osAllocMem(encoded_length + 1);
@@ -378,11 +366,6 @@ static error_t tb2_capture_chunk(tb2_capture_t *capture, const char *direction,
 static error_t tb2_capture_finish(tb2_capture_t *capture, settings_t *settings,
                                   const char *result_code)
 {
-    if (!capture->enabled)
-    {
-        return NO_ERROR;
-    }
-
     error_t error = NO_ERROR;
     if (capture->traffic != NULL)
     {
@@ -769,10 +752,7 @@ error_t tb2_https_passthrough_post_tls(HttpConnection *connection, bool_t *handl
         error = capture_finish_error;
         result_code = "capture_finalize_failed";
     }
-    if (capture.enabled)
-    {
-        tb2_rotate_completed_captures(box_settings);
-    }
+    tb2_rotate_completed_captures(box_settings);
     tb2_https_status_tunnel_finish(success, result_code);
 
     TRACE_INFO("TB2 HTTPS passthrough session=%s status=%s up=%llu down=%llu\r\n",

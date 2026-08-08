@@ -69,6 +69,8 @@ class Tb2HttpsPassthroughContractTests(unittest.TestCase):
         self.assertIn('"cloud.tb2_v3_enabled"', self.settings)
         self.assertIn('"cloud.tb2_capture_enabled"', self.settings)
         self.assertIn('"cloud.tb2_passthrough_enabled"', self.settings)
+        self.assertIn("OPTION_BOOL(CLOUD_TB2_V3_SETTING, &settings->cloud.tb2_v3_enabled, TRUE", self.settings)
+        self.assertIn("OPTION_INTERNAL_BOOL(CLOUD_TB2_CAPTURE_SETTING", self.settings)
         self.assertIn("OPTION_INTERNAL_BOOL(CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING", self.settings)
         self.assertIn('"data/diagnostics/tb2-https-passthrough"', self.settings)
         self.assertIn("&settings->cloud.tb2_capture_max_mib, 4096", self.settings)
@@ -97,6 +99,19 @@ class Tb2HttpsPassthroughContractTests(unittest.TestCase):
         )
         self.assertIn("settings->configVersion < 20", self.settings)
 
+    def test_v23_migration_preserves_explicit_modes_and_retires_capture_switch(self):
+        migration = self.settings[
+            self.settings.index("static void settings_migrate_tb2_https_capture") :
+            self.settings.rindex("static bool settings_migrate_id")
+        ]
+        self.assertIn("settings_tb2_proxy_loaded", migration)
+        self.assertIn("settings_tb2_v3_loaded", migration)
+        self.assertIn("Settings_Overlay[0].cloud.tb2_enabled", migration)
+        self.assertIn("Settings_Overlay[0].cloud.tb2_v3_enabled", migration)
+        self.assertIn("settings->cloud.tb2_capture_enabled = true;", migration)
+        self.assertIn("captureOption->overlayed = false;", migration)
+        self.assertIn("settings->configVersion < 23", self.settings)
+
     def test_mode_setter_and_reset_keep_modes_mutually_exclusive(self):
         selector = self.settings[
             self.settings.rindex("static void settings_select_tb2_https_mode") :
@@ -112,6 +127,7 @@ class Tb2HttpsPassthroughContractTests(unittest.TestCase):
         ]
         self.assertIn("disabledOption->overlayed = true;", selector)
         self.assertIn("settings_select_tb2_https_mode(settingsId, item);", setter)
+        self.assertIn("CLOUD_TB2_CAPTURE_SETTING", setter)
         self.assertIn("CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING", setter)
         self.assertIn("is deprecated and cannot be changed", setter)
         self.assertIn("settings_select_tb2_https_mode(settingsId, item);", reset)
@@ -121,11 +137,13 @@ class Tb2HttpsPassthroughContractTests(unittest.TestCase):
         self.assertIn("TB2 HTTPS passthrough skipped: client certificate is not mapped to an active overlay", self.passthrough)
         self.assertIn("TB2 HTTPS passthrough skipped: no eligible TB2 overlay resolved", self.passthrough)
 
-    def test_capture_is_optional_without_changing_raw_capture_format(self):
-        self.assertIn("if (!settings->cloud.tb2_capture_enabled)", self.passthrough)
-        self.assertIn("if (!capture->enabled)", self.passthrough)
+    def test_capture_is_mandatory_without_changing_raw_capture_format(self):
+        self.assertNotIn("tb2_capture_enabled", self.passthrough)
+        self.assertNotIn("capture->enabled", self.passthrough)
+        self.assertNotIn("capture.enabled", self.passthrough)
         self.assertIn('cJSON_AddStringToObject(entry, "data_base64", encoded)', self.passthrough)
-        self.assertIn("if (capture.enabled)", self.passthrough)
+        self.assertIn("tb2_rotate_completed_captures(box_settings);", self.passthrough)
+        self.assertIn('tb2_https_status_tunnel_finish(FALSE, "capture_open_failed")', self.passthrough)
 
     def test_v3_handlers_use_dedicated_mode_and_request_context(self):
         self.assertNotRegex(self.cloud_handler, r"cloud\.enabled.*enableV3")

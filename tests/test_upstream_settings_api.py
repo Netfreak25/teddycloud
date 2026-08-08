@@ -24,7 +24,6 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         "cloud.remote_hostname_tb2",
         "cloud.tb2_capture_dir",
         "cloud.tb2_capture_max_mib",
-        "cloud.tb2_capture_enabled",
         "cloud.tb2_enabled",
         "cloud.tb2_v3_enabled",
     )
@@ -122,8 +121,8 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         self.assertFalse(https_enabled["valueInit"])
         self.assertFalse(https_enabled["readOnly"])
         self.assertEqual(https_enabled["label"], "Enable transparent TB2 HTTPS proxy")
-        self.assertFalse(options["cloud.tb2_v3_enabled"]["valueInit"])
-        self.assertTrue(options["cloud.tb2_capture_enabled"]["valueInit"])
+        self.assertTrue(options["cloud.tb2_v3_enabled"]["valueInit"])
+        self.assertNotIn("cloud.tb2_capture_enabled", options)
         self.assertNotIn("cloud.tb2_passthrough_enabled", options)
         self.assertEqual(options["cloud.remote_port_tb2"]["valueInit"], 443)
         self.assertEqual(
@@ -192,6 +191,10 @@ class UpstreamSettingsApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body.strip(), "ERROR")
 
+        status, body = self.set_setting("cloud.tb2_capture_enabled", "false")
+        self.assertEqual(status, 200)
+        self.assertEqual(body.strip(), "ERROR")
+
     def test_configurable_endpoints_survive_reload(self):
         persisted = {
             "mqtt_client_upstream.port": "18883",
@@ -204,7 +207,6 @@ class UpstreamSettingsApiTests(unittest.TestCase):
             "cloud.remote_hostname_tb2": "tb2-https-test.invalid",
             "cloud.tb2_capture_dir": "data/diagnostics/tb2-test-capture",
             "cloud.tb2_capture_max_mib": "128",
-            "cloud.tb2_capture_enabled": "false",
             "cloud.tb2_enabled": "true",
             "cloud.tb2_v3_enabled": "false",
         }
@@ -219,7 +221,6 @@ class UpstreamSettingsApiTests(unittest.TestCase):
             "cloud.remote_hostname_tb2": "tb2-runtime-only.invalid",
             "cloud.tb2_capture_dir": "data/diagnostics/tb2-runtime-only",
             "cloud.tb2_capture_max_mib": "129",
-            "cloud.tb2_capture_enabled": "true",
             "cloud.tb2_enabled": "false",
             "cloud.tb2_v3_enabled": "true",
         }

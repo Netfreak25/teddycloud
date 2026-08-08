@@ -21,7 +21,7 @@ class MqttUpstreamUnifiedContractTests(unittest.TestCase):
         cls.server = (ROOT / "src" / "mqtt_server.c").read_text(encoding="utf-8")
 
     def test_v22_migrates_only_the_previously_effective_combination(self):
-        self.assertIn("#define CONFIG_VERSION 22", self.settings_header)
+        self.assertIn("#define CONFIG_VERSION 23", self.settings_header)
         migration = self.settings[
             self.settings.index("static void settings_migrate_mqtt_upstream_mode") :
             self.settings.rindex("static bool settings_migrate_id")

@@ -179,6 +179,28 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
             },
             set(dependency["dependents"]),
         )
+        self.assertTrue(dependency["hideWhenDisabled"])
+
+    def test_tb2_https_settings_are_ordered_without_public_capture_switch(self) -> None:
+        section = next(item for item in self.layout["sections"] if item["id"] == "tb2.https")
+        self.assertEqual(
+            [
+                "cloud.tb2_v3_enabled",
+                "cloud.enableV3FreshnessCheck",
+                "cloud.enableV3Ota",
+                "cloud.enableV3SetupStatus",
+                "cloud.enableV3ContentMeta",
+                "cloud.enableV3Chapter",
+                "cloud.tb2_enabled",
+                "cloud.tb2_capture_dir",
+                "cloud.tb2_capture_max_mib",
+                "cloud.remote_hostname_tb2",
+                "cloud.remote_port_tb2",
+            ],
+            section["order"],
+        )
+        self.assertNotIn("cloud.tb2_capture_enabled", self.public_setting_ids)
+        self.assertNotIn("cloud.tb2_capture_enabled", section["ids"])
 
     def test_dependency_controls_and_listener_cleanup_are_wired(self) -> None:
         scope_tabs = (FORM_COMPONENTS_PATH / "SettingsScopeTabs.tsx").read_text(
@@ -194,6 +216,7 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
 
         self.assertIn("handler.getSetting(dependency.master)?.value !== enabledWhen", scope_tabs)
         self.assertIn("dependency?.appliesWhen?.every", scope_tabs)
+        self.assertIn("dependency?.hideWhenDisabled && isDependencyDisabled(optionId)", scope_tabs)
         self.assertIn("disabled={disabled}", option_item)
         self.assertIn("disabled={disabled}", switch_field)
         self.assertNotIn("changeSetting(", scope_tabs)
