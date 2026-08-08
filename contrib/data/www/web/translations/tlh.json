@@ -98,6 +98,10 @@
     "certificates": {
       "information": "De'",
       "navigationTitle": "Certificates",
+      "overwriteCancel": "qIl",
+      "overwriteConfirm": "qa'",
+      "overwriteDescription": "Boxvam Seghvam je certificates tu'lu'. ta'mey ngo' Daqonqa' DaneH'a'?",
+      "overwriteTitle": "certificates ngo' qonqa''a'?",
       "title": "Certificates"
     },
     "close": "SoQmoH",
@@ -229,6 +233,14 @@
     "delete": "Qaw'",
     "editTonieboxSettingsModal": {
       "editTonieboxSettingsLabel": "DuHmey"
+    },
+    "uploadTonieboxCertificatesModal": {
+      "boxType": "Box Segh",
+      "tb2Recommended": "TB2 chuplu'",
+      "tb2RecommendedDescription": "TB2 'oS Box mIllogh wIvlu'bogh.",
+      "useTb2": "TB2 lo'",
+      "uploadPath": "ngeH Daq:",
+      "uploadTonieboxCertificates": "Toniebox{{name}} certificates ngeH"
     },
     "live": {
       "cancelPlaylistEdit": "qIl",

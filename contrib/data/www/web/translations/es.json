@@ -1039,6 +1039,10 @@
       "information": "Información",
       "invalidFileType": "¡Tipo de archivo no válido! ¡Solo se permiten archivos .der!",
       "navigationTitle": "Certificados",
+      "overwriteCancel": "Cancelar",
+      "overwriteConfirm": "Sobrescribir",
+      "overwriteDescription": "Ya existen certificados para esta caja y generación. ¿Sobrescribir los archivos existentes?",
+      "overwriteTitle": "¿Sobrescribir los certificados existentes?",
       "title": "Certificados",
       "uploadFailed": "¡Error al cargar el certificado!",
       "uploadFailedDetails": "La carga del certificado {{filename}} ha fallado",
@@ -2840,8 +2844,12 @@
     "title": "Tus Tonieboxes",
     "uploadTonieboxCertificatesModal": {
       "AttentionGeneralPath": "(¡ATENCIÓN: Ruta predeterminada!)",
+      "boxType": "Tipo de caja",
       "boxSpecific": " (superpuesto para Toniebox)",
       "Label": "Certificados",
+      "tb2Recommended": "Se recomienda TB2",
+      "tb2RecommendedDescription": "La imagen de caja seleccionada corresponde a una TB2.",
+      "useTb2": "Cambiar a TB2",
       "uploadPath": "Ruta de carga (certDir):",
       "uploadTonieboxCertificates": "Subir certificados para Toniebox{{name}}"
     },

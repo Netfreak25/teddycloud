@@ -1039,6 +1039,10 @@
       "information": "Information",
       "invalidFileType": "Ungültiger Dateityp! Nur .der-Dateien sind erlaubt!",
       "navigationTitle": "Zertifikate",
+      "overwriteCancel": "Abbrechen",
+      "overwriteConfirm": "Überschreiben",
+      "overwriteDescription": "Für diese Box und Generation sind bereits Zertifikate vorhanden. Vorhandene Dateien überschreiben?",
+      "overwriteTitle": "Vorhandene Zertifikate überschreiben?",
       "title": "Zertifikate",
       "uploadFailed": "Zertifikats-Upload fehlgeschlagen!",
       "uploadFailedDetails": "Der Upload des Zertifikats {{filename}} ist fehlgeschlagen",
@@ -2840,8 +2844,12 @@
     "title": "Deine Tonieboxen",
     "uploadTonieboxCertificatesModal": {
       "AttentionGeneralPath": "(ACHTUNG: Default Pfad!)",
+      "boxType": "Box-Typ",
       "boxSpecific": " (Toniebox spezifisch hinterlegt)",
       "Label": "Zertifikate",
+      "tb2Recommended": "TB2 empfohlen",
+      "tb2RecommendedDescription": "Das ausgewählte Boxbild gehört zu einer TB2.",
+      "useTb2": "Auf TB2 umstellen",
       "uploadPath": "Upload Pfad (certDir):",
       "uploadTonieboxCertificates": "Zertifikate für Toniebox{{name}} hochladen"
     },

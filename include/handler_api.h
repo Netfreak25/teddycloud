@@ -19,6 +19,8 @@ typedef struct
     char *filename;
     FsFile *file;
     uint32_t cert_generation;
+    bool reject_existing;
+    bool existing_file;
 } file_save_ctx;
 
 #define POST_BUFFER_SIZE 1024 * 32

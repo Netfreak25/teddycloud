@@ -1512,6 +1512,14 @@ error_t file_save_start(void *in_ctx, const char *name, const char *filename)
 
     if (fsFileExists(ctx->filename))
     {
+        if (ctx->reject_existing)
+        {
+            TRACE_WARNING("Refusing to overwrite existing file '%s' without confirmation\r\n", ctx->filename);
+            ctx->existing_file = true;
+            osFreeMem(ctx->filename);
+            ctx->filename = NULL;
+            return ERROR_ACCESS_DENIED;
+        }
         TRACE_INFO("Filename '%s' already exists, overwriting\r\n", ctx->filename);
     }
     else
@@ -1616,12 +1624,43 @@ error_t file_save_end_cert(void *in_ctx)
     return settings_try_load_certs_id(get_overlay_id(ctx->overlay));
 }
 
+static char *certificate_upload_directory(uint8_t overlayId,
+                                          settings_box_generation certGeneration)
+{
+    const char *baseDirectory = certGeneration == GENERATION_TB2
+                                    ? settings_get_string("internal.certdirfull_tb2")
+                                    : settings_get_string("internal.certdirfull");
+    if (baseDirectory == NULL || baseDirectory[0] == '\0')
+    {
+        return NULL;
+    }
+
+    /* Legacy global uploads continue to target the generation root directly. */
+    if (overlayId == 0)
+    {
+        return strdup(baseDirectory);
+    }
+
+    settings_t *overlaySettings = get_settings_id(overlayId);
+    char boxId[13];
+    if (overlaySettings == NULL ||
+        !settings_canonicalize_box_id(overlaySettings->internal.overlayUniqueId,
+                                      boxId, sizeof(boxId)))
+    {
+        return NULL;
+    }
+
+    osStringToLower(boxId);
+    return custom_asprintf("%s%c%s", baseDirectory, PATH_SEPARATOR, boxId);
+}
+
 error_t handleApiUploadCert(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
 {
     uint_t statusCode = 500;
     char message[128] = {0};
     char overlay[16] = {0};
     char generationName[8] = {0};
+    char overwriteName[8] = {0};
 
     bool hasOverlay = queryGet(queryString, "overlay", overlay, sizeof(overlay));
     if (hasOverlay)
@@ -1629,10 +1668,30 @@ error_t handleApiUploadCert(HttpConnection *connection, const char_t *uri, const
         TRACE_DEBUG("got overlay '%s'\r\n", overlay);
     }
     bool hasGeneration = queryGet(queryString, "generation", generationName, sizeof(generationName));
+    bool hasOverwrite = queryGet(queryString, "overwrite", overwriteName, sizeof(overwriteName));
+    /* Preserve the overwrite behaviour of older API clients that omit the parameter. */
+    bool allowOverwrite = !hasOverwrite;
     uint8_t overlayId = get_overlay_id(overlay);
     settings_box_generation certGeneration = GENERATION_UNKNOWN;
 
-    if (hasGeneration && (!osStrcasecmp(generationName, "tb1") || !osStrcmp(generationName, "1")))
+    if (hasOverwrite)
+    {
+        if (!osStrcasecmp(overwriteName, "true") || !osStrcmp(overwriteName, "1"))
+        {
+            allowOverwrite = true;
+        }
+        else if (!osStrcasecmp(overwriteName, "false") || !osStrcmp(overwriteName, "0"))
+        {
+            allowOverwrite = false;
+        }
+        else
+        {
+            statusCode = 400;
+            osSnprintf(message, sizeof(message), "Invalid overwrite value '%s'", overwriteName);
+        }
+    }
+
+    if (message[0] == '\0' && hasGeneration && (!osStrcasecmp(generationName, "tb1") || !osStrcmp(generationName, "1")))
     {
         certGeneration = GENERATION_TB1;
     }
@@ -1672,13 +1731,10 @@ error_t handleApiUploadCert(HttpConnection *connection, const char_t *uri, const
         osSnprintf(message, sizeof(message), "Box generation is unknown");
     }
 
-    const char *rootPath = NULL;
+    char *rootPath = NULL;
     if (message[0] == '\0')
     {
-        if (overlayId > 0 || certGeneration == GENERATION_TB1)
-            rootPath = settings_get_string_id("internal.certdirfull", overlayId);
-        else
-            rootPath = settings_get_string("internal.certdirfull_tb2");
+        rootPath = certificate_upload_directory(overlayId, certGeneration);
     }
 
     if (message[0] != '\0')
@@ -1718,6 +1774,7 @@ error_t handleApiUploadCert(HttpConnection *connection, const char_t *uri, const
             ctx.root_path = rootPath;
             ctx.overlay = overlay;
             ctx.cert_generation = certGeneration;
+            ctx.reject_existing = !allowOverwrite;
 
             switch (multipart_handle(connection, &cbr, &ctx))
             {
@@ -1726,7 +1783,15 @@ error_t handleApiUploadCert(HttpConnection *connection, const char_t *uri, const
                 osSnprintf(message, sizeof(message), "OK");
                 break;
             default:
-                statusCode = 500;
+                if (ctx.existing_file)
+                {
+                    statusCode = 409;
+                    osSnprintf(message, sizeof(message), "Certificate already exists");
+                }
+                else
+                {
+                    statusCode = 500;
+                }
                 break;
             }
         }
@@ -1735,7 +1800,9 @@ error_t handleApiUploadCert(HttpConnection *connection, const char_t *uri, const
     httpPrepareHeader(connection, "text/plain; charset=utf-8", osStrlen(message));
     connection->response.statusCode = statusCode;
 
-    return httpWriteResponseString(connection, message, false);
+    error_t responseError = httpWriteResponseString(connection, message, false);
+    osFreeMem(rootPath);
+    return responseError;
 }
 
 error_t file_save_start_suffix(void *in_ctx, const char *name, const char *filename)

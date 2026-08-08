@@ -1039,6 +1039,10 @@
       "information": "Informations",
       "invalidFileType": "Type de fichier invalide ! Seuls les fichiers .der sont autorisés !",
       "navigationTitle": "Certificats",
+      "overwriteCancel": "Annuler",
+      "overwriteConfirm": "Écraser",
+      "overwriteDescription": "Des certificats existent déjà pour cette box et cette génération. Écraser les fichiers existants ?",
+      "overwriteTitle": "Écraser les certificats existants ?",
       "title": "Certificats",
       "uploadFailed": "Échec du téléchargement du certificat !",
       "uploadFailedDetails": "Le téléchargement du certificat {{filename}} a échoué",
@@ -2840,8 +2844,12 @@
     "title": "Vos Tonieboxes",
     "uploadTonieboxCertificatesModal": {
       "AttentionGeneralPath": "(ATTENTION: Chemin par défaut!)",
+      "boxType": "Type de box",
       "boxSpecific": " (superposé pour la Toniebox)",
       "Label": "Certificats",
+      "tb2Recommended": "TB2 recommandée",
+      "tb2RecommendedDescription": "L’image de box sélectionnée correspond à une TB2.",
+      "useTb2": "Passer à TB2",
       "uploadPath": "Chemin de téléchargement (certDir):",
       "uploadTonieboxCertificates": "Télécharger les certificats pour la Toniebox{{name}}"
     },

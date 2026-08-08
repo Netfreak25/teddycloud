@@ -1039,6 +1039,10 @@
       "information": "Information",
       "invalidFileType": "Invalid file type! Only .der files are allowed!",
       "navigationTitle": "Certificates",
+      "overwriteCancel": "Cancel",
+      "overwriteConfirm": "Overwrite",
+      "overwriteDescription": "Certificates already exist for this box and generation. Overwrite the existing files?",
+      "overwriteTitle": "Overwrite existing certificates?",
       "title": "Certificates",
       "uploadFailed": "Certificate upload failed!",
       "uploadFailedDetails": "Certificate {{filename}} upload failed",
@@ -2840,8 +2844,12 @@
     "title": "Your Tonieboxes",
     "uploadTonieboxCertificatesModal": {
       "AttentionGeneralPath": "(ATTENTION: Default Path!)",
+      "boxType": "Box type",
       "boxSpecific": " (overlayed for toniebox)",
       "Label": "Certificates",
+      "tb2Recommended": "TB2 recommended",
+      "tb2RecommendedDescription": "The selected box image belongs to a TB2.",
+      "useTb2": "Switch to TB2",
       "uploadPath": "Upload path (certDir):",
       "uploadTonieboxCertificates": "Upload certificates for Toniebox{{name}}"
     },
