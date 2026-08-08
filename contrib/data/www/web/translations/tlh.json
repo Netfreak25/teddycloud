@@ -1,313 +1,367 @@
 {
-  "audio": {
-    "errorConfirm": "SoQmoH"
-  },
-  "common": {
-    "cancel": "qIl"
-  },
-  "community": {
-    "navigationTitle": "ghom",
-    "plugins": {
-      "cancel": "qIl",
-      "delete": "Qaw'",
-      "deletion": {
-        "delete": "Qaw'"
-      },
-      "helpButton": "QaH"
+    "audio": {
+        "errorConfirm": "SoQmoH"
     },
-    "translations": {
-      "language": "Hol"
+    "common": {
+        "cancel": "qIl"
+    },
+    "community": {
+        "navigationTitle": "ghom",
+        "plugins": {
+            "cancel": "qIl",
+            "delete": "Qaw'",
+            "deletion": {
+                "delete": "Qaw'"
+            },
+            "helpButton": "QaH"
+        },
+        "translations": {
+            "language": "Hol"
+        }
+    },
+    "fileBrowser": {
+        "cancel": "qIl",
+        "createDirectory": {
+            "cancel": "qIl"
+        },
+        "delete": "Qaw'",
+        "nativeCollection": {
+            "deleteTitle": "TB2 ghommey Qaw'",
+            "deleteWarning": "ghomvam lo'bogh rarghachmey chu'laHbe'choH. TB2 library cache chu'lu'chugh, TONIES ngaSbogh Dochmey qengqa'laH TeddyCloud.",
+            "downloadFailed": "ghom qengHa' Qagh",
+            "downloadZip": "ghom ZIP qengHa'",
+            "open": "ghom poSmoH",
+            "playFailed": "TB2 ghom chu'laHbe'",
+            "summary": "{{count}} 'ay'mey · {{size}}"
+        },
+        "tonieplayCollection": {
+            "authWarning": "TONIES content-meta ngo' ngaS ZIPvam; auth De' je ngaS. De' pegh rur yIpol 'ej yIngeH.",
+            "deleteTitle": "Tonieplay ghom Qaw'",
+            "deleteWarning": "Qujvam lo'bogh rarghachmey jablaHbe'choH TeddyCloud. V3 cache Qaw'be'; Tonieplay library cache chu'lu'chugh Quj qengqa'laH.",
+            "downloadTitle": "Tonieplay ghom qengHa'",
+            "summary": "{{count}} Dochmey · {{size}}"
+        },
+        "encodeFiles": {
+            "cancel": "qIl"
+        },
+        "help": {
+            "closeButton": "SoQmoH",
+            "showHelp": "QaH",
+            "title": "QaH"
+        },
+        "moveFile": {
+            "cancel": "qIl"
+        },
+        "renameFile": {
+            "cancel": "qIl"
+        },
+        "upload": {
+            "cancel": "qIl",
+            "upload": "ngeH"
+        }
+    },
+    "home": {
+        "errorConfirm": "SoQmoH",
+        "navigationTitle": "juH"
+    },
+    "language": {
+        "change": "Hol choH",
+        "klingon": "tlhIngan Hol"
+    },
+    "server": {
+        "tb2HttpsMode": {
+            "active": "Dotlh: {{mode}}",
+            "disabled": "Qotlh",
+            "mixed": "Tonieboxmey pIm",
+            "transparent": "proxy leghlu'be'",
+            "v3": "v3 He"
+        },
+        "tb2HttpsStatus": {
+            "disabled": "TB2 HTTPS Qotlh.",
+            "ready": "SuH — {{hostname}}:{{port}}",
+            "request_active": "v3 tlhobtaH — {{hostname}}:{{port}}",
+            "connecting": "rarlI' — {{hostname}}:{{port}}",
+            "httpStatus": "v3 HTTP Dotlh: {{httpStatus}}.",
+            "tunneling": "TB2 HTTPS proxy vangtaH — {{hostname}}:{{port}}",
+            "success": "Qapla'.",
+            "error": "Qagh: {{errorCode}}."
+        },
+        "mqttUpstreamStatus": {
+            "disabled": "ICI Qotlh.",
+            "ready": "ICI SuH; TB2 loS.",
+            "connecting": "rarlI' — {{hostname}}:{{port}}",
+            "connected": "ICI rar — {{hostname}}:{{port}}",
+            "error": "ICI Qagh: {{errorCode}}."
+        }
+    },
+    "settings": {
+        "diagnostics": {
+            "navigationTitle": "Qagh nej",
+            "title": "Certificate Doctor",
+            "readOnlyTitle": "poj neH",
+            "readOnlyDescription": "ta'mey DuHmey je choHbe'.",
+            "refresh": "wa'logh yIpojqa'",
+            "retry": "yInIDqa'",
+            "loading": "certificates pojlI'…",
+            "loadFailed": "certificates pojmeH Qagh",
+            "rolesTitle": "certificate Qu'mey",
+            "overlaysTitle": "Toniebox overlays",
+            "findingsTitle": "Qaghmey tu'lu'bogh",
+            "detailsTitle": "De' Hoch",
+            "noFindings": "certificate Qagh configuration Qagh ghap tu'lu'be'.",
+            "noOverlays": "Toniebox overlay tu'lu'be'.",
+            "summary": {
+                "roles": "Qu'mey",
+                "ok": "Qap",
+                "warnings": "yIqIm",
+                "errors": "Qaghmey"
+            },
+            "columns": {
+                "role": "Qu'",
+                "status": "Dotlh",
+                "active": "chu'",
+                "generation": "Segh",
+                "cn": "CN",
+                "path": "He",
+                "box": "Toniebox",
+                "identity": "NID",
+                "details": "De'"
+            },
+            "status": {
+                "ok": "Qap",
+                "warning": "yIqIm",
+                "error": "Qagh",
+                "info": "De'"
+            },
+            "activity": {
+                "active": "chu'",
+                "inactive": "Qotlh"
+            },
+            "identity": {
+                "shared": "Hoch NID",
+                "override": "Toniebox NID",
+                "unknown": "Sovbe'"
+            },
+            "errors": {
+                "doctorUnavailable": "Certificate Doctor tu'lu'be'.",
+                "requestFailed": "Certificate Doctor chu'laHbe'.",
+                "schemaUnsupported": "Certificate Doctor Seghvam Qutlhbe' WebUI.",
+                "responseInvalid": "Certificate Doctor jangHa'."
+            }
+        },
+        "certificates": {
+            "information": "De'",
+            "navigationTitle": "Certificates",
+            "overwriteCancel": "qIl",
+            "overwriteConfirm": "qa'",
+            "overwriteDescription": "Boxvam Seghvam je certificates tu'lu'. ta'mey ngo' Daqonqa' DaneH'a'?",
+            "overwriteTitle": "certificates ngo' qonqa''a'?",
+            "title": "Certificates"
+        },
+        "close": "SoQmoH",
+        "discard": "polHa'",
+        "general": {
+            "navigationTitle": "Hoch",
+            "title": "Hoch DuHmey"
+        },
+        "information": "De'",
+        "scopeTabs": {
+            "global": "Hoch"
+        },
+        "scopeSections": {
+            "logging": "QonoSmey",
+            "server": "TeddyCloud De'wI'",
+            "storage": "qawHaq",
+            "content": "De'",
+            "security": "Hung",
+            "encoding": "Encoding",
+            "webui": "WebUI",
+            "cloudContent": "Cloud De'",
+            "bothGenerations": "Toniebox Segh Hoch",
+            "localIciControl": "ICI labtaHvIS naDev SeH",
+            "mqtt": "MQTT / Home Assistant",
+            "diagnostics": "Qagh nej",
+            "tonieJson": "Tonie De'",
+            "boxGeneral": "Toniebox DuHmey",
+            "certificates": "Certificates",
+            "cloud": "Cloud",
+            "boxBehavior": "Toniebox vang",
+            "rtnl": "RTNL",
+            "tools": "janmey",
+            "httpsCloud": "HTTPS Cloud",
+            "iciUpstream": "ICI MQTT lab",
+            "iciServer": "ICI MQTT De'wI'",
+            "v3Endpoints": "TB2 v3 HeHmey",
+            "unclassified": "Segh Hutlh"
+        },
+        "mqttForwarding": {
+            "suppress": "bot",
+            "forward": "lI'",
+            "global": "Hoch DuH lo'",
+            "searchSources": "QonoS mung nej",
+            "title": "cha' lurghmey jabbI'ID DuHmey",
+            "groups": {
+                "logs": "QonoSmey",
+                "metrics": "juvta'mey",
+                "appReply": "App jang",
+                "settings": "DuHmey",
+                "playback": "wab much",
+                "appControl": "App SeH"
+            }
+        },
+        "navigationTitle": "DuHmey",
+        "notifications": {
+            "colStatus": "Dotlh",
+            "error": "Qagh",
+            "info": "De'",
+            "navigationTitle": "QInmey",
+            "title": "QInmey",
+            "warning": "yIqIm"
+        },
+        "rtnl": {
+            "clear": "RTNL QonoS Qaw'",
+            "navigationTitle": "RTNL QonoS",
+            "title": "RTNL QonoS"
+        },
+        "save": "pol",
+        "title": "DuHmey",
+        "optionText": {
+            "log__level": {
+                "label": "QonoS patlh"
+            },
+            "log__color": {
+                "label": "QonoS nguv"
+            },
+            "core__certdir_tb2": {
+                "label": "TB2 certificate Daq"
+            },
+            "core__server_cert_tb2__hostname": {
+                "label": "TB2 HTTPS De'wI' pong",
+                "description": "TB2 HTTPS certificate DNS pong. poQlu'DI' neH certificate chu' chenmoHlu'."
+            },
+            "core__server_cert_tb2__rotation_status": {
+                "label": "TB2 HTTPS certificate Dotlh",
+                "description": "certificate nuDta' pagh chenmoHqa'ta' Dotlh."
+            },
+            "cloud__tb2_enabled": {
+                "label": "TB2 HTTPS proxy QotlhHa'"
+            },
+            "cloud__tb2_v3_enabled": {
+                "label": "TB2 v3 He QotlhHa'"
+            },
+            "mqtt_client_upstream__enabled": {
+                "label": "ICI MQTT He QotlhHa'"
+            },
+            "mqtt_client_upstream__local_control_enabled": {
+                "label": "ICI labtaHvIS TeddyCloud SeH chaw'",
+                "description": "ICI proxy QaptaHvIS TB2 DuHmey app SeH je ngeH TeddyCloud"
+            },
+            "mqtt_server__enabled": {
+                "label": "MQTT De'wI' QotlhHa'"
+            },
+            "mqtt_server__hostname": {
+                "label": "ICI MQTT De'wI' pong",
+                "description": "ICI MQTT certificate DNS pong. poQlu'DI' neH certificate chu' chenmoHlu'."
+            },
+            "mqtt_server__cert__rotation_status": {
+                "label": "ICI MQTT certificate Dotlh",
+                "description": "certificate nuDta' pagh chenmoHqa'ta' Dotlh."
+            },
+            "toniebox2__cacheTonieplayToLibraryV3": {
+                "label": "Tonieplay libraryDaq pol",
+                "description": "Tonieplay content-meta naQ Hoch Dochmey je TB2 libraryDaq qeng. TB2 De' cache poQ."
+            }
+        }
+    },
+    "tonieboxes": {
+        "availableBoxModal": {
+            "cancel": "qIl",
+            "status": "Dotlh"
+        },
+        "boxSetup": {
+            "identifyVersion": {
+                "or": "qoj"
+            }
+        },
+        "cancel": "qIl",
+        "delete": "Qaw'",
+        "editTonieboxSettingsModal": {
+            "editTonieboxSettingsLabel": "DuHmey"
+        },
+        "uploadTonieboxCertificatesModal": {
+            "boxType": "Box Segh",
+            "tb2Recommended": "TB2 chuplu'",
+            "tb2RecommendedDescription": "TB2 'oS Box mIllogh wIvlu'bogh.",
+            "useTb2": "TB2 lo'",
+            "uploadPath": "ngeH Daq:",
+            "uploadTonieboxCertificates": "Toniebox{{name}} certificates ngeH"
+        },
+        "live": {
+            "cancelPlaylistEdit": "qIl",
+            "chapter": "'ay' {{number}}",
+            "chapterDuration": "poH {{time}}",
+            "chapterTitle": "'ay' {{number}} pong",
+            "chapters": "'ay'mey",
+            "customContent": "De' le'",
+            "editPlaylist": "choH",
+            "playlistTypes": {
+                "directTaf": "nIqHom le'",
+                "tap": "TeddyAudio QonoS"
+            },
+            "shuffleModes": {
+                "ordered": "tlheghDaq",
+                "all": "Hoch DuD",
+                "one": "pagh nabbe' wIv"
+            },
+            "playlistSaveFailed": "QoQ tetlh polbe'lu'",
+            "playlistSaveFailedDetails": "pongmey polmeH Qagh tu'lu'",
+            "playlistSaved": "QoQ tetlh pollu'",
+            "playlistSavedDetails": "De' pong 'ay'mey pong je polta'",
+            "playlistTitle": "De' pong",
+            "savePlaylist": "Hoch pol"
+        }
+    },
+    "tonies": {
+        "addNewCustomTonieModal": {
+            "language": "Hol",
+            "save": "pol"
+        },
+        "cancel": "qIl",
+        "content": {
+            "navigationTitle": "De'",
+            "title": "De'"
+        },
+        "editModal": {
+            "modelInfoLanguage": "Hol",
+            "save": "pol"
+        },
+        "help": {
+            "closeButton": "SoQmoH",
+            "title": "QaH"
+        },
+        "selectFileModal": {
+            "cancel": "qIl",
+            "nativeCollection": "TB2 mung · Ogg/Opus · {{count}} 'ay'mey · {{hash}}",
+            "tonieplayCollection": "TB2 Tonieplay · {{count}} Dochmey · {{hash}}"
+        },
+        "selectMode": {
+            "cancel": "qIl"
+        },
+        "tapEditor": {
+            "cancel": "qIl",
+            "save": "pol",
+            "shuffle": "chu'ghach tlhegh",
+            "shuffleModes": {
+                "ordered": "tlhegh",
+                "all": "Hoch Hoch DuD",
+                "one": "wa' wIv lo' SuD"
+            }
+        },
+        "teddystudio": {
+            "cancel": "qIl",
+            "close": "SoQmoH",
+            "save": "pol",
+            "settings": "DuHmey"
+        }
     }
-  },
-  "fileBrowser": {
-    "cancel": "qIl",
-    "createDirectory": {
-      "cancel": "qIl"
-    },
-    "delete": "Qaw'",
-    "nativeCollection": {
-      "deleteTitle": "TB2 ghommey Qaw'",
-      "deleteWarning": "ghomvam lo'bogh rarghachmey chu'laHbe'choH. TB2 library cache chu'lu'chugh, TONIES ngaSbogh Dochmey qengqa'laH TeddyCloud.",
-      "downloadFailed": "ghom qengHa' Qagh",
-      "downloadZip": "ghom ZIP qengHa'",
-      "open": "ghom poSmoH",
-      "playFailed": "TB2 ghom chu'laHbe'",
-      "summary": "{{count}} 'ay'mey · {{size}}"
-    },
-    "tonieplayCollection": {
-      "authWarning": "TONIES content-meta ngo' ngaS ZIPvam; auth De' je ngaS. De' pegh rur yIpol 'ej yIngeH.",
-      "deleteTitle": "Tonieplay ghom Qaw'",
-      "deleteWarning": "Qujvam lo'bogh rarghachmey jablaHbe'choH TeddyCloud. V3 cache Qaw'be'; Tonieplay library cache chu'lu'chugh Quj qengqa'laH.",
-      "downloadTitle": "Tonieplay ghom qengHa'",
-      "summary": "{{count}} Dochmey · {{size}}"
-    },
-    "encodeFiles": {
-      "cancel": "qIl"
-    },
-    "help": {
-      "closeButton": "SoQmoH",
-      "showHelp": "QaH",
-      "title": "QaH"
-    },
-    "moveFile": {
-      "cancel": "qIl"
-    },
-    "renameFile": {
-      "cancel": "qIl"
-    },
-    "upload": {
-      "cancel": "qIl",
-      "upload": "ngeH"
-    }
-  },
-  "home": {
-    "errorConfirm": "SoQmoH",
-    "navigationTitle": "juH"
-  },
-  "language": {
-    "change": "Hol choH",
-    "klingon": "tlhIngan Hol"
-  },
-  "server": {
-    "tb2HttpsMode": {
-      "active": "Dotlh: {{mode}}",
-      "disabled": "Qotlh",
-      "mixed": "Tonieboxmey pIm",
-      "transparent": "proxy leghlu'be'",
-      "v3": "v3 He"
-    },
-    "tb2HttpsStatus": {
-      "disabled": "TB2 HTTPS Qotlh.",
-      "ready": "SuH — {{hostname}}:{{port}}",
-      "request_active": "v3 tlhobtaH — {{hostname}}:{{port}}",
-      "connecting": "rarlI' — {{hostname}}:{{port}}",
-      "httpStatus": "v3 HTTP Dotlh: {{httpStatus}}.",
-      "tunneling": "TB2 HTTPS proxy vangtaH — {{hostname}}:{{port}}",
-      "success": "Qapla'.",
-      "error": "Qagh: {{errorCode}}."
-    },
-    "mqttUpstreamStatus": {
-      "disabled": "ICI Qotlh.",
-      "ready": "ICI SuH; TB2 loS.",
-      "connecting": "rarlI' — {{hostname}}:{{port}}",
-      "connected": "ICI rar — {{hostname}}:{{port}}",
-      "error": "ICI Qagh: {{errorCode}}."
-    }
-  },
-  "settings": {
-    "certificates": {
-      "information": "De'",
-      "navigationTitle": "Certificates",
-      "overwriteCancel": "qIl",
-      "overwriteConfirm": "qa'",
-      "overwriteDescription": "Boxvam Seghvam je certificates tu'lu'. ta'mey ngo' Daqonqa' DaneH'a'?",
-      "overwriteTitle": "certificates ngo' qonqa''a'?",
-      "title": "Certificates"
-    },
-    "close": "SoQmoH",
-    "discard": "polHa'",
-    "general": {
-      "navigationTitle": "Hoch",
-      "title": "Hoch DuHmey"
-    },
-    "information": "De'",
-    "scopeTabs": {
-      "global": "Hoch"
-    },
-    "scopeSections": {
-      "logging": "QonoSmey",
-      "server": "TeddyCloud De'wI'",
-      "storage": "qawHaq",
-      "content": "De'",
-      "security": "Hung",
-      "encoding": "Encoding",
-      "webui": "WebUI",
-      "cloudContent": "Cloud De'",
-      "bothGenerations": "Toniebox Segh Hoch",
-      "localIciControl": "ICI labtaHvIS naDev SeH",
-      "mqtt": "MQTT / Home Assistant",
-      "diagnostics": "Qagh nej",
-      "tonieJson": "Tonie De'",
-      "boxGeneral": "Toniebox DuHmey",
-      "certificates": "Certificates",
-      "cloud": "Cloud",
-      "boxBehavior": "Toniebox vang",
-      "rtnl": "RTNL",
-      "tools": "janmey",
-      "httpsCloud": "HTTPS Cloud",
-      "iciUpstream": "ICI MQTT lab",
-      "iciServer": "ICI MQTT De'wI'",
-      "v3Endpoints": "TB2 v3 HeHmey",
-      "unclassified": "Segh Hutlh"
-    },
-    "mqttForwarding": {
-      "suppress": "bot",
-      "forward": "lI'",
-      "global": "Hoch DuH lo'",
-      "searchSources": "QonoS mung nej",
-      "title": "cha' lurghmey jabbI'ID DuHmey",
-      "groups": {
-        "logs": "QonoSmey",
-        "metrics": "juvta'mey",
-        "appReply": "App jang",
-        "settings": "DuHmey",
-        "playback": "wab much",
-        "appControl": "App SeH"
-      }
-    },
-    "navigationTitle": "DuHmey",
-    "notifications": {
-      "colStatus": "Dotlh",
-      "error": "Qagh",
-      "info": "De'",
-      "navigationTitle": "QInmey",
-      "title": "QInmey",
-      "warning": "yIqIm"
-    },
-    "rtnl": {
-      "clear": "RTNL QonoS Qaw'",
-      "navigationTitle": "RTNL QonoS",
-      "title": "RTNL QonoS"
-    },
-    "save": "pol",
-    "title": "DuHmey",
-    "optionText": {
-      "log__level": {
-        "label": "QonoS patlh"
-      },
-      "log__color": {
-        "label": "QonoS nguv"
-      },
-      "core__certdir_tb2": {
-        "label": "TB2 certificate Daq"
-      },
-      "core__server_cert_tb2__hostname": {
-        "label": "TB2 HTTPS De'wI' pong",
-        "description": "TB2 HTTPS certificate DNS pong. poQlu'DI' neH certificate chu' chenmoHlu'."
-      },
-      "core__server_cert_tb2__rotation_status": {
-        "label": "TB2 HTTPS certificate Dotlh",
-        "description": "certificate nuDta' pagh chenmoHqa'ta' Dotlh."
-      },
-      "cloud__tb2_enabled": {
-        "label": "TB2 HTTPS proxy QotlhHa'"
-      },
-      "cloud__tb2_v3_enabled": {
-        "label": "TB2 v3 He QotlhHa'"
-      },
-      "mqtt_client_upstream__enabled": {
-        "label": "ICI MQTT He QotlhHa'"
-      },
-      "mqtt_client_upstream__local_control_enabled": {
-        "label": "ICI labtaHvIS TeddyCloud SeH chaw'",
-        "description": "ICI proxy QaptaHvIS TB2 DuHmey app SeH je ngeH TeddyCloud"
-      },
-      "mqtt_server__enabled": {
-        "label": "MQTT De'wI' QotlhHa'"
-      },
-      "mqtt_server__hostname": {
-        "label": "ICI MQTT De'wI' pong",
-        "description": "ICI MQTT certificate DNS pong. poQlu'DI' neH certificate chu' chenmoHlu'."
-      },
-      "mqtt_server__cert__rotation_status": {
-        "label": "ICI MQTT certificate Dotlh",
-        "description": "certificate nuDta' pagh chenmoHqa'ta' Dotlh."
-      },
-      "toniebox2__cacheTonieplayToLibraryV3": {
-        "label": "Tonieplay libraryDaq pol",
-        "description": "Tonieplay content-meta naQ Hoch Dochmey je TB2 libraryDaq qeng. TB2 De' cache poQ."
-      }
-    }
-  },
-  "tonieboxes": {
-    "availableBoxModal": {
-      "cancel": "qIl",
-      "status": "Dotlh"
-    },
-    "boxSetup": {
-      "identifyVersion": {
-        "or": "qoj"
-      }
-    },
-    "cancel": "qIl",
-    "delete": "Qaw'",
-    "editTonieboxSettingsModal": {
-      "editTonieboxSettingsLabel": "DuHmey"
-    },
-    "uploadTonieboxCertificatesModal": {
-      "boxType": "Box Segh",
-      "tb2Recommended": "TB2 chuplu'",
-      "tb2RecommendedDescription": "TB2 'oS Box mIllogh wIvlu'bogh.",
-      "useTb2": "TB2 lo'",
-      "uploadPath": "ngeH Daq:",
-      "uploadTonieboxCertificates": "Toniebox{{name}} certificates ngeH"
-    },
-    "live": {
-      "cancelPlaylistEdit": "qIl",
-      "chapter": "'ay' {{number}}",
-      "chapterDuration": "poH {{time}}",
-      "chapterTitle": "'ay' {{number}} pong",
-      "chapters": "'ay'mey",
-      "customContent": "De' le'",
-      "editPlaylist": "choH",
-      "playlistTypes": {
-        "directTaf": "nIqHom le'",
-        "tap": "TeddyAudio QonoS"
-      },
-      "shuffleModes": {
-        "ordered": "tlheghDaq",
-        "all": "Hoch DuD",
-        "one": "pagh nabbe' wIv"
-      },
-      "playlistSaveFailed": "QoQ tetlh polbe'lu'",
-      "playlistSaveFailedDetails": "pongmey polmeH Qagh tu'lu'",
-      "playlistSaved": "QoQ tetlh pollu'",
-      "playlistSavedDetails": "De' pong 'ay'mey pong je polta'",
-      "playlistTitle": "De' pong",
-      "savePlaylist": "Hoch pol"
-    }
-  },
-  "tonies": {
-    "addNewCustomTonieModal": {
-      "language": "Hol",
-      "save": "pol"
-    },
-    "cancel": "qIl",
-    "content": {
-      "navigationTitle": "De'",
-      "title": "De'"
-    },
-    "editModal": {
-      "modelInfoLanguage": "Hol",
-      "save": "pol"
-    },
-    "help": {
-      "closeButton": "SoQmoH",
-      "title": "QaH"
-    },
-    "selectFileModal": {
-      "cancel": "qIl",
-      "nativeCollection": "TB2 mung · Ogg/Opus · {{count}} 'ay'mey · {{hash}}",
-      "tonieplayCollection": "TB2 Tonieplay · {{count}} Dochmey · {{hash}}"
-    },
-    "selectMode": {
-      "cancel": "qIl"
-    },
-    "tapEditor": {
-      "cancel": "qIl",
-      "save": "pol",
-      "shuffle": "chu'ghach tlhegh",
-      "shuffleModes": {
-        "ordered": "tlhegh",
-        "all": "Hoch Hoch DuD",
-        "one": "wa' wIv lo' SuD"
-      }
-    },
-    "teddystudio": {
-      "cancel": "qIl",
-      "close": "SoQmoH",
-      "save": "pol",
-      "settings": "DuHmey"
-    }
-  }
 }

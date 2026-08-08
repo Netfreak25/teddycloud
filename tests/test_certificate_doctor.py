@@ -84,6 +84,46 @@ class CertificateDoctorStaticContractTests(unittest.TestCase):
         self.assertIn("(void)queryString;", handler)
         self.assertIn("CERTIFICATE_DOCTOR_OUTPUT_LIMIT", handler)
 
+    def test_certificate_diagnostics_web_contract(self) -> None:
+        web = ROOT / "teddycloud_web"
+        app = (web / "src" / "App.tsx").read_text(encoding="utf-8")
+        navigation = (
+            web / "src" / "components" / "settings" / "SettingsSubNav.tsx"
+        ).read_text(encoding="utf-8")
+        component = (
+            web
+            / "src"
+            / "components"
+            / "settings"
+            / "diagnostics"
+            / "CertificateDoctor.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('path="/settings/diagnostics"', app)
+        self.assertIn('to="/settings/diagnostics"', navigation)
+        self.assertEqual(component.count("await fetch("), 1)
+        for marker in (
+            "AbortController",
+            "controllerRef.current?.abort()",
+            'xs={12}',
+            'scroll={{ x: 900 }}',
+            'settings.diagnostics.rolesTitle',
+            'settings.diagnostics.overlaysTitle',
+            'settings.diagnostics.findingsTitle',
+            'settings.diagnostics.detailsTitle',
+        ):
+            self.assertIn(marker, component)
+
+        for language in ("de", "en", "es", "fr", "tlh"):
+            payload = json.loads(
+                (web / "public" / "translations" / f"{language}.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            diagnostics = payload["settings"]["diagnostics"]
+            self.assertTrue(diagnostics["navigationTitle"])
+            self.assertTrue(diagnostics["readOnlyDescription"])
+
 
 @unittest.skipIf(os.name == "nt", "behavioral doctor fixtures run in Linux/WSL")
 class CertificateDoctorBehaviorTests(unittest.TestCase):
