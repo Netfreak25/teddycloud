@@ -47,6 +47,10 @@ class CertificateDoctorStaticContractTests(unittest.TestCase):
             "partial $selected_generation client override",
             "shares the effective TB2 TONIES client identity",
             "Conflicting legacy/canonical files",
+            "operational_legacy_path_state",
+            "core.client_cert_tb1.*) option_generation=1",
+            "core.client_cert_tb2.*) option_generation=2",
+            "Stored legacy certificate path has no active overlay generation",
         ):
             self.assertIn(marker, script)
         for forbidden in ("rm -rf -- \"$CERT_ROOT", "mv --", "cp --"):
@@ -500,6 +504,51 @@ class CertificateDoctorBehaviorTests(unittest.TestCase):
         verbose = self._doctor(base, verbose=True)
         self.assertIn("Identical legacy duplicate", verbose.stdout)
         self.assertIn("server/ici.pem and server_tb2/ici.pem", verbose.stdout)
+
+    def test_inactive_generation_legacy_paths_are_not_operational_errors(self) -> None:
+        base = self._copy_fixture("inactive-generation-legacy-paths")
+        overlay = base / "config" / "config.overlay.ini"
+        overlay.write_text(
+            overlay.read_text(encoding="utf-8")
+            + "\n".join(
+                (
+                    "overlay.AAAAAAAAAAAA.core.client_cert_tb2.file.ca=certs/client/aaaaaaaaaaaa/ca.der",
+                    "overlay.AAAAAAAAAAAA.core.client_cert_tb2.file.crt=certs/client/aaaaaaaaaaaa/client.der",
+                    "overlay.AAAAAAAAAAAA.core.client_cert_tb2.file.key=certs/client/aaaaaaaaaaaa/private.der",
+                    "overlay.BBBBBBBBBBBB.core.client_cert_tb1.file.ca=certs/client/bbbbbbbbbbbb/ca.der",
+                    "overlay.BBBBBBBBBBBB.core.client_cert_tb1.file.crt=certs/client/bbbbbbbbbbbb/client.der",
+                    "overlay.BBBBBBBBBBBB.core.client_cert_tb1.file.key=certs/client/bbbbbbbbbbbb/private.der",
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = self._doctor_json(base)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        payload = json.loads(result.stdout)
+        operational_errors = [
+            finding
+            for finding in payload["findings"]
+            if "Operational legacy certificate path" in finding["message"]
+        ]
+        self.assertEqual(operational_errors, [])
+
+    def test_active_generation_legacy_paths_remain_operational_errors(self) -> None:
+        base = self._copy_fixture("active-generation-legacy-paths")
+        overlay = base / "config" / "config.overlay.ini"
+        overlay.write_text(
+            overlay.read_text(encoding="utf-8")
+            + "overlay.AAAAAAAAAAAA.core.client_cert_tb1.file.ca=certs/client/aaaaaaaaaaaa/ca.der\n",
+            encoding="utf-8",
+        )
+
+        result = self._doctor(base)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn(
+            "Operational legacy certificate path remains in config/config.overlay.ini",
+            result.stdout,
+        )
 
     def test_missing_factory_intermediate_is_informational(self) -> None:
         base = self._copy_fixture("missing-intermediate")

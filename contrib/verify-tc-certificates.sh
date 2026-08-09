@@ -1116,8 +1116,37 @@ check_hidden_certificate_backups() {
         -print 2>/dev/null | sort)
 }
 
+operational_legacy_path_state() {
+    local key="$1"
+    local rest overlay_id option option_generation configured_generation
+    REPLY=active
+
+    [[ "$key" == overlay.*.* ]] || return
+    rest="${key#overlay.}"
+    overlay_id="${rest%%.*}"
+    option="${rest#*.}"
+    case "$option" in
+        core.client_cert_tb1.*) option_generation=1 ;;
+        core.client_cert_tb2.*) option_generation=2 ;;
+        *) return ;;
+    esac
+
+    effective "$overlay_id" toniebox.boxGeneration
+    configured_generation="$REPLY"
+    case "$configured_generation" in
+        1|2)
+            if [[ "$configured_generation" != "$option_generation" ]]; then
+                REPLY=inactive
+            else
+                REPLY=active
+            fi
+            ;;
+        *) REPLY=unknown ;;
+    esac
+}
+
 check_operational_legacy_paths() {
-    local config_file line key value
+    local config_file line key value state
     for config_file in "$CONFIG_FILE" "$OVERLAY_FILE"; do
         [[ -f "$config_file" ]] || continue
         while IFS= read -r line; do
@@ -1126,7 +1155,20 @@ check_operational_legacy_paths() {
             value="${line#*=}"
             case "$value" in
                 certs/server|certs/server/*|certs/client|certs/client/*)
-                    report ERROR "Operational legacy certificate path remains in ${config_file#"$BASE_PATH"/}: $key=$value"
+                    operational_legacy_path_state "$key"
+                    state="$REPLY"
+                    case "$state" in
+                        inactive)
+                            # Preserve settings for a future manual generation switch,
+                            # but do not diagnose them as operational for this box.
+                            ;;
+                        unknown)
+                            report INFO "Stored legacy certificate path has no active overlay generation in ${config_file#"$BASE_PATH"/}: $key=$value"
+                            ;;
+                        *)
+                            report ERROR "Operational legacy certificate path remains in ${config_file#"$BASE_PATH"/}: $key=$value"
+                            ;;
+                    esac
                     ;;
             esac
         done < "$config_file"
