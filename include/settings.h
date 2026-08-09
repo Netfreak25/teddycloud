@@ -431,6 +431,10 @@ typedef struct
     time_t *last_ruid_time;
     char *ip;
     bool online;
+
+    uint32_t sniGenerationCycle;
+    uint32_t sniGenerationAppliedCycle;
+    bool sniGenerationEnabledLatched;
 } settings_internal_t;
 
 typedef struct
@@ -467,6 +471,7 @@ typedef struct
     char *allowOrigin;
     bool boxCertAuth;
     bool allowNewBox;
+    bool sni_cert_selection_enabled;
 
     bool flex_enabled;
     char *flex_uid;
@@ -681,6 +686,9 @@ settings_t *get_settings_cn(const char *commonName);
 settings_t *settings_get_existing_tb2_from_certificate_subject(const char *subject,
                                                                char *canonical_box_id,
                                                                size_t canonical_box_id_size);
+settings_t *settings_get_existing_from_certificate_subject(const char *subject,
+                                                           char *canonical_box_id,
+                                                           size_t canonical_box_id_size);
 uint8_t get_overlay_id(const char *overlay_unique_id);
 bool_t settings_canonicalize_box_id(const char *input_id, char *output_id, size_t output_size);
 
@@ -880,6 +888,9 @@ void settings_load_all_certs();
 error_t settings_try_load_certs_id(uint8_t settingsId);
 error_t settings_load_certs_id(uint8_t settingsId);
 error_t settings_reload_tb2_server_certificate(void);
+error_t settings_apply_sni_detected_generation(uint8_t settingsId,
+                                               settings_box_generation generation,
+                                               bool_t *changed);
 bool test_boxine_ca(uint8_t settingsId);
 
 #endif

@@ -34,6 +34,7 @@
 #include "stdbool.h"              // for true, bool, false
 #include "tls.h"                  // for _TlsContext, tlsLoadCertificate
 #include "tls_adapter.h"          // for tls_context_key_log_init, tlsCache
+#include "tls_client_hello.h"
 #include "cert.h"
 #include "tb2_https_passthrough.h"
 #include "tb2_mqtt_passthrough.h"
@@ -523,7 +524,8 @@ error_t httpServerRequestCallback(HttpConnection *connection, const char_t *uri,
                 firmware_info->uaVersionServicePack = spVersionTime;
                 firmware_info->uaVersionHardware = hwVersionTime;
 
-                if (client_ctx->settings->toniebox.boxGeneration != boxGen)
+                if (!settings_get_bool("core.server.sni_cert_selection_enabled") &&
+                    client_ctx->settings->toniebox.boxGeneration != boxGen)
                 {
                     TRACE_INFO("Box generation set %d to %d\r\n", client_ctx->settings->toniebox.boxGeneration, boxGen);
                     settings_set_unsigned_id("toniebox.boxGeneration", boxGen, client_ctx->settings->internal.overlayNumber);
@@ -720,7 +722,94 @@ error_t httpServerCgiCallback(HttpConnection *connection,
     return NO_ERROR;
 }
 
-error_t httpServerTlsInitCallbackBase(HttpConnection *connection, TlsContext *tlsContext, TlsClientAuthMode authMode)
+static error_t httpServerLoadTb1Certificate(TlsContext *tlsContext, uint_t index)
+{
+    const char *certChain = settings_get_string("internal.server.cert_chain");
+    const char *serverKey = settings_get_string("internal.server.key");
+    if (certChain == NULL || serverKey == NULL || certChain[0] == '\0' || serverKey[0] == '\0')
+    {
+        TRACE_ERROR("Failed to get TB1 HTTPS server certificate\r\n");
+        return ERROR_FAILURE;
+    }
+
+    error_t error = tlsLoadCertificate(tlsContext, index, certChain, strlen(certChain),
+                                       serverKey, strlen(serverKey), NULL);
+    if (error)
+    {
+        TRACE_ERROR("Failed to add TB1 HTTPS certificate: %s\r\n", error2text(error));
+    }
+    return error;
+}
+
+static error_t httpServerLoadTb2Certificate(TlsContext *tlsContext, uint_t index, bool_t required)
+{
+    error_t error = ERROR_FAILURE;
+    cert_tb2_rotation_lock();
+    const char *certChain = settings_get_string("internal.server_tb2.cert_chain");
+    const char *serverKey = settings_get_string("internal.server_tb2.key");
+    if (certChain == NULL || serverKey == NULL || certChain[0] == '\0' || serverKey[0] == '\0')
+    {
+        if (required)
+        {
+            TRACE_ERROR("Failed to get TB2 HTTPS server certificate\r\n");
+        }
+        error = ERROR_NOT_FOUND;
+    }
+    else
+    {
+        error = tlsLoadCertificate(tlsContext, index, certChain, strlen(certChain),
+                                   serverKey, strlen(serverKey), NULL);
+        if (error)
+        {
+            TRACE_ERROR("Failed to add TB2 HTTPS certificate: %s\r\n", error2text(error));
+        }
+    }
+    cert_tb2_rotation_unlock();
+    return error;
+}
+
+static error_t httpServerSelectBoxCertificate(HttpConnection *connection,
+                                              TlsContext *tlsContext,
+                                              settings_box_generation *generation)
+{
+    char hostname[256];
+    bool_t sniPresent = FALSE;
+    tls_client_hello_result_t parseResult = TLS_CLIENT_HELLO_INCOMPLETE;
+    error_t error = tls_client_hello_peek_sni(connection->socket, hostname, sizeof(hostname),
+                                              &sniPresent, &parseResult);
+    if (error)
+    {
+        TRACE_WARNING("Box TLS ClientHello SNI parsing failed: %s (result=%u)\r\n",
+                      error2text(error), (unsigned int)parseResult);
+        return error;
+    }
+
+    if (!sniPresent)
+    {
+        *generation = GENERATION_TB1;
+        TRACE_DEBUG("Box TLS ClientHello has no SNI; selecting TB1 certificate\r\n");
+    }
+    else
+    {
+        const char *configuredHostname = settings_get_string("core.server_cert_tb2.hostname");
+        if (osStrcasecmp(hostname, "tbs2.tonie.cloud") != 0 &&
+            (configuredHostname == NULL || osStrcasecmp(hostname, configuredHostname) != 0))
+        {
+            TRACE_WARNING("Box TLS ClientHello rejected unknown SNI '%s'\r\n", hostname);
+            return ERROR_INVALID_NAME;
+        }
+        *generation = GENERATION_TB2;
+        TRACE_DEBUG("Box TLS ClientHello SNI '%s'; selecting TB2 certificate\r\n", hostname);
+    }
+
+    tlsContext->selected_box_generation = (uint8_t)*generation;
+    tlsContext->sni_cert_selection_applied = TRUE;
+    return NO_ERROR;
+}
+
+error_t httpServerTlsInitCallbackBase(HttpConnection *connection, TlsContext *tlsContext,
+                                      TlsClientAuthMode authMode,
+                                      settings_box_generation certificateGeneration)
 {
     error_t error;
 
@@ -755,48 +844,31 @@ error_t httpServerTlsInitCallbackBase(HttpConnection *connection, TlsContext *tl
     if (error)
         return error;
 
-    // Import server's certificate
-    const char *cert_chain = settings_get_string("internal.server.cert_chain");
-    const char *server_key = settings_get_string("internal.server.key");
-
-    if (!cert_chain || !server_key)
+    if (certificateGeneration == GENERATION_TB2)
     {
-        TRACE_ERROR("Failed to get certificates\r\n");
-        return ERROR_FAILURE;
+        return httpServerLoadTb2Certificate(tlsContext, 0, TRUE);
     }
 
-    error = tlsLoadCertificate(tlsContext, 0, cert_chain, strlen(cert_chain), server_key, strlen(server_key), NULL);
-
-    if (error)
+    error = httpServerLoadTb1Certificate(tlsContext, 0);
+    if (error || certificateGeneration == GENERATION_TB1)
     {
-        TRACE_ERROR("  Failed to add cert: %s\r\n", error2text(error));
         return error;
     }
 
-    // Import TB2 server's certificate if available. The rotation lock keeps
-    // the in-memory chain stable while a leaf certificate is reloaded.
-    cert_tb2_rotation_lock();
-    const char *cert_chain_tb2 = settings_get_string("internal.server_tb2.cert_chain");
-    const char *server_key_tb2 = settings_get_string("internal.server_tb2.key");
-
-    if (cert_chain_tb2 && server_key_tb2 && strlen(cert_chain_tb2) > 0 && strlen(server_key_tb2) > 0)
+    // The legacy dual-certificate mode keeps TB2 optional, matching the
+    // previous behaviour when SNI selection is disabled.
+    error = httpServerLoadTb2Certificate(tlsContext, 1, FALSE);
+    if (error && error != ERROR_NOT_FOUND)
     {
-        error = tlsLoadCertificate(tlsContext, 1, cert_chain_tb2, strlen(cert_chain_tb2), server_key_tb2, strlen(server_key_tb2), NULL);
-        if (error)
-        {
-            TRACE_WARNING("  Failed to add TB2 cert: %s\r\n", error2text(error));
-        }
+        TRACE_WARNING("TB2 HTTPS certificate unavailable in dual-certificate mode: %s\r\n",
+                      error2text(error));
     }
-    cert_tb2_rotation_unlock();
-
-
-
-    // Successful processing
     return NO_ERROR;
 }
 error_t httpServerTlsInitCallback(HttpConnection *connection, TlsContext *tlsContext)
 {
-    return httpServerTlsInitCallbackBase(connection, tlsContext, TLS_CLIENT_AUTH_NONE);
+    return httpServerTlsInitCallbackBase(connection, tlsContext, TLS_CLIENT_AUTH_NONE,
+                                         GENERATION_UNKNOWN);
 }
 error_t httpServerBoxTlsInitCallback(HttpConnection *connection, TlsContext *tlsContext)
 {
@@ -809,7 +881,16 @@ error_t httpServerBoxTlsInitCallback(HttpConnection *connection, TlsContext *tls
         authMode = TLS_CLIENT_AUTH_REQUIRED;
     }
     */
-    error = httpServerTlsInitCallbackBase(connection, tlsContext, authMode);
+    settings_box_generation certificateGeneration = GENERATION_UNKNOWN;
+    if (settings->core.sni_cert_selection_enabled)
+    {
+        error = httpServerSelectBoxCertificate(connection, tlsContext, &certificateGeneration);
+        if (error)
+            return error;
+    }
+
+    error = httpServerTlsInitCallbackBase(connection, tlsContext, authMode,
+                                          certificateGeneration);
     if (error)
         return error;
 
@@ -868,6 +949,49 @@ error_t httpServerBoxTlsInitCallback(HttpConnection *connection, TlsContext *tls
     }
 
     return error;
+}
+
+static error_t httpServerBoxPostTlsCallback(HttpConnection *connection, bool_t *handled)
+{
+    if (settings_get_bool("core.server.sni_cert_selection_enabled") &&
+        connection->tlsContext != NULL && connection->tlsContext->sni_cert_selection_applied)
+    {
+        const settings_box_generation generation =
+            (settings_box_generation)connection->tlsContext->selected_box_generation;
+        char boxId[13];
+        settings_t *overlaySettings = settings_get_existing_from_certificate_subject(
+            connection->tlsContext->client_cert_subject, boxId, sizeof(boxId));
+        if (overlaySettings == NULL)
+        {
+            TRACE_WARNING("SNI generation detection skipped: client certificate has no valid active box overlay\r\n");
+        }
+        else
+        {
+            const uint8_t overlayId = overlaySettings->internal.overlayNumber;
+            bool_t changed = FALSE;
+            error_t applyError = settings_apply_sni_detected_generation(
+                overlayId, generation, &changed);
+            if (applyError != NO_ERROR)
+            {
+                TRACE_WARNING("SNI generation detection could not persist box %s overlay=%u: %s\r\n",
+                              boxId, overlayId, error2text(applyError));
+            }
+            else if (changed)
+            {
+                TRACE_INFO("SNI generation detection set box %s overlay=%u generation=TB%u cycle=%u\r\n",
+                           boxId, overlayId, (unsigned int)generation,
+                           settings_get_unsigned("internal.sniGenerationCycle"));
+            }
+            else
+            {
+                TRACE_DEBUG("SNI generation detection already applied for box %s overlay=%u cycle=%u\r\n",
+                            boxId, overlayId,
+                            settings_get_unsigned("internal.sniGenerationCycle"));
+            }
+        }
+    }
+
+    return tb2_https_passthrough_post_tls(connection, handled);
 }
 
 bool sanityCheckDir(const char *dir)
@@ -977,7 +1101,7 @@ void server_init(bool test)
     https_api_settings.connections = httpsApiConnections;
     https_api_settings.port = settings_get_unsigned("core.server.https_api_port");
     https_api_settings.tlsInitCallback = httpServerBoxTlsInitCallback;
-    https_api_settings.postTlsCallback = tb2_https_passthrough_post_tls;
+    https_api_settings.postTlsCallback = httpServerBoxPostTlsCallback;
     https_api_settings.requestCallback = httpServerAPIRequestCallback;
 
     error_t err = httpServerInit(&http_context, &http_settings);

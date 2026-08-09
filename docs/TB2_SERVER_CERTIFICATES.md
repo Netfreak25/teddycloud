@@ -63,3 +63,29 @@ successful leaf rebuild. Runtime-only settings
 
 The reconciliation logs only the service, hostname, reason and result. It does
 not log certificate contents, private keys or authentication data.
+
+## Optional SNI selection on the shared box HTTPS port
+
+The global expert setting `core.server.sni_cert_selection_enabled` is disabled
+by default. When enabled, TeddyCloud peeks at the ClientHello on the box API
+port before the TLS handshake and loads exactly one server identity:
+
+- no SNI extension selects the TB1 HTTPS certificate;
+- `tbs2.tonie.cloud` or the configured `core.server_cert_tb2.hostname`
+  selects the TB2 HTTPS certificate;
+- malformed, empty, multiple or unknown SNI values are rejected before the
+  handshake.
+
+The parser uses CycloneTCP's public `socketReceive(..., SOCKET_FLAG_PEEK)` API,
+does not consume ClientHello bytes and accepts fragmented TLS records up to a
+32 KiB limit. The Web HTTPS listener, ICI MQTT and the transparent TB2 HTTPS
+monitor are otherwise unchanged. With the setting disabled, the existing
+dual-certificate mode remains active.
+
+After the handshake, a valid 12-hex box ID from the client-certificate subject
+is matched to an existing overlay. Once per activation cycle, TeddyCloud then
+sets and enables that overlay's `toniebox.boxGeneration` override to the
+generation selected from SNI. Repeated connections and restarts do not rewrite
+the value. Turning the setting off and on starts a new cycle. Unknown or
+unauthenticated clients never change settings, and the HTTP User-Agent detector
+does not overwrite SNI-derived generation while this mode is active.

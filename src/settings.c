@@ -49,6 +49,10 @@ static char *settings_resolve_mqtt_server_path(settings_t *settings, const char 
 #define LEGACY_SERVER_BACKUP_DIR "certs/.server.bak"
 #define LEGACY_CLIENT_BACKUP_DIR "certs/.client.bak"
 #define CORE_SERVER_CERT_TB2_HOSTNAME_SETTING "core.server_cert_tb2.hostname"
+#define CORE_SERVER_SNI_CERT_SELECTION_SETTING "core.server.sni_cert_selection_enabled"
+#define INTERNAL_SNI_GENERATION_CYCLE_SETTING "internal.sniGenerationCycle"
+#define INTERNAL_SNI_GENERATION_APPLIED_CYCLE_SETTING "internal.sniGenerationAppliedCycle"
+#define INTERNAL_SNI_GENERATION_ENABLED_LATCHED_SETTING "internal.sniGenerationEnabledLatched"
 #define MQTT_SERVER_HOSTNAME_SETTING "mqtt_server.hostname"
 
 static bool settings_is_tb2_hostname(const char *item)
@@ -109,6 +113,7 @@ static void option_map_init(uint8_t settingsId)
     OPTION_UNSIGNED("core.server.https_web_port", &settings->core.https_web_port, 8443, 1, 65535, "HTTPS Web port", "HTTPS port for the webinterface", LEVEL_EXPERT)
     OPTION_UNSIGNED("core.server.https_api_port", &settings->core.https_api_port, 443, 1, 65535, "HTTPS API port", "HTTPS port for the Toniebox API", LEVEL_EXPERT)
     OPTION_STRING("core.server.bind_ip", &settings->core.bind_ip, "", "Bind IP", "ip for binding the http ports to", LEVEL_EXPERT)
+    OPTION_BOOL(CORE_SERVER_SNI_CERT_SELECTION_SETTING, &settings->core.sni_cert_selection_enabled, FALSE, "Select box certificate by SNI", "Use no SNI for TB1 and an allowed TB2 hostname for TB2; the first authenticated connection sets the box generation override", LEVEL_EXPERT)
 
     OPTION_TREE_DESC("core", "HTTP server", LEVEL_BASIC)
     OPTION_STRING("core.host_url", &settings->core.host_url, "http://localhost", "Host URL", "URL to teddyCloud server", LEVEL_BASIC)
@@ -327,6 +332,9 @@ static void option_map_init(uint8_t settingsId)
     OPTION_INTERNAL_UNSIGNED("internal.last_ruid_time", &settings->internal.last_ruid_time, 0, 0, UINT64_MAX, "Last rUID (unixtime)", LEVEL_NONE)
     OPTION_INTERNAL_STRING("internal.ip", &settings->internal.ip, "", "IP", LEVEL_NONE)
     OPTION_INTERNAL_BOOL("internal.online", &settings->internal.online, FALSE, "Check if box is online", LEVEL_NONE)
+    OPTION_INTERNAL_UNSIGNED(INTERNAL_SNI_GENERATION_CYCLE_SETTING, &settings->internal.sniGenerationCycle, 0, 0, UINT32_MAX, "SNI generation activation cycle", LEVEL_NONE)
+    OPTION_INTERNAL_UNSIGNED(INTERNAL_SNI_GENERATION_APPLIED_CYCLE_SETTING, &settings->internal.sniGenerationAppliedCycle, 0, 0, UINT32_MAX, "Last applied SNI generation cycle", LEVEL_NONE)
+    OPTION_INTERNAL_BOOL(INTERNAL_SNI_GENERATION_ENABLED_LATCHED_SETTING, &settings->internal.sniGenerationEnabledLatched, FALSE, "Persisted SNI generation switch state", LEVEL_NONE)
 
     OPTION_INTERNAL_BOOL("internal.security_mit.incident", &settings->internal.security_mit.incident, FALSE, "We had a security incident", LEVEL_NONE)
     OPTION_INTERNAL_UNSIGNED("internal.security_mit.blacklisted_domain_access", &settings->internal.security_mit.blacklisted_domain_access, 0, 0, 0, "Check accessed via blacklisted domain", LEVEL_NONE)
@@ -730,6 +738,26 @@ static bool settings_is_tb2_https_mode(const char *item)
 {
     return item != NULL &&
            (!osStrcmp(item, CLOUD_TB2_PROXY_SETTING) || !osStrcmp(item, CLOUD_TB2_V3_SETTING));
+}
+
+static bool settings_reconcile_sni_generation_cycle(settings_t *settings)
+{
+    const bool enabled = settings->core.sni_cert_selection_enabled;
+    if (enabled == settings->internal.sniGenerationEnabledLatched)
+    {
+        return false;
+    }
+
+    settings->internal.sniGenerationEnabledLatched = enabled;
+    if (enabled)
+    {
+        settings->internal.sniGenerationCycle++;
+        if (settings->internal.sniGenerationCycle == 0)
+        {
+            settings->internal.sniGenerationCycle = 1;
+        }
+    }
+    return true;
 }
 
 static void settings_note_tb2_https_mode_loaded(uint8_t settingsId, const char *item)
@@ -1216,9 +1244,11 @@ settings_t *get_settings_cn(const char *commonName)
     return get_settings();
 }
 
-settings_t *settings_get_existing_tb2_from_certificate_subject(const char *subject,
-                                                               char *canonical_box_id,
-                                                               size_t canonical_box_id_size)
+static settings_t *settings_get_existing_from_certificate_subject_internal(
+    const char *subject,
+    char *canonical_box_id,
+    size_t canonical_box_id_size,
+    settings_box_generation required_generation)
 {
     if (subject == NULL || canonical_box_id == NULL || canonical_box_id_size < 13)
     {
@@ -1249,9 +1279,12 @@ settings_t *settings_get_existing_tb2_from_certificate_subject(const char *subje
     for (size_t i = 1; i < MAX_OVERLAYS; i++)
     {
         settings_t *settings = &Settings_Overlay[i];
-        if (settings->internal.config_used &&
-            settings->toniebox.boxGeneration == GENERATION_TB2 &&
-            osStrcasecmp(settings->commonName, canonical_box_id) == 0)
+        const bool generation_matches =
+            required_generation == GENERATION_UNKNOWN ||
+            settings->toniebox.boxGeneration == required_generation;
+        if (settings->internal.config_used && generation_matches &&
+            (osStrcasecmp(settings->commonName, canonical_box_id) == 0 ||
+             osStrcasecmp(settings->internal.overlayUniqueId, canonical_box_id) == 0))
         {
             mutex_unlock(MUTEX_SETTINGS);
             return settings;
@@ -1259,6 +1292,22 @@ settings_t *settings_get_existing_tb2_from_certificate_subject(const char *subje
     }
     mutex_unlock(MUTEX_SETTINGS);
     return NULL;
+}
+
+settings_t *settings_get_existing_from_certificate_subject(const char *subject,
+                                                           char *canonical_box_id,
+                                                           size_t canonical_box_id_size)
+{
+    return settings_get_existing_from_certificate_subject_internal(
+        subject, canonical_box_id, canonical_box_id_size, GENERATION_UNKNOWN);
+}
+
+settings_t *settings_get_existing_tb2_from_certificate_subject(const char *subject,
+                                                               char *canonical_box_id,
+                                                               size_t canonical_box_id_size)
+{
+    return settings_get_existing_from_certificate_subject_internal(
+        subject, canonical_box_id, canonical_box_id_size, GENERATION_TB2);
 }
 
 uint8_t get_overlay_id(const char *overlay_unique_id)
@@ -1947,6 +1996,81 @@ error_t settings_save()
     return err;
 }
 
+error_t settings_apply_sni_detected_generation(uint8_t settingsId,
+                                               settings_box_generation generation,
+                                               bool_t *changed)
+{
+    if (changed == NULL || settingsId == 0 || settingsId >= MAX_OVERLAYS ||
+        (generation != GENERATION_TB1 && generation != GENERATION_TB2))
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+    *changed = FALSE;
+
+    mutex_lock(MUTEX_SETTINGS);
+    settings_t *globalSettings = &Settings_Overlay[0];
+    settings_t *overlaySettings = &Settings_Overlay[settingsId];
+    const uint32_t cycle = globalSettings->internal.sniGenerationCycle;
+    if (!globalSettings->core.sni_cert_selection_enabled || cycle == 0)
+    {
+        mutex_unlock(MUTEX_SETTINGS);
+        return ERROR_NOT_CONFIGURED;
+    }
+    if (!overlaySettings->internal.config_used)
+    {
+        mutex_unlock(MUTEX_SETTINGS);
+        return ERROR_NOT_FOUND;
+    }
+    if (overlaySettings->internal.sniGenerationAppliedCycle == cycle)
+    {
+        mutex_unlock(MUTEX_SETTINGS);
+        return NO_ERROR;
+    }
+
+    setting_item_t *generationOption = settings_get_by_name_id("toniebox.boxGeneration", settingsId);
+    setting_item_t *cycleOption = settings_get_by_name_id(INTERNAL_SNI_GENERATION_APPLIED_CYCLE_SETTING, settingsId);
+    if (generationOption == NULL || cycleOption == NULL)
+    {
+        mutex_unlock(MUTEX_SETTINGS);
+        return ERROR_NOT_FOUND;
+    }
+
+    const settings_box_generation previousGeneration = overlaySettings->toniebox.boxGeneration;
+    const uint32_t previousCycle = overlaySettings->internal.sniGenerationAppliedCycle;
+    const bool previousGenerationOverlayed = generationOption->overlayed;
+    const bool previousCycleOverlayed = cycleOption->overlayed;
+    const bool previousConfigChanged = overlaySettings->internal.config_changed;
+
+    overlaySettings->toniebox.boxGeneration = generation;
+    overlaySettings->internal.sniGenerationAppliedCycle = cycle;
+    overlaySettings->internal.config_changed = true;
+    generationOption->overlayed = true;
+    cycleOption->overlayed = true;
+
+    error_t error = settings_save_ovl(true);
+    if (error != NO_ERROR)
+    {
+        overlaySettings->toniebox.boxGeneration = previousGeneration;
+        overlaySettings->internal.sniGenerationAppliedCycle = previousCycle;
+        overlaySettings->internal.config_changed = previousConfigChanged;
+        generationOption->overlayed = previousGenerationOverlayed;
+        cycleOption->overlayed = previousCycleOverlayed;
+        mutex_unlock(MUTEX_SETTINGS);
+        return error;
+    }
+    mutex_unlock(MUTEX_SETTINGS);
+
+    error_t reloadError = settings_try_load_certs_id(settingsId);
+    if (reloadError != NO_ERROR)
+    {
+        TRACE_WARNING("SNI generation certificate reload failed for overlay=%u: %s\r\n",
+                      settingsId, error2text(reloadError));
+    }
+
+    *changed = TRUE;
+    return NO_ERROR;
+}
+
 static error_t settings_save_ovl(bool overlay)
 {
     char_t *config_path = (!overlay ? config_file_path : config_overlay_file_path);
@@ -1982,7 +2106,15 @@ static error_t settings_save_ovl(bool overlay)
         while (option_map[pos].type != TYPE_END)
         {
             setting_item_t *opt = &option_map[pos];
-            if ((!opt->internal && !opt->read_only) || !osStrcmp(opt->option_name, "configVersion") || (overlay && (!osStrcmp(opt->option_name, "commonName") || !osStrcmp(opt->option_name, "boxName") || !osStrcmp(opt->option_name, "boxModel"))))
+            const bool persistentSniState =
+                (!overlay && (!osStrcmp(opt->option_name, INTERNAL_SNI_GENERATION_CYCLE_SETTING) ||
+                              !osStrcmp(opt->option_name, INTERNAL_SNI_GENERATION_ENABLED_LATCHED_SETTING))) ||
+                (overlay && !osStrcmp(opt->option_name, INTERNAL_SNI_GENERATION_APPLIED_CYCLE_SETTING));
+            if ((!opt->internal && !opt->read_only) || persistentSniState ||
+                !osStrcmp(opt->option_name, "configVersion") ||
+                (overlay && (!osStrcmp(opt->option_name, "commonName") ||
+                             !osStrcmp(opt->option_name, "boxName") ||
+                             !osStrcmp(opt->option_name, "boxModel"))))
             {
                 char *overlayPrefix;
                 if (overlay)
@@ -2182,6 +2314,13 @@ static error_t settings_load_ovl(bool overlay)
                         switch (opt->type)
                         {
                         case TYPE_BOOL:
+                            if (overlay && !osStrcmp(option_name, CORE_SERVER_SNI_CERT_SELECTION_SETTING))
+                            {
+                                TRACE_WARNING("Ignoring overlay-only value for global setting '%s'\r\n",
+                                              option_name);
+                                opt->overlayed = false;
+                                break;
+                            }
                             if (strcmp(value_str, "true") == 0)
                             {
                                 *((bool *)opt->ptr) = true;
@@ -2350,6 +2489,7 @@ static error_t settings_load_ovl(bool overlay)
         settings_source_config_version = Settings_Overlay[0].configVersion;
         settings_prepare_certificate_layout_migration();
         bool migrated = settings_migrate_id(0);
+        migrated = settings_reconcile_sni_generation_cycle(get_settings()) || migrated;
         settings_normalize_tb2_https_modes(0);
         settings_generate_internal_dirs(get_settings());
         settings_load_certs_id(0);
@@ -2494,7 +2634,8 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
         return false;
     }
 
-    if (settingsId > 0 && !osStrcmp(item, "mqtt_client_upstream.enabled"))
+    if (settingsId > 0 && (!osStrcmp(item, "mqtt_client_upstream.enabled") ||
+                           !osStrcmp(item, CORE_SERVER_SNI_CERT_SELECTION_SETTING)))
     {
         TRACE_WARNING("Setting '%s' is global and cannot be overridden\r\n", item);
         return false;
@@ -2511,6 +2652,10 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
     }
 
     *((bool *)opt->ptr) = value;
+    if (settingsId == 0 && !osStrcmp(item, CORE_SERVER_SNI_CERT_SELECTION_SETTING))
+    {
+        settings_reconcile_sni_generation_cycle(get_settings());
+    }
 
     if (settings_is_tb2_https_mode(item) && value)
     {

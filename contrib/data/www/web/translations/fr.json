@@ -1262,6 +1262,10 @@
                 "label": "Port API HTTPS",
                 "description": "Port HTTPS pour l'API Toniebox"
             },
+            "core__server__sni_cert_selection_enabled": {
+                "label": "Sélectionner le certificat de la box par SNI",
+                "description": "Désactivé par défaut. Sans SNI, TB1 est sélectionnée ; seul un nom d'hôte TB2 autorisé sélectionne TB2. La première connexion authentifiée définit et active le remplacement de génération de la box."
+            },
             "core__server__bind_ip": {
                 "label": "Lier IP",
                 "description": "ip pour lier les ports http à"

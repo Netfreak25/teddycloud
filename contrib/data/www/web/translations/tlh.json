@@ -237,6 +237,10 @@
             "log__color": {
                 "label": "QonoS nguv"
             },
+            "core__server__sni_cert_selection_enabled": {
+                "label": "SNI lo' Box certificate wIv",
+                "description": "motlh Qotlh. SNI paghDI' TB1 wIvlu'; TB2 De'wI' pong chaw'lu' neH TB2 wIvlu'. wa'DIch authenticated rarghDI' Box generation override cherlu' 'ej QotlhHa'lu'."
+            },
             "core__certdir_tb2": {
                 "label": "TB2 certificate Daq"
             },

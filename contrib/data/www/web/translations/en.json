@@ -1262,6 +1262,10 @@
                 "label": "HTTPS API port",
                 "description": "HTTPS port for the Toniebox API"
             },
+            "core__server__sni_cert_selection_enabled": {
+                "label": "Select box certificate by SNI",
+                "description": "Disabled by default. No SNI selects TB1; only an allowed TB2 hostname selects TB2. The first authenticated connection sets and enables the box generation override."
+            },
             "core__server__bind_ip": {
                 "label": "Bind IP",
                 "description": "ip for binding the http ports to"

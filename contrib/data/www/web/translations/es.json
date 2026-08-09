@@ -1262,6 +1262,10 @@
                 "label": "Puerto HTTPS de la API",
                 "description": "Puerto HTTPS para la API de Toniebox"
             },
+            "core__server__sni_cert_selection_enabled": {
+                "label": "Seleccionar el certificado de la caja por SNI",
+                "description": "Desactivado por defecto. Sin SNI se selecciona TB1; solo un host TB2 permitido selecciona TB2. La primera conexión autenticada establece y activa la sobrescritura de generación de la caja."
+            },
             "core__server__bind_ip": {
                 "label": "Vincular IP",
                 "description": "IP para enlazar los puertos http a"
