@@ -1037,8 +1037,6 @@
         "diagnostics": {
             "navigationTitle": "Diagnóstico",
             "title": "Diagnóstico de certificados",
-            "readOnlyTitle": "Diagnóstico de solo lectura",
-            "readOnlyDescription": "No se modifica ningún archivo ni ajuste.",
             "refresh": "Comprobar de nuevo",
             "retry": "Reintentar",
             "loading": "Comprobando certificados…",

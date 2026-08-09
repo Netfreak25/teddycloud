@@ -1037,8 +1037,6 @@
         "diagnostics": {
             "navigationTitle": "Diagnostics",
             "title": "Certificate Doctor",
-            "readOnlyTitle": "Read-only diagnosis",
-            "readOnlyDescription": "No files or settings are changed.",
             "refresh": "Run again",
             "retry": "Retry",
             "loading": "Checking certificates…",

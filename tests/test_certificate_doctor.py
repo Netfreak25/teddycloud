@@ -118,6 +118,10 @@ class CertificateDoctorStaticContractTests(unittest.TestCase):
         ):
             self.assertIn(marker, component)
         self.assertNotIn("pageSize: 25", component)
+        self.assertNotIn("settings.diagnostics.readOnlyTitle", component)
+        self.assertIn("groups.get(scope)", component)
+        self.assertIn("entry.path = entryPath(entry)", component)
+        self.assertIn("entry.path &&", component)
 
         for language in ("de", "en", "es", "fr", "tlh"):
             payload = json.loads(
@@ -127,7 +131,7 @@ class CertificateDoctorStaticContractTests(unittest.TestCase):
             )
             diagnostics = payload["settings"]["diagnostics"]
             self.assertTrue(diagnostics["navigationTitle"])
-            self.assertTrue(diagnostics["readOnlyDescription"])
+            self.assertNotIn("readOnlyDescription", diagnostics)
             self.assertTrue(diagnostics["detailSections"]["problems"])
             self.assertTrue(diagnostics["pathUnavailable"])
 

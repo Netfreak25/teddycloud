@@ -98,8 +98,6 @@
         "diagnostics": {
             "navigationTitle": "Qagh nej",
             "title": "Certificate Doctor",
-            "readOnlyTitle": "poj neH",
-            "readOnlyDescription": "ta'mey DuHmey je choHbe'.",
             "refresh": "wa'logh yIpojqa'",
             "retry": "yInIDqa'",
             "loading": "certificates pojlI'…",

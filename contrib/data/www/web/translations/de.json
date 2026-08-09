@@ -1037,8 +1037,6 @@
         "diagnostics": {
             "navigationTitle": "Diagnose",
             "title": "Zertifikats-Doctor",
-            "readOnlyTitle": "Nur Diagnose",
-            "readOnlyDescription": "Es werden keine Dateien oder Einstellungen verändert.",
             "refresh": "Erneut prüfen",
             "retry": "Erneut versuchen",
             "loading": "Zertifikate werden geprüft…",
