@@ -32,6 +32,10 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
             ROOT
             / "teddycloud_web/src/components/tonies/filebrowser/FileBrowser.tsx"
         ).read_text(encoding="utf-8")
+        cls.web_browser_core = (
+            ROOT
+            / "teddycloud_web/src/components/tonies/filebrowser/hooks/useFileBrowserCore.tsx"
+        ).read_text(encoding="utf-8")
         cls.web_player = (
             ROOT / "teddycloud_web/src/provider/AudioProvider.tsx"
         ).read_text(encoding="utf-8")
@@ -250,6 +254,16 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
         self.assertIn("file.nativeCollection.source", self.web_select)
         self.assertIn("selectNativeCollections={!requireTafHeader}", self.web_select)
         self.assertIn("hideNativeCollections={requireTafHeader}", self.web_select)
+
+    def test_assigned_source_opens_canonical_collection_root(self) -> None:
+        self.assertIn('? "by/contentHash"', self.web_select)
+        self.assertNotIn('? "by/contentHash/"', self.web_select)
+        self.assertIn('.replace(/\\/+$/, "")', self.web_select)
+        self.assertIn("const previousOverlayRef = useRef(overlay);", self.web_browser_core)
+        self.assertIn(
+            "if (previousOverlayRef.current === overlay) return;",
+            self.web_browser_core,
+        )
 
     def test_webui_plays_all_chapters_and_can_close_collection_detail(self) -> None:
         self.assertIn("playPlaybackItem", self.web_player)
