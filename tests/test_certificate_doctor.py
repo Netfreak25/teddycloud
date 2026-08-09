@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -276,6 +277,64 @@ class CertificateDoctorBehaviorTests(unittest.TestCase):
         )
         return cert, key
 
+    @staticmethod
+    def _der_length(data: bytes, offset: int) -> tuple[int, int]:
+        first = data[offset]
+        if first < 0x80:
+            return first, offset + 1
+        width = first & 0x7F
+        if width == 0 or width > 4:
+            raise AssertionError("unsupported DER length")
+        start = offset + 1
+        return int.from_bytes(data[start : start + width], "big"), start + width
+
+    @staticmethod
+    def _encode_der_length(length: int) -> bytes:
+        if length < 0x80:
+            return bytes((length,))
+        encoded = length.to_bytes((length.bit_length() + 7) // 8, "big")
+        return bytes((0x80 | len(encoded),)) + encoded
+
+    @classmethod
+    def _make_legacy_nonminimal_ca(cls, ca_pem: Path, target_pem: Path, target_der: Path) -> None:
+        canonical_der = ca_pem.parent / "legacy-canonical-ca.der"
+        cls._openssl("x509", "-in", str(ca_pem), "-outform", "DER", "-out", str(canonical_der), cwd=ca_pem.parent)
+        data = canonical_der.read_bytes()
+
+        if data[0] != 0x30:
+            raise AssertionError("certificate is not an outer DER sequence")
+        outer_length, outer_content = cls._der_length(data, 1)
+        outer_end = outer_content + outer_length
+        if outer_end != len(data) or data[outer_content] != 0x30:
+            raise AssertionError("certificate has an unexpected outer structure")
+
+        tbs_start = outer_content
+        tbs_length, tbs_content = cls._der_length(data, tbs_start + 1)
+        tbs_end = tbs_content + tbs_length
+        cursor = tbs_content
+        if data[cursor] == 0xA0:
+            version_length, version_content = cls._der_length(data, cursor + 1)
+            cursor = version_content + version_length
+        if data[cursor] != 0x02:
+            raise AssertionError("certificate serial is not a DER integer")
+        serial_length, serial_content = cls._der_length(data, cursor + 1)
+        serial_end = serial_content + serial_length
+
+        serial = b"\x02" + cls._encode_der_length(serial_length + 1) + b"\x00" + data[serial_content:serial_end]
+        tbs_payload = data[tbs_content:cursor] + serial + data[serial_end:tbs_end]
+        tbs = b"\x30" + cls._encode_der_length(len(tbs_payload)) + tbs_payload
+        outer_payload = tbs + data[tbs_end:outer_end]
+        malformed = b"\x30" + cls._encode_der_length(len(outer_payload)) + outer_payload
+
+        target_der.write_bytes(malformed)
+        encoded = base64.b64encode(malformed).decode("ascii")
+        target_pem.write_text(
+            "-----BEGIN CERTIFICATE-----\n"
+            + "\n".join(encoded[index : index + 64] for index in range(0, len(encoded), 64))
+            + "\n-----END CERTIFICATE-----\n",
+            encoding="ascii",
+        )
+
     @classmethod
     def _create_valid_fixture(cls, base: Path) -> None:
         config = base / "config"
@@ -286,7 +345,7 @@ class CertificateDoctorBehaviorTests(unittest.TestCase):
         for name in ("server_tb1", "server_tb2", "client_tb1", "client_tb2"):
             (certs / name).mkdir(parents=True)
 
-        local_ca, local_key = cls._create_ca(work, "local-ca", "/CN=TeddyCloud Root CA/O=Team RevvoX/C=DE")
+        local_ca, local_key = cls._create_ca(work, "local-ca", "/CN=Home LAN Root/O=Private Network/C=DE")
         tb1_ca, tb1_ca_key = cls._create_ca(work, "tb1-ca", "/CN=Boxine CA/O=Boxine GmbH/C=DE")
         tb2_ca, tb2_ca_key = cls._create_ca(work, "tb2-ca", "/CN=TONIES CA/O=tonies GmbH/C=DE")
 
@@ -379,6 +438,107 @@ class CertificateDoctorBehaviorTests(unittest.TestCase):
         self.assertIn("shares the TB2 TONIES identity", result.stdout)
         self.assertIn("Findings: WARN=0 ERROR=0", result.stdout)
         self.assertNotIn("fingerprint=", result.stdout)
+
+        payload = json.loads(self._doctor_json(self.fixture).stdout)
+        server_roles = {
+            role["id"]: role["generation"]
+            for role in payload["roles"]
+            if role["id"].startswith("server-")
+        }
+        self.assertEqual(
+            server_roles,
+            {
+                "server-tb1": "LOCAL",
+                "server-tb2-https": "LOCAL",
+                "server-tb2-mqtt": "LOCAL",
+            },
+        )
+
+    def test_teddy_ca_is_recognized_as_a_local_identity(self) -> None:
+        base = self._copy_fixture("teddy-ca")
+        work = base / "fixture-work"
+        ca, ca_key = self._create_ca(work, "teddy-ca", "/CN=Teddy CA/C=DE")
+        leaf, leaf_key = self._create_leaf(
+            work,
+            "teddy-local-client",
+            "/CN=Local Test Client/O=Private Network",
+            ca,
+            ca_key,
+            der=True,
+        )
+        self._openssl(
+            "x509",
+            "-in",
+            str(ca),
+            "-outform",
+            "DER",
+            "-out",
+            str(base / "certs/client_tb1/ca.fake.der"),
+            cwd=work,
+        )
+        shutil.copy2(leaf, base / "certs/client_tb1/client.fake.der")
+        shutil.copy2(leaf_key, base / "certs/client_tb1/private.fake.der")
+
+        result = self._doctor_json(base)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        payload = json.loads(result.stdout)
+        fake_role = next(role for role in payload["roles"] if role["id"] == "fake-global")
+        self.assertEqual(fake_role["generation"], "LOCAL")
+
+    def test_nonminimal_historical_tb1_ca_is_reported_as_local_legacy(self) -> None:
+        base = self._copy_fixture("legacy-nonminimal-ca")
+        self._make_legacy_nonminimal_ca(
+            base / "fixture-work/local-ca.pem",
+            base / "certs/server_tb1/ca-root.pem",
+            base / "certs/server_tb1/ca.der",
+        )
+
+        result = self._doctor_json(base)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        payload = json.loads(result.stdout)
+        role = next(role for role in payload["roles"] if role["id"] == "server-tb1")
+        self.assertEqual(role["generation"], "LOCAL (Legacy)")
+        self.assertEqual(role["status"], "warning")
+        finding = next(
+            finding
+            for finding in payload["findings"]
+            if "historical TB1 CA confirmed" in finding["message"]
+        )
+        self.assertEqual(finding["path"], "certs/server_tb1/ca-root.pem")
+        self.assertIn("cannot fully verify its CA key or certificate chain", finding["message"])
+
+    def test_unreadable_tb1_ca_without_guarded_legacy_match_is_an_error(self) -> None:
+        base = self._copy_fixture("invalid-unreadable-ca")
+        invalid = b"not an X.509 certificate"
+        encoded = base64.b64encode(invalid).decode("ascii")
+        (base / "certs/server_tb1/ca-root.pem").write_text(
+            f"-----BEGIN CERTIFICATE-----\n{encoded}\n-----END CERTIFICATE-----\n",
+            encoding="ascii",
+        )
+        (base / "certs/server_tb1/ca.der").write_bytes(invalid)
+
+        result = self._doctor(base)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("CA is not readable as PEM or DER", result.stdout)
+        self.assertNotIn("LOCAL (Legacy)", result.stdout)
+
+    def test_legacy_tb1_ca_with_mismatched_leaf_key_is_an_error(self) -> None:
+        base = self._copy_fixture("legacy-leaf-key-mismatch")
+        self._make_legacy_nonminimal_ca(
+            base / "fixture-work/local-ca.pem",
+            base / "certs/server_tb1/ca-root.pem",
+            base / "certs/server_tb1/ca.der",
+        )
+        shutil.copy2(
+            base / "certs/server_tb2/teddy-key.pem",
+            base / "certs/server_tb1/teddy-key.pem",
+        )
+
+        result = self._doctor(base)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("leaf certificate and private key do not match", result.stdout)
+        self.assertIn("does not meet the guarded legacy conditions", result.stdout)
+        self.assertNotIn("generation=LOCAL (Legacy)", result.stdout)
 
     def test_verbose_mode_keeps_details_and_deduplicates_required_sans(self) -> None:
         result = self._doctor(self.fixture, verbose=True)

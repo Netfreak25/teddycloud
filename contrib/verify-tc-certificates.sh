@@ -606,6 +606,54 @@ normalize_cert() {
     return 1
 }
 
+LEGACY_COUNTER=0
+legacy_tb1_ca_matches_der() {
+    local pem_path="$1"
+    local der_path="$2"
+    local pem_text_path decoded_path asn1_path bad_integer_count
+
+    REPLY=''
+    file_state "$pem_path"
+    [[ "$REPLY" == present ]] || return 1
+    file_state "$der_path"
+    [[ "$REPLY" == present ]] || return 1
+
+    # A legacy CA must be rejected by the strict X.509 decoder in both of its
+    # representations. Parseable certificates use the normal validation path.
+    normalize_cert "$pem_path" && return 1
+    normalize_cert "$der_path" && return 1
+
+    LEGACY_COUNTER=$((LEGACY_COUNTER + 1))
+    pem_text_path="$TMP_DIR/legacy-ca-$LEGACY_COUNTER.pem"
+    decoded_path="$TMP_DIR/legacy-ca-$LEGACY_COUNTER.der"
+    asn1_path="$TMP_DIR/legacy-ca-$LEGACY_COUNTER.asn1"
+
+    tr -d '\r' < "$pem_path" > "$pem_text_path"
+    if [[ "$(grep -c '^-----BEGIN CERTIFICATE-----$' "$pem_text_path" 2>/dev/null || true)" != 1 ||
+          "$(grep -c '^-----END CERTIFICATE-----$' "$pem_text_path" 2>/dev/null || true)" != 1 ]]; then
+        return 1
+    fi
+    if ! awk '
+        /^-----BEGIN CERTIFICATE-----$/ { inside=1; next }
+        /^-----END CERTIFICATE-----$/ { inside=0; next }
+        inside { gsub(/[[:space:]]/, ""); printf "%s", $0 }
+    ' "$pem_text_path" | openssl base64 -d -A -out "$decoded_path" 2>/dev/null; then
+        return 1
+    fi
+    [[ -s "$decoded_path" ]] && cmp -s -- "$decoded_path" "$der_path" || return 1
+
+    if ! LC_ALL=C openssl asn1parse -inform DER -in "$der_path" -i > "$asn1_path" 2>/dev/null; then
+        return 1
+    fi
+    grep -Eq '^[[:space:]]*0:d=0 .*cons:[[:space:]]+SEQUENCE' "$asn1_path" || return 1
+    bad_integer_count="$(grep -c 'BAD INTEGER' "$asn1_path" 2>/dev/null || true)"
+    [[ "$bad_integer_count" == 1 ]] || return 1
+    grep -Eq 'd=2 .*prim:[[:space:]]+INTEGER[[:space:]]+:BAD INTEGER:\[00[0-7][0-9A-Fa-f]*\]' "$asn1_path" || return 1
+
+    REPLY='LOCAL (Legacy)'
+    return 0
+}
+
 normalize_key() {
     local source="$1"
     NORMAL_COUNTER=$((NORMAL_COUNTER + 1))
@@ -688,7 +736,7 @@ classify_ca_textual() {
         REPLY=TB1
     elif [[ "$combined" == *tonies* || "$combined" == *'tonie cloud'* ]]; then
         REPLY=TB2
-    elif [[ "$combined" == *teddycloud* || "$combined" == *'team revvox'* ]]; then
+    elif [[ "$combined" == *teddycloud* || "$combined" == *'teddy ca'* || "$combined" == *'team revvox'* ]]; then
         REPLY=LOCAL
     else
         REPLY=UNKNOWN
@@ -707,7 +755,7 @@ classify_leaf_textual() {
         REPLY=TB1
     elif [[ "$combined" == *tonies* || "$combined" == *'tonie cloud'* ]]; then
         REPLY=TB2
-    elif [[ "$combined" == *teddycloud* || "$combined" == *'team revvox'* ]]; then
+    elif [[ "$combined" == *teddycloud* || "$combined" == *'teddy ca'* || "$combined" == *'team revvox'* ]]; then
         REPLY=LOCAL
     else
         REPLY=UNKNOWN
@@ -859,10 +907,13 @@ check_cert_set() {
     local sans="${12}"
     local expected_box_id="${13}"
     local directory_id="${14}"
+    local ca_der_path="${15:-}"
+    local ca_der_display="${16:-}"
     local ca_state cert_state key_state present_count=0
     local ca_pem='' cert_pem='' key_pem='' ca_format cert_format key_format
     local subject issuer fp cn canonical_cn generation=UNKNOWN leaf_generation=UNKNOWN
     local cert_pub key_pub ca_key_usage ca_subject verify_output
+    local legacy_ca_candidate=0 legacy_ca_confirmed=0 leaf_key_matches=0
 
     SET_WARN_START["$set_id"]="$WARN_COUNT"
     SET_ERROR_START["$set_id"]="$ERROR_COUNT"
@@ -907,7 +958,11 @@ check_cert_set() {
                 fi
             fi
             expiry_check "$role" "$active" "$ca_pem" CA
-            classify_ca "$ca_pem"; generation="$REPLY"
+            if [[ "$kind" == server && "$expected_generation" == LOCAL ]]; then
+                generation=LOCAL
+            else
+                classify_ca "$ca_pem"; generation="$REPLY"
+            fi
             SET_GENERATION["$set_id"]="$generation"
             if [[ "$expected_generation" != ANY && "$generation" != "$expected_generation" ]]; then
                 issue "$active" "$role: detected certificate generation $generation, expected $expected_generation"
@@ -915,8 +970,10 @@ check_cert_set() {
                 report OK "$role: detected generation $generation"
             fi
         else
-            if [[ "$set_id" == server-tb1 ]]; then
-                report WARN "$role: OpenSSL cannot parse the legacy TB1 CA at $ca_display; keep its bytes unchanged and inspect details with --verbose"
+            if [[ "$set_id" == server-tb1 && -n "$ca_der_path" ]] &&
+               legacy_tb1_ca_matches_der "$ca_path" "$ca_der_path"; then
+                legacy_ca_candidate=1
+                report INFO "$role: CA PEM payload and $ca_der_display are byte-identical and contain the historical non-minimal TB1 serial number"
             else
                 issue "$active" "$role: CA is not readable as PEM or DER: $ca_display"
             fi
@@ -991,6 +1048,7 @@ check_cert_set() {
         public_key_fingerprint_from_cert "$cert_pem"; cert_pub="$REPLY"
         public_key_fingerprint_from_key "$key_pem"; key_pub="$REPLY"
         if [[ -n "$cert_pub" && "$cert_pub" == "$key_pub" ]]; then
+            leaf_key_matches=1
             report OK "$role: leaf certificate and private key match"
             register_identity "$role" "$cert_display" "$cert_pem" "$key_pem"
         else
@@ -998,7 +1056,19 @@ check_cert_set() {
         fi
     fi
 
-    if [[ -n "$ca_pem" && -n "$cert_pem" && -n "$key_pem" ]]; then
+    if ((legacy_ca_candidate)); then
+        if [[ "$leaf_generation" == LOCAL && "$leaf_key_matches" == 1 ]]; then
+            legacy_ca_confirmed=1
+            generation='LOCAL (Legacy)'
+            SET_GENERATION["$set_id"]="$generation"
+            report WARN "$role: historical TB1 CA confirmed at $ca_display; TeddyCloud supports it, but modern OpenSSL cannot fully verify its CA key or certificate chain"
+        else
+            SET_GENERATION["$set_id"]=UNKNOWN
+            issue "$active" "$role: unreadable TB1 CA does not meet the guarded legacy conditions: $ca_display"
+        fi
+    fi
+
+    if [[ -n "$ca_pem" && -n "$cert_pem" && -n "$key_pem" ]] || ((legacy_ca_confirmed)); then
         SET_COMPLETE["$set_id"]=1
     else
         SET_COMPLETE["$set_id"]=0
@@ -1082,11 +1152,10 @@ check_ca_representations() {
         return
     fi
     if ! normalize_cert "$pem"; then
-        if [[ "$root_name" == server_tb1 ]]; then
-            report INFO "$root_name: modern OpenSSL cannot parse the legacy ca-root.pem representation; bytes were left unchanged"
-        else
-            report ERROR "$root_name: ca-root.pem is not a readable certificate"
+        if [[ "$root_name" == server_tb1 ]] && legacy_tb1_ca_matches_der "$pem" "$der"; then
+            return
         fi
+        report ERROR "$root_name: ca-root.pem is not a readable certificate"
         return
     fi
     pem_normalized="$NORMALIZED_PATH"
@@ -1271,11 +1340,13 @@ effective '' mqtt_server.enabled; is_true "$REPLY" && MQTT_SERVER_ACTIVE=1 || MQ
 compact_section 'Certificate roles'
 section 'Server certificate roles'
 resolve_material '' core.server_cert.file.ca core.server_cert.data.ca; tb1_server_ca="$RESOLVED_PATH"; tb1_server_ca_display="$RESOLVED_DISPLAY"
+resolve_file_only '' core.server_cert.file.ca_der; tb1_server_ca_der="$RESOLVED_PATH"; tb1_server_ca_der_display="$RESOLVED_DISPLAY"
 resolve_material '' core.server_cert.file.crt core.server_cert.data.crt; tb1_server_crt="$RESOLVED_PATH"; tb1_server_crt_display="$RESOLVED_DISPLAY"
 resolve_material '' core.server_cert.file.key core.server_cert.data.key; tb1_server_key="$RESOLVED_PATH"; tb1_server_key_display="$RESOLVED_DISPLAY"
 check_cert_set server-tb1 'TB1 HTTPS server' "$TB1_SERVER_ACTIVE" LOCAL \
     "$tb1_server_ca" "$tb1_server_ca_display" "$tb1_server_crt" "$tb1_server_crt_display" \
-    "$tb1_server_key" "$tb1_server_key_display" server '' '' ''
+    "$tb1_server_key" "$tb1_server_key_display" server '' '' '' \
+    "$tb1_server_ca_der" "$tb1_server_ca_der_display"
 if [[ "${SET_COMPLETE[server-tb1]:-0}" == 1 ]]; then
     resolve_material '' core.server_cert.file.ca_key core.server_cert.data.ca_key
     normalize_cert "$tb1_server_ca" && check_ca_key_pair 'TB1 HTTPS server' "$TB1_SERVER_ACTIVE" "$NORMALIZED_PATH" "$RESOLVED_PATH" "$RESOLVED_DISPLAY"

@@ -99,7 +99,8 @@ configured set the doctor checks:
 - `CA:TRUE` on the CA and no CA role on a leaf;
 - current validity and an expiry warning within 30 days;
 - required DNS SANs for the configured TB2 HTTPS and ICI hostnames;
-- TB1/Boxine, TB2/TONIES or local TeddyCloud generation from the CA identity;
+- TB1/Boxine and TB2/TONIES client generation from the CA identity;
+- local server-role consistency independently of the private LAN CA's subject/CN;
 - a box CN in either `<12-hex>` or `b'<12-hex>'` form;
 - CN, overlay ID and per-box directory agreement where a per-box identity is used.
 
@@ -116,10 +117,21 @@ from the expected Boxine or TONIES generation, the doctor reports that missing
 intermediate as information instead of declaring the identity broken. A wrong
 generation, direct-signature failure or key mismatch remains an error.
 
-Some preserved TB1 server CAs use a legacy X.509 encoding rejected by current
-OpenSSL versions. The compact report marks this as a warning and never rewrites
-the certificate. `--verbose` shows the exact affected path. TeddyCloud's runtime
-use and a modern OpenSSL parse are separate facts in this case.
+Local TB1 and TB2 server CAs are not restricted to a subject-name whitelist.
+For a normally parseable server set, the doctor reports generation `LOCAL` and
+then evaluates CA constraints, keys, leaf signatures, validity and required TB2
+SANs independently. A familiar name such as `Teddy CA` is recognized throughout
+the inventory, but is not required for a valid private LAN server CA. This does
+not relax the separate Boxine and TONIES upstream-client generation checks.
+
+Some preserved TB1 server CAs contain a historical, non-minimal serial-number
+encoding rejected by current OpenSSL versions. The doctor accepts this only as
+a guarded `LOCAL (Legacy)` warning when the decoded PEM payload is byte-identical
+to `ca.der`, OpenSSL's ASN.1 inspection finds exactly that known serial defect,
+and the locally issued server leaf matches its private key. The warning states
+that modern OpenSSL could not verify the CA key or full certificate chain. Any
+other unreadable, structurally damaged or mismatched CA remains an error. The
+doctor never normalizes, rewrites or regenerates legacy material.
 
 ## Effective configuration
 
