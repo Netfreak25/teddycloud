@@ -3027,8 +3027,23 @@ void freshness_mark_content_mapping_changed(settings_t *target_settings,
 
     for (uint8_t overlay_id = 1; overlay_id < MAX_OVERLAYS; overlay_id++)
     {
-        freshness_mark_content_mapping_changed_for_overlay(get_settings_id(overlay_id), uid,
-                                                            source_changed, TRUE);
+        settings_t *overlay_settings = get_settings_id(overlay_id);
+        bool_t shares_content_root = target_settings != NULL &&
+                                     target_settings->internal.contentdirfull != NULL &&
+                                     overlay_settings != NULL &&
+                                     overlay_settings->internal.contentdirfull != NULL &&
+                                     !osStrcmp(target_settings->internal.contentdirfull,
+                                               overlay_settings->internal.contentdirfull);
+
+        /* A source saved in the global content directory applies to every TB2
+         * overlay using that directory. Waiting for a V3 inventory entry here
+         * loses the forced version and alwaysReset marker when a tag was not in
+         * the box's last freshness-check request. Metadata-only changes remain
+         * inventory-scoped. */
+        bool_t require_inventory = !source_changed || !shares_content_root;
+        freshness_mark_content_mapping_changed_for_overlay(overlay_settings, uid,
+                                                            source_changed,
+                                                            require_inventory);
     }
 }
 

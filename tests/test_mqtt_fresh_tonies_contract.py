@@ -160,11 +160,30 @@ class MqttFreshToniesContractTests(unittest.TestCase):
         self.assertIn("settings->toniebox.boxGeneration != GENERATION_TB2", freshness)
         self.assertIn("require_inventory || !source_changed", freshness)
         self.assertIn("source_changed, FALSE", freshness)
-        self.assertIn("source_changed, TRUE", freshness)
+        self.assertIn("source_changed,\n                                                            require_inventory", freshness)
         self.assertIn("inventory_available ? \"present\" : \"absent\"", freshness)
         self.assertIn(
             "freshness_mark_content_mapping_changed(client_ctx->settings, ruid, source_changed)",
             self.api,
+        )
+
+    def test_global_source_change_targets_tb2_overlays_sharing_content_root(self):
+        routing = self.cloud[
+            self.cloud.index("void freshness_mark_content_mapping_changed(") :
+            self.cloud.index("error_t handleCloudFreshnessCheck(")
+        ]
+        self.assertIn("shares_content_root", routing)
+        self.assertIn(
+            "!osStrcmp(target_settings->internal.contentdirfull,",
+            routing,
+        )
+        self.assertIn(
+            "bool_t require_inventory = !source_changed || !shares_content_root;",
+            routing,
+        )
+        self.assertIn(
+            "source_changed,\n                                                            require_inventory",
+            routing,
         )
 
     def test_followup_metadata_change_preserves_source_change_marker(self):
