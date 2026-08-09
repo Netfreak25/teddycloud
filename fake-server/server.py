@@ -24,8 +24,8 @@ def transfer_data(source_socket, destination_socket, log_file, initial_data=None
 def handle_connection(client_socket):
     # Upgrade the client socket to a secure socket
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-    context.load_cert_chain(certfile="certs/server/teddy-cert.pem", keyfile="certs/server/teddy-key.pem")
-    # context.load_verify_locations(cafile="certs/server/ca-root.pem")
+    context.load_cert_chain(certfile="certs/server_tb1/teddy-cert.pem", keyfile="certs/server_tb1/teddy-key.pem")
+    # context.load_verify_locations(cafile="certs/server_tb1/ca-root.pem")
     # context.verify_mode = ssl.CERT_REQUIRED
     secure_socket = context.wrap_socket(client_socket, server_side=True)
 
@@ -33,9 +33,9 @@ def handle_connection(client_socket):
     data = secure_socket.recv(1024)
     binary = is_binary_data(data)
 
-    client_cert_file = 'certs/client/client.pem'
-    private_key_file = 'certs/client/private.pem'
-    custom_ca_file = 'certs/client/ca.pem'
+    client_cert_file = 'certs/client_tb1/client.pem'
+    private_key_file = 'certs/client_tb1/private.pem'
+    custom_ca_file = 'certs/client_tb1/ca.pem'
 
     url = "prod.de.tbs.toys"
     log_file = "data_stream.http.log"

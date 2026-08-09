@@ -19,7 +19,7 @@ class Tb2MqttTlsBootstrapContractTests(unittest.TestCase):
         cls.mqtt = (ROOT / "src" / "mqtt_server.c").read_text(encoding="utf-8")
 
     def test_v21_migrates_only_exact_legacy_default_paths(self):
-        self.assertIn("#define CONFIG_VERSION 23", self.settings_header)
+        self.assertIn("#define CONFIG_VERSION 24", self.settings_header)
         self.assertIn(
             '#define MQTT_SERVER_LEGACY_CERT_PATH "certs/server/ici.pem"',
             self.settings,
@@ -38,28 +38,20 @@ class Tb2MqttTlsBootstrapContractTests(unittest.TestCase):
         self.assertIn('"mqtt_server.cert.key"', migration)
         self.assertIn("settings->configVersion < 21", self.settings)
 
-    def test_legacy_files_move_only_as_a_complete_verified_pair(self):
+    def test_legacy_files_copy_only_as_a_complete_verified_pair_before_backup(self):
         migration = self.settings[
-            self.settings.rindex("static void settings_migrate_legacy_mqtt_server_files") :
+            self.settings.rindex("static error_t settings_migrate_legacy_ici_pair") :
             self.settings.rindex("static void settings_changed")
         ]
-        self.assertIn(
-            "osStrcmp(settings->mqtt_server.cert_crt, MQTT_SERVER_CERT_PATH) != 0",
-            migration,
-        )
-        self.assertIn("!legacyCertExists || !legacyKeyExists", migration)
-        self.assertIn("fsFileExists(targetCert) || fsFileExists(targetKey)", migration)
-        cert_copy = migration.index("fsCopyFile(legacyCert, targetCert, FALSE)")
-        key_copy = migration.index("fsCopyFile(legacyKey, targetKey, FALSE)")
-        cert_verify = migration.index("fsCompareFiles(legacyCert, targetCert, NULL)")
-        key_verify = migration.index("fsCompareFiles(legacyKey, targetKey, NULL)")
-        cert_delete = migration.index("fsDeleteFile(legacyCert)")
-        key_delete = migration.index("fsDeleteFile(legacyKey)")
-        self.assertLess(cert_copy, key_copy)
-        self.assertLess(key_copy, cert_verify)
-        self.assertLess(cert_verify, key_verify)
-        self.assertLess(key_verify, cert_delete)
-        self.assertLess(cert_delete, key_delete)
+        self.assertIn("!sourceCertExists || !sourceKeyExists", migration)
+        self.assertIn("!targetCertExists || !targetKeyExists", migration)
+        self.assertIn("fsCopyFile(sourceCert, targetCert, FALSE)", migration)
+        self.assertIn("fsCopyFile(sourceKey, targetKey, FALSE)", migration)
+        self.assertIn("fsCompareFiles(sourceCert, targetCert, NULL)", migration)
+        self.assertIn("fsCompareFiles(sourceKey, targetKey, NULL)", migration)
+        self.assertIn("fsRenameFile(legacy, backup)", migration)
+        self.assertNotIn("fsDeleteFile(sourceCert)", migration)
+        self.assertNotIn("fsDeleteFile(sourceKey)", migration)
 
     def test_listener_returns_before_opening_socket_without_tls_material(self):
         init = self.mqtt[

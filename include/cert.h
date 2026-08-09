@@ -91,6 +91,21 @@ error_t cert_generate_signed(const char *subject, const uint8_t *serial_number, 
  */
 error_t cert_generate_default();
 error_t cert_generate_default_tb2();
+error_t cert_validate_server_files(const char *ca_cert_path,
+                                   const char *ca_der_path,
+                                   const char *ca_key_path,
+                                   const char *cert_path,
+                                   const char *key_path,
+                                   const char *dns_names[],
+                                   size_t dns_names_count,
+                                   bool_t require_server_auth,
+                                   char *message,
+                                   size_t message_size);
+error_t cert_validate_client_files(const char *ca_cert_path,
+                                   const char *cert_path,
+                                   const char *key_path,
+                                   char *message,
+                                   size_t message_size);
 bool_t cert_tb2_hostname_is_valid(const char *hostname, char *message, size_t message_size);
 error_t cert_tb2_reconcile_service(cert_tb2_service_t service,
                                    const char *reason,

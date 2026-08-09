@@ -74,26 +74,6 @@ static void hex_string_to_bytes(const char *hex_string, uint8_t *output)
     }
 }
 
-static bool_t cert_file_is_nonempty(const char *filename)
-{
-    if (filename == NULL || filename[0] == '\0')
-    {
-        return FALSE;
-    }
-
-    char *filename_full = osAllocMem(256);
-    if (filename_full == NULL)
-    {
-        return FALSE;
-    }
-
-    settings_resolve_dir(&filename_full, (char *)filename, get_settings()->internal.basedirfull);
-    FsFileStat stat;
-    bool_t present = fsGetFileStat(filename_full, &stat) == NO_ERROR && stat.size > 0;
-    osFreeMem(filename_full);
-    return present;
-}
-
 error_t cert_generate_rsa(int size, RsaPrivateKey *cert_privkey, RsaPublicKey *cert_pubkey)
 {
     TRACE_INFO("Generating RSA Key... (slow, very slow!!!)\r\n");
@@ -127,11 +107,9 @@ error_t cert_get_rsa_priv(RsaPrivateKey *cert_privkey, uint8_t **priv_data, size
     return NO_ERROR;
 }
 
-error_t cert_load_ca(X509CertInfo *cert, RsaPrivateKey *cert_priv)
+static error_t cert_load_ca_data(const char *server_ca, const char *server_key,
+                                 X509CertInfo *cert, RsaPrivateKey *cert_priv)
 {
-    const char *server_ca = settings_get_string("internal.server.ca");
-    const char *server_key = settings_get_string("internal.server.ca_key");
-
     size_t ca_size = 0;
     TRACE_INFO("Load CA certificate...\r\n");
     if (pemImportCertificate(server_ca, strlen(server_ca), NULL, &ca_size, NULL) != NO_ERROR)
@@ -170,7 +148,18 @@ error_t cert_load_ca(X509CertInfo *cert, RsaPrivateKey *cert_priv)
     return NO_ERROR;
 }
 
-error_t cert_generate_signed(const char *subject, const uint8_t *serial_number, int serial_number_size, size_t key_size, bool self_sign, bool cert_der_format, const char *cert_file, const char *priv_file)
+error_t cert_load_ca(X509CertInfo *cert, RsaPrivateKey *cert_priv)
+{
+    return cert_load_ca_data(settings_get_string("internal.server.ca"),
+                             settings_get_string("internal.server.ca_key"),
+                             cert, cert_priv);
+}
+
+static error_t cert_generate_signed_with_issuer(
+    const char *subject, const uint8_t *serial_number, int serial_number_size,
+    size_t key_size, bool self_sign, bool cert_der_format,
+    const char *cert_file, const char *priv_file,
+    const char *issuer_cert_file, const char *issuer_key_file)
 {
     /* load server CA certificate */
     X509CertInfo issuer_cert;
@@ -178,7 +167,33 @@ error_t cert_generate_signed(const char *subject, const uint8_t *serial_number, 
 
     if (!self_sign)
     {
-        if (cert_load_ca(&issuer_cert, &issuer_priv) != NO_ERROR)
+        char *issuer_cert_data = NULL;
+        char *issuer_key_data = NULL;
+        size_t issuer_cert_size = 0;
+        size_t issuer_key_size = 0;
+        error_t issuer_error = NO_ERROR;
+        if (issuer_cert_file != NULL && issuer_key_file != NULL)
+        {
+            issuer_error = read_certificate(issuer_cert_file, &issuer_cert_data,
+                                            &issuer_cert_size);
+            if (issuer_error == NO_ERROR)
+            {
+                issuer_error = read_certificate(issuer_key_file, &issuer_key_data,
+                                                &issuer_key_size);
+            }
+            if (issuer_error == NO_ERROR)
+            {
+                issuer_error = cert_load_ca_data(issuer_cert_data, issuer_key_data,
+                                                 &issuer_cert, &issuer_priv);
+            }
+        }
+        else
+        {
+            issuer_error = cert_load_ca(&issuer_cert, &issuer_priv);
+        }
+        osFreeMem(issuer_cert_data);
+        osFreeMem(issuer_key_data);
+        if (issuer_error != NO_ERROR)
         {
             TRACE_ERROR("cert_load_ca failed\r\n");
             return ERROR_FAILURE;
@@ -380,6 +395,17 @@ error_t cert_generate_signed(const char *subject, const uint8_t *serial_number, 
     return NO_ERROR;
 }
 
+error_t cert_generate_signed(const char *subject, const uint8_t *serial_number,
+                             int serial_number_size, size_t key_size, bool self_sign,
+                             bool cert_der_format, const char *cert_file,
+                             const char *priv_file)
+{
+    return cert_generate_signed_with_issuer(subject, serial_number,
+                                            serial_number_size, key_size,
+                                            self_sign, cert_der_format,
+                                            cert_file, priv_file, NULL, NULL);
+}
+
 error_t cert_generate_mac(const char *mac, const char *dest)
 {
     if (!dest || osStrlen(mac) != 12)
@@ -509,63 +535,233 @@ error_t convert_PEM_to_DER(const char *pem_data, const char *der_target_file)
     return NO_ERROR;
 }
 
+static char *cert_resolve_configured_path(const char *setting)
+{
+    const char *configured = settings_get_string(setting);
+    char *resolved = osAllocMem(TB2_CERT_PATH_SIZE);
+    if (resolved == NULL)
+        return NULL;
+    resolved[0] = '\0';
+    settings_resolve_dir(&resolved, (char *)configured,
+                         get_settings()->internal.basedirfull);
+    return resolved;
+}
+
+static bool_t cert_path_is_nonempty(const char *path)
+{
+    FsFileStat stat;
+    return path != NULL && fsGetFileStat(path, &stat) == NO_ERROR && stat.size > 0;
+}
+
+static error_t cert_prepare_parent(const char *path)
+{
+    char parent[TB2_CERT_PATH_SIZE];
+    osSnprintf(parent, sizeof(parent), "%s", path);
+    fsRemoveFilename(parent);
+    error_t error = fsCreateDirEx(parent, TRUE);
+    return error == NO_ERROR || fsDirExists(parent) ? NO_ERROR : error;
+}
+
+static error_t cert_publish_new_file(const char *temporary, const char *target,
+                                     bool_t *published)
+{
+    if (!cert_path_is_nonempty(temporary) || fsFileExists(target))
+        return ERROR_ABORTED;
+    error_t error = fsMoveFile(temporary, target, FALSE);
+    if (error == NO_ERROR)
+        *published = TRUE;
+    return error;
+}
+
 error_t cert_generate_default()
 {
-    const char *cacert = settings_get_string("core.server_cert.file.ca");
-    const char *cacert_key = settings_get_string("core.server_cert.file.ca_key");
+    char *ca = cert_resolve_configured_path("core.server_cert.file.ca");
+    char *caDer = cert_resolve_configured_path("core.server_cert.file.ca_der");
+    char *caKey = cert_resolve_configured_path("core.server_cert.file.ca_key");
+    char *leaf = cert_resolve_configured_path("core.server_cert.file.crt");
+    char *leafKey = cert_resolve_configured_path("core.server_cert.file.key");
+    if (ca == NULL || caDer == NULL || caKey == NULL || leaf == NULL || leafKey == NULL)
+    {
+        osFreeMem(ca);
+        osFreeMem(caDer);
+        osFreeMem(caKey);
+        osFreeMem(leaf);
+        osFreeMem(leafKey);
+        return ERROR_OUT_OF_MEMORY;
+    }
+
+    bool_t caExists = cert_path_is_nonempty(ca);
+    bool_t caKeyExists = cert_path_is_nonempty(caKey);
+    bool_t caDerExists = cert_path_is_nonempty(caDer);
+    bool_t leafExists = cert_path_is_nonempty(leaf);
+    bool_t leafKeyExists = cert_path_is_nonempty(leafKey);
+    TRACE_INFO("TB1 certificate initialization paths ca='%s' ca_der='%s' ca_key='%s' cert='%s' key='%s'\r\n",
+               ca, caDer, caKey, leaf, leafKey);
+
+    error_t error = NO_ERROR;
+    if (caExists != caKeyExists)
+    {
+        TRACE_ERROR("TB1 certificate set is unsafe: CA certificate/key pair is incomplete; no files changed\r\n");
+        error = ERROR_ABORTED;
+        goto cleanup;
+    }
+    if (leafExists != leafKeyExists)
+    {
+        TRACE_ERROR("TB1 certificate set is unsafe: server certificate/key pair is incomplete; no files changed\r\n");
+        error = ERROR_ABORTED;
+        goto cleanup;
+    }
+    if (!caExists && (caDerExists || leafExists || leafKeyExists))
+    {
+        TRACE_ERROR("TB1 certificate set is unsafe: dependent files exist without a complete CA pair; no files changed\r\n");
+        error = ERROR_ABORTED;
+        goto cleanup;
+    }
+
+    char *caNew = custom_asprintf("%s.new", ca);
+    char *caDerNew = custom_asprintf("%s.new", caDer);
+    char *caKeyNew = custom_asprintf("%s.new", caKey);
+    char *leafNew = custom_asprintf("%s.new", leaf);
+    char *leafKeyNew = custom_asprintf("%s.new", leafKey);
+    if (caNew == NULL || caDerNew == NULL || caKeyNew == NULL ||
+        leafNew == NULL || leafKeyNew == NULL)
+    {
+        error = ERROR_OUT_OF_MEMORY;
+        osFreeMem(caNew);
+        osFreeMem(caDerNew);
+        osFreeMem(caKeyNew);
+        osFreeMem(leafNew);
+        osFreeMem(leafKeyNew);
+        goto cleanup;
+    }
+
+    fsDeleteFile(caNew);
+    fsDeleteFile(caDerNew);
+    fsDeleteFile(caKeyNew);
+    fsDeleteFile(leafNew);
+    fsDeleteFile(leafKeyNew);
+    error = cert_prepare_parent(ca);
+    if (error != NO_ERROR)
+        goto staged_cleanup;
+
     uint8_t serial[14];
-    size_t serial_length = 14;
-
-    error_t error_ca = load_cert("internal.server.ca", "core.server_cert.file.ca", "core.server_cert.data.ca", 0);
-    error_t error_ca_key = load_cert("internal.server.ca_key", "core.server_cert.file.ca_key", "core.server_cert.data.ca_key", 0);
-
-    if (error_ca != NO_ERROR || error_ca_key != NO_ERROR)
+    size_t serialLength = sizeof(serial);
+    if (!caExists)
     {
-        cert_generate_serial(serial, &serial_length);
-
-        TRACE_INFO("Generating CA certificate...\r\n");
-        if (cert_generate_signed("TeddyCloud CA Root Cert.", serial, serial_length, CA_RSA_SIZE, true, false, cacert, cacert_key) != NO_ERROR)
-        {
-            TRACE_ERROR("cert_generate_signed failed\r\n");
-            return ERROR_FAILURE;
-        }
-    }
-    else
-    {
-        TRACE_INFO("CA certificates already there, skipping generation!\r\n");
+        cert_generate_serial(serial, &serialLength);
+        TRACE_INFO("Generating missing TB1 CA pair in staging\r\n");
+        error = cert_generate_signed("TeddyCloud CA Root Cert.", serial,
+                                     serialLength, CA_RSA_SIZE, true, false,
+                                     caNew, caKeyNew);
+        if (error != NO_ERROR)
+            goto staged_cleanup;
     }
 
-    /* reload certs to reload the CA cert again */
-    settings_try_load_certs_id(0);
-
-    /* generate ca.der */
-    const char *cacert_data = settings_get_string("internal.server.ca");
-    const char *cacert_der = settings_get_string("core.server_cert.file.ca_der");
-
-    char *cacert_der_full = osAllocMem(256);
-    settings_resolve_dir(&cacert_der_full, (char *)cacert_der, get_settings()->internal.basedirfull);
-    if (convert_PEM_to_DER(cacert_data, cacert_der_full) != NO_ERROR)
+    const char *effectiveCa = caExists ? ca : caNew;
+    const char *effectiveCaKey = caKeyExists ? caKey : caKeyNew;
+    if (!caDerExists)
     {
-        TRACE_ERROR("ca.pem to ca.der conversion failed\r\n");
-        free(cacert_der_full);
-        return ERROR_FAILURE;
-    }
-    free(cacert_der_full);
-
-    const char *server_cert = settings_get_string("core.server_cert.file.crt");
-    const char *server_key = settings_get_string("core.server_cert.file.key");
-
-    cert_generate_serial(serial, &serial_length);
-
-    TRACE_INFO("Generating Server certificate...\r\n");
-    if (cert_generate_signed("TeddyCloud Server", serial, serial_length, CERT_RSA_SIZE, false, false, server_cert, server_key) != NO_ERROR)
-    {
-        TRACE_ERROR("cert_generate_signed failed\r\n");
-        return ERROR_FAILURE;
+        char *caData = NULL;
+        size_t caDataLength = 0;
+        error = read_certificate(effectiveCa, &caData, &caDataLength);
+        if (error == NO_ERROR)
+            error = convert_PEM_to_DER(caData, caDerNew);
+        osFreeMem(caData);
+        if (error != NO_ERROR)
+            goto staged_cleanup;
     }
 
-    /* reload certs to reload the other certs */
-    return settings_try_load_certs_id(0);
+    if (!leafExists)
+    {
+        serialLength = sizeof(serial);
+        cert_generate_serial(serial, &serialLength);
+        TRACE_INFO("Generating missing TB1 server certificate pair in staging\r\n");
+        error = cert_generate_signed_with_issuer(
+            "TeddyCloud Server", serial, serialLength, CERT_RSA_SIZE,
+            false, false, leafNew, leafKeyNew, effectiveCa, effectiveCaKey);
+        if (error != NO_ERROR)
+            goto staged_cleanup;
+    }
+
+    const char *effectiveCaDer = caDerExists ? caDer : caDerNew;
+    const char *effectiveLeaf = leafExists ? leaf : leafNew;
+    const char *effectiveLeafKey = leafKeyExists ? leafKey : leafKeyNew;
+    char validation[192];
+    error = cert_validate_server_files(effectiveCa, effectiveCaDer, effectiveCaKey,
+                                       effectiveLeaf, effectiveLeafKey,
+                                       NULL, 0, FALSE, validation,
+                                       sizeof(validation));
+    if (error != NO_ERROR)
+    {
+        TRACE_ERROR("TB1 certificate staging validation failed: %s; no files changed\r\n",
+                    validation);
+        goto staged_cleanup;
+    }
+
+    bool_t publishedCa = FALSE;
+    bool_t publishedCaKey = FALSE;
+    bool_t publishedCaDer = FALSE;
+    bool_t publishedLeaf = FALSE;
+    bool_t publishedLeafKey = FALSE;
+    if (!caExists)
+        error = cert_publish_new_file(caNew, ca, &publishedCa);
+    if (error == NO_ERROR && !caKeyExists)
+        error = cert_publish_new_file(caKeyNew, caKey, &publishedCaKey);
+    if (error == NO_ERROR && !caDerExists)
+        error = cert_publish_new_file(caDerNew, caDer, &publishedCaDer);
+    if (error == NO_ERROR && !leafExists)
+        error = cert_publish_new_file(leafNew, leaf, &publishedLeaf);
+    if (error == NO_ERROR && !leafKeyExists)
+        error = cert_publish_new_file(leafKeyNew, leafKey, &publishedLeafKey);
+    if (error != NO_ERROR)
+    {
+        if (publishedLeafKey) fsDeleteFile(leafKey);
+        if (publishedLeaf) fsDeleteFile(leaf);
+        if (publishedCaDer) fsDeleteFile(caDer);
+        if (publishedCaKey) fsDeleteFile(caKey);
+        if (publishedCa) fsDeleteFile(ca);
+        TRACE_ERROR("TB1 certificate publication failed and newly published files were rolled back: %s\r\n",
+                    error2text(error));
+        goto staged_cleanup;
+    }
+
+    error = cert_validate_server_files(ca, caDer, caKey, leaf, leafKey,
+                                       NULL, 0, FALSE, validation,
+                                       sizeof(validation));
+    if (error != NO_ERROR)
+    {
+        if (publishedLeafKey) fsDeleteFile(leafKey);
+        if (publishedLeaf) fsDeleteFile(leaf);
+        if (publishedCaDer) fsDeleteFile(caDer);
+        if (publishedCaKey) fsDeleteFile(caKey);
+        if (publishedCa) fsDeleteFile(ca);
+        TRACE_ERROR("TB1 certificate final validation failed and newly published files were rolled back: %s\r\n",
+                    validation);
+        goto staged_cleanup;
+    }
+
+    TRACE_INFO("TB1 certificate set is complete and valid; existing files were preserved\r\n");
+    error = settings_try_load_certs_id(0);
+
+staged_cleanup:
+    fsDeleteFile(caNew);
+    fsDeleteFile(caDerNew);
+    fsDeleteFile(caKeyNew);
+    fsDeleteFile(leafNew);
+    fsDeleteFile(leafKeyNew);
+    osFreeMem(caNew);
+    osFreeMem(caDerNew);
+    osFreeMem(caKeyNew);
+    osFreeMem(leafNew);
+    osFreeMem(leafKeyNew);
+
+cleanup:
+    osFreeMem(ca);
+    osFreeMem(caDer);
+    osFreeMem(caKey);
+    osFreeMem(leaf);
+    osFreeMem(leafKey);
+    return error;
 }
 
 error_t x509ExportEcPrivateKey(const EcCurveInfo *curveInfo,
@@ -663,11 +859,10 @@ error_t x509ExportEcPrivateKey(const EcCurveInfo *curveInfo,
    return NO_ERROR;
 }
 
-error_t cert_load_ca_ec(const char *ca_cert_setting, const char *ca_key_setting, X509CertInfo *cert, EcPrivateKey *cert_priv, uint8_t **server_ca_der_out)
+static error_t cert_load_ca_ec_data(const char *server_ca, const char *server_key,
+                                    X509CertInfo *cert, EcPrivateKey *cert_priv,
+                                    uint8_t **server_ca_der_out)
 {
-    const char *server_ca = settings_get_string(ca_cert_setting);
-    const char *server_key = settings_get_string(ca_key_setting);
-
     if (!server_ca || !server_key)
     {
         TRACE_ERROR("CA certificate or key setting not found\r\n");
@@ -718,7 +913,16 @@ error_t cert_load_ca_ec(const char *ca_cert_setting, const char *ca_key_setting,
     return NO_ERROR;
 }
 
-error_t cert_generate_signed_ec(
+error_t cert_load_ca_ec(const char *ca_cert_setting, const char *ca_key_setting,
+                        X509CertInfo *cert, EcPrivateKey *cert_priv,
+                        uint8_t **server_ca_der_out)
+{
+    return cert_load_ca_ec_data(settings_get_string(ca_cert_setting),
+                                settings_get_string(ca_key_setting), cert,
+                                cert_priv, server_ca_der_out);
+}
+
+static error_t cert_generate_signed_ec_internal(
     const char *subject,
     const uint8_t *serial_number,
     int serial_number_size,
@@ -729,7 +933,9 @@ error_t cert_generate_signed_ec(
     const char *ca_cert_setting,
     const char *ca_key_setting,
     const char *dns_names[],
-    size_t dns_names_count
+    size_t dns_names_count,
+    const char *issuer_cert_file,
+    const char *issuer_key_file
 ) {
     /* load server CA certificate */
     X509CertInfo issuer_cert;
@@ -741,7 +947,37 @@ error_t cert_generate_signed_ec(
     uint8_t *server_ca_der = NULL;
     if (!self_sign)
     {
-        if (cert_load_ca_ec(ca_cert_setting, ca_key_setting, &issuer_cert, &issuer_priv, &server_ca_der) != NO_ERROR)
+        char *issuer_cert_data = NULL;
+        char *issuer_key_data = NULL;
+        size_t issuer_cert_size = 0;
+        size_t issuer_key_size = 0;
+        error_t issuer_error = NO_ERROR;
+        if (issuer_cert_file != NULL && issuer_key_file != NULL)
+        {
+            issuer_error = read_certificate(issuer_cert_file, &issuer_cert_data,
+                                            &issuer_cert_size);
+            if (issuer_error == NO_ERROR)
+            {
+                issuer_error = read_certificate(issuer_key_file, &issuer_key_data,
+                                                &issuer_key_size);
+            }
+            if (issuer_error == NO_ERROR)
+            {
+                issuer_error = cert_load_ca_ec_data(issuer_cert_data,
+                                                    issuer_key_data,
+                                                    &issuer_cert, &issuer_priv,
+                                                    &server_ca_der);
+            }
+        }
+        else
+        {
+            issuer_error = cert_load_ca_ec(ca_cert_setting, ca_key_setting,
+                                           &issuer_cert, &issuer_priv,
+                                           &server_ca_der);
+        }
+        osFreeMem(issuer_cert_data);
+        osFreeMem(issuer_key_data);
+        if (issuer_error != NO_ERROR)
         {
             TRACE_ERROR("cert_load_ca_ec failed\r\n");
             ecFreePrivateKey(&issuer_priv);
@@ -1065,6 +1301,25 @@ error_t cert_generate_signed_ec(
     osFreeMem(cert_pem_data);
 
     return NO_ERROR;
+}
+
+error_t cert_generate_signed_ec(
+    const char *subject,
+    const uint8_t *serial_number,
+    int serial_number_size,
+    bool self_sign,
+    bool cert_der_format,
+    const char *cert_file,
+    const char *priv_file,
+    const char *ca_cert_setting,
+    const char *ca_key_setting,
+    const char *dns_names[],
+    size_t dns_names_count)
+{
+    return cert_generate_signed_ec_internal(
+        subject, serial_number, serial_number_size, self_sign, cert_der_format,
+        cert_file, priv_file, ca_cert_setting, ca_key_setting, dns_names,
+        dns_names_count, NULL, NULL);
 }
 
 typedef struct
@@ -1398,6 +1653,145 @@ static error_t cert_tb2_validate_pair(const char *cert_path, const char *key_pat
     return error;
 }
 
+error_t cert_validate_server_files(const char *ca_cert_path,
+                                   const char *ca_der_path,
+                                   const char *ca_key_path,
+                                   const char *cert_path,
+                                   const char *key_path,
+                                   const char *dns_names[],
+                                   size_t dns_names_count,
+                                   bool_t require_server_auth,
+                                   char *message,
+                                   size_t message_size)
+{
+    cert_loaded_x509_t ca;
+    cert_loaded_x509_t ca_der;
+    cert_loaded_x509_t leaf;
+    error_t error = cert_load_x509_file(ca_cert_path, &ca);
+    if (error != NO_ERROR)
+    {
+        osSnprintf(message, message_size, "CA certificate is missing or unreadable");
+        return error;
+    }
+    error = cert_load_x509_file(ca_der_path, &ca_der);
+    if (error != NO_ERROR)
+    {
+        osSnprintf(message, message_size, "CA DER certificate is missing or unreadable");
+        cert_loaded_x509_free(&ca);
+        return error;
+    }
+    error = cert_load_x509_file(cert_path, &leaf);
+    if (error != NO_ERROR)
+    {
+        osSnprintf(message, message_size, "server certificate is missing or unreadable");
+        cert_loaded_x509_free(&ca_der);
+        cert_loaded_x509_free(&ca);
+        return error;
+    }
+
+    if (ca.der_size != ca_der.der_size ||
+        osMemcmp(ca.der, ca_der.der, ca.der_size) != 0)
+    {
+        osSnprintf(message, message_size, "CA PEM and DER certificates differ");
+        error = ERROR_FAILURE;
+    }
+    else if (!ca.info.tbsCert.extensions.basicConstraints.cA)
+    {
+        osSnprintf(message, message_size, "CA certificate is not marked as a CA");
+        error = ERROR_FAILURE;
+    }
+    else if (!cert_key_matches(&ca.info, ca_key_path))
+    {
+        osSnprintf(message, message_size, "CA certificate and private key do not match");
+        error = ERROR_FAILURE;
+    }
+    else if (!cert_key_matches(&leaf.info, key_path))
+    {
+        osSnprintf(message, message_size, "server certificate and private key do not match");
+        error = ERROR_FAILURE;
+    }
+    else if (x509ValidateCertificate(&leaf.info, &ca.info, 0) != NO_ERROR)
+    {
+        osSnprintf(message, message_size, "server certificate is not signed by the configured CA");
+        error = ERROR_FAILURE;
+    }
+    else if (leaf.info.tbsCert.extensions.basicConstraints.cA)
+    {
+        osSnprintf(message, message_size, "server certificate is marked as a CA");
+        error = ERROR_FAILURE;
+    }
+    else if (require_server_auth &&
+             (leaf.info.tbsCert.extensions.extKeyUsage.bitmap &
+              X509_EXT_KEY_USAGE_SERVER_AUTH) == 0)
+    {
+        osSnprintf(message, message_size, "server certificate lacks serverAuth");
+        error = ERROR_FAILURE;
+    }
+    else if (dns_names_count > 0 &&
+             !cert_has_exact_dns_names(&leaf.info, dns_names, dns_names_count))
+    {
+        osSnprintf(message, message_size, "server certificate SANs do not match");
+        error = ERROR_FAILURE;
+    }
+    else
+    {
+        osSnprintf(message, message_size, "certificate set is valid");
+        error = NO_ERROR;
+    }
+
+    cert_loaded_x509_free(&leaf);
+    cert_loaded_x509_free(&ca_der);
+    cert_loaded_x509_free(&ca);
+    return error;
+}
+
+error_t cert_validate_client_files(const char *ca_cert_path,
+                                   const char *cert_path,
+                                   const char *key_path,
+                                   char *message,
+                                   size_t message_size)
+{
+    cert_loaded_x509_t ca;
+    cert_loaded_x509_t leaf;
+    error_t error = cert_load_x509_file(ca_cert_path, &ca);
+    if (error != NO_ERROR)
+    {
+        osSnprintf(message, message_size, "client CA is missing or unreadable");
+        return error;
+    }
+    error = cert_load_x509_file(cert_path, &leaf);
+    if (error != NO_ERROR)
+    {
+        osSnprintf(message, message_size, "client certificate is missing or unreadable");
+        cert_loaded_x509_free(&ca);
+        return error;
+    }
+
+    if (!cert_key_matches(&leaf.info, key_path))
+    {
+        osSnprintf(message, message_size, "client certificate and private key do not match");
+        error = ERROR_FAILURE;
+    }
+    else if (x509ValidateCertificate(&leaf.info, &ca.info, 0) != NO_ERROR)
+    {
+        osSnprintf(message, message_size, "client certificate is not signed by its CA");
+        error = ERROR_FAILURE;
+    }
+    else if (leaf.info.tbsCert.extensions.basicConstraints.cA)
+    {
+        osSnprintf(message, message_size, "client certificate is marked as a CA");
+        error = ERROR_FAILURE;
+    }
+    else
+    {
+        osSnprintf(message, message_size, "client certificate set is valid");
+        error = NO_ERROR;
+    }
+    cert_loaded_x509_free(&leaf);
+    cert_loaded_x509_free(&ca);
+    return error;
+}
+
 static error_t cert_tb2_write_archive(cert_tb2_service_t service,
                                       const char *cert_path, const char *key_path,
                                       const char *reason, const char *old_hostname,
@@ -1671,60 +2065,200 @@ error_t cert_tb2_reconcile_all(const char *reason)
 
 error_t cert_generate_default_tb2()
 {
-    const char *cacert = settings_get_string("core.server_cert_tb2.file.ca");
-    const char *cacert_key = settings_get_string("core.server_cert_tb2.file.ca_key");
+    char *ca = cert_resolve_configured_path("core.server_cert_tb2.file.ca");
+    char *caDer = cert_resolve_configured_path("core.server_cert_tb2.file.ca_der");
+    char *caKey = cert_resolve_configured_path("core.server_cert_tb2.file.ca_key");
+    char *httpsCert = cert_resolve_configured_path("core.server_cert_tb2.file.crt");
+    char *httpsKey = cert_resolve_configured_path("core.server_cert_tb2.file.key");
+    char *mqttCert = cert_resolve_configured_path("mqtt_server.cert.crt");
+    char *mqttKey = cert_resolve_configured_path("mqtt_server.cert.key");
+    if (ca == NULL || caDer == NULL || caKey == NULL || httpsCert == NULL ||
+        httpsKey == NULL || mqttCert == NULL || mqttKey == NULL)
+    {
+        osFreeMem(ca); osFreeMem(caDer); osFreeMem(caKey);
+        osFreeMem(httpsCert); osFreeMem(httpsKey);
+        osFreeMem(mqttCert); osFreeMem(mqttKey);
+        return ERROR_OUT_OF_MEMORY;
+    }
+
+    bool_t caExists = cert_path_is_nonempty(ca);
+    bool_t caKeyExists = cert_path_is_nonempty(caKey);
+    bool_t caDerExists = cert_path_is_nonempty(caDer);
+    bool_t httpsCertExists = cert_path_is_nonempty(httpsCert);
+    bool_t httpsKeyExists = cert_path_is_nonempty(httpsKey);
+    bool_t mqttCertExists = cert_path_is_nonempty(mqttCert);
+    bool_t mqttKeyExists = cert_path_is_nonempty(mqttKey);
+    TRACE_INFO("TB2 certificate initialization paths ca='%s' ca_der='%s' ca_key='%s' https_cert='%s' https_key='%s' mqtt_cert='%s' mqtt_key='%s'\r\n",
+               ca, caDer, caKey, httpsCert, httpsKey, mqttCert, mqttKey);
+
+    error_t error = NO_ERROR;
+    if (caExists != caKeyExists || httpsCertExists != httpsKeyExists ||
+        mqttCertExists != mqttKeyExists)
+    {
+        TRACE_ERROR("TB2 certificate set contains an incomplete certificate/key pair; no files changed\r\n");
+        error = ERROR_ABORTED;
+        goto cleanup;
+    }
+    if (!caExists && (caDerExists || httpsCertExists || mqttCertExists))
+    {
+        TRACE_ERROR("TB2 certificate set contains dependent files without a complete CA pair; no files changed\r\n");
+        error = ERROR_ABORTED;
+        goto cleanup;
+    }
+
+    char *caNew = custom_asprintf("%s.new", ca);
+    char *caDerNew = custom_asprintf("%s.new", caDer);
+    char *caKeyNew = custom_asprintf("%s.new", caKey);
+    char *httpsCertNew = custom_asprintf("%s.new", httpsCert);
+    char *httpsKeyNew = custom_asprintf("%s.new", httpsKey);
+    char *mqttCertNew = custom_asprintf("%s.new", mqttCert);
+    char *mqttKeyNew = custom_asprintf("%s.new", mqttKey);
+    if (caNew == NULL || caDerNew == NULL || caKeyNew == NULL ||
+        httpsCertNew == NULL || httpsKeyNew == NULL ||
+        mqttCertNew == NULL || mqttKeyNew == NULL)
+    {
+        error = ERROR_OUT_OF_MEMORY;
+        goto staged_cleanup;
+    }
+    fsDeleteFile(caNew); fsDeleteFile(caDerNew); fsDeleteFile(caKeyNew);
+    fsDeleteFile(httpsCertNew); fsDeleteFile(httpsKeyNew);
+    fsDeleteFile(mqttCertNew); fsDeleteFile(mqttKeyNew);
+    error = cert_prepare_parent(ca);
+    if (error != NO_ERROR)
+        goto staged_cleanup;
+
     uint8_t serial[14];
-    size_t serial_length = 14;
-
-    error_t error_ca = load_cert("internal.server_tb2.ca", "core.server_cert_tb2.file.ca", "core.server_cert_tb2.data.ca", 0);
-    error_t error_ca_key = load_cert("internal.server_tb2.ca_key", "core.server_cert_tb2.file.ca_key", "core.server_cert_tb2.data.ca_key", 0);
-
-    if (error_ca != NO_ERROR || error_ca_key != NO_ERROR)
+    size_t serialLength = sizeof(serial);
+    if (!caExists)
     {
-        cert_generate_serial(serial, &serial_length);
-
-        TRACE_INFO("Generating TB2 CA certificate...\r\n");
-        if (cert_generate_signed_ec("TeddyCloud Root CA", serial, serial_length, true, false, cacert, cacert_key, NULL, NULL, NULL, 0) != NO_ERROR)
-        {
-            TRACE_ERROR("cert_generate_signed_ec failed for CA\r\n");
-            return ERROR_FAILURE;
-        }
-    }
-    else
-    {
-        TRACE_INFO("TB2 CA certificates already there, skipping generation!\r\n");
+        cert_generate_serial(serial, &serialLength);
+        error = cert_generate_signed_ec("TeddyCloud Root CA", serial,
+                                        serialLength, true, false,
+                                        caNew, caKeyNew, NULL, NULL, NULL, 0);
+        if (error != NO_ERROR)
+            goto staged_cleanup;
     }
 
-    /* reload certs to reload the CA cert again */
-    settings_try_load_certs_id(0);
-
-    /* Generate ca.der only when it is absent; never rewrite existing TB2 material. */
-    const char *cacert_data = settings_get_string("internal.server_tb2.ca");
-    const char *cacert_der = settings_get_string("core.server_cert_tb2.file.ca_der");
-
-    if (!cert_file_is_nonempty(cacert_der))
+    const char *effectiveCa = caExists ? ca : caNew;
+    const char *effectiveCaKey = caKeyExists ? caKey : caKeyNew;
+    if (!caDerExists)
     {
-        char *cacert_der_full = osAllocMem(256);
-        settings_resolve_dir(&cacert_der_full, (char *)cacert_der, get_settings()->internal.basedirfull);
-        if (convert_PEM_to_DER(cacert_data, cacert_der_full) != NO_ERROR)
-        {
-            TRACE_ERROR("TB2 ca.pem to ca.der conversion failed\r\n");
-            osFreeMem(cacert_der_full);
-            return ERROR_FAILURE;
-        }
-        osFreeMem(cacert_der_full);
-    }
-    else
-    {
-        TRACE_INFO("TB2 CA DER certificate already there, skipping generation!\r\n");
+        char *caData = NULL;
+        size_t caDataLength = 0;
+        error = read_certificate(effectiveCa, &caData, &caDataLength);
+        if (error == NO_ERROR)
+            error = convert_PEM_to_DER(caData, caDerNew);
+        osFreeMem(caData);
+        if (error != NO_ERROR)
+            goto staged_cleanup;
     }
 
-    error_t reconcile_error = cert_tb2_reconcile_all("certificate initialization");
-    if (reconcile_error != NO_ERROR)
-        return reconcile_error;
+    const char *httpsNames[X509_MAX_SUBJECT_ALT_NAMES];
+    size_t httpsNameCount = cert_tb2_dns_names(
+        CERT_TB2_SERVICE_HTTPS, get_settings()->core.server_cert_tb2_hostname,
+        httpsNames, X509_MAX_SUBJECT_ALT_NAMES);
+    const char *mqttNames[X509_MAX_SUBJECT_ALT_NAMES];
+    size_t mqttNameCount = cert_tb2_dns_names(
+        CERT_TB2_SERVICE_MQTT, get_settings()->mqtt_server.hostname,
+        mqttNames, X509_MAX_SUBJECT_ALT_NAMES);
+    if (!httpsCertExists)
+    {
+        serialLength = sizeof(serial);
+        cert_generate_serial(serial, &serialLength);
+        error = cert_generate_signed_ec_internal(
+            get_settings()->core.server_cert_tb2_hostname, serial, serialLength,
+            false, false, httpsCertNew, httpsKeyNew, NULL, NULL,
+            httpsNames, httpsNameCount, effectiveCa, effectiveCaKey);
+        if (error != NO_ERROR)
+            goto staged_cleanup;
+    }
+    if (!mqttCertExists)
+    {
+        serialLength = sizeof(serial);
+        cert_generate_serial(serial, &serialLength);
+        error = cert_generate_signed_ec_internal(
+            get_settings()->mqtt_server.hostname, serial, serialLength,
+            false, false, mqttCertNew, mqttKeyNew, NULL, NULL,
+            mqttNames, mqttNameCount, effectiveCa, effectiveCaKey);
+        if (error != NO_ERROR)
+            goto staged_cleanup;
+    }
 
-    /* Reload the complete certificate settings after any leaf rebuild. */
-    return settings_try_load_certs_id(0);
+    const char *effectiveCaDer = caDerExists ? caDer : caDerNew;
+    const char *effectiveHttpsCert = httpsCertExists ? httpsCert : httpsCertNew;
+    const char *effectiveHttpsKey = httpsKeyExists ? httpsKey : httpsKeyNew;
+    const char *effectiveMqttCert = mqttCertExists ? mqttCert : mqttCertNew;
+    const char *effectiveMqttKey = mqttKeyExists ? mqttKey : mqttKeyNew;
+    char validation[192];
+    error = cert_validate_server_files(effectiveCa, effectiveCaDer, effectiveCaKey,
+                                       effectiveHttpsCert, effectiveHttpsKey,
+                                       httpsNames, httpsNameCount, TRUE,
+                                       validation, sizeof(validation));
+    if (error == NO_ERROR)
+    {
+        error = cert_validate_server_files(effectiveCa, effectiveCaDer,
+                                           effectiveCaKey, effectiveMqttCert,
+                                           effectiveMqttKey, mqttNames,
+                                           mqttNameCount, TRUE, validation,
+                                           sizeof(validation));
+    }
+    if (error != NO_ERROR)
+    {
+        TRACE_ERROR("TB2 certificate staging validation failed: %s; no files changed\r\n",
+                    validation);
+        goto staged_cleanup;
+    }
+
+    bool_t publishedCa = FALSE, publishedCaDer = FALSE, publishedCaKey = FALSE;
+    bool_t publishedHttpsCert = FALSE, publishedHttpsKey = FALSE;
+    bool_t publishedMqttCert = FALSE, publishedMqttKey = FALSE;
+    if (!caExists) error = cert_publish_new_file(caNew, ca, &publishedCa);
+    if (error == NO_ERROR && !caKeyExists)
+        error = cert_publish_new_file(caKeyNew, caKey, &publishedCaKey);
+    if (error == NO_ERROR && !caDerExists)
+        error = cert_publish_new_file(caDerNew, caDer, &publishedCaDer);
+    if (error == NO_ERROR && !httpsCertExists)
+        error = cert_publish_new_file(httpsCertNew, httpsCert, &publishedHttpsCert);
+    if (error == NO_ERROR && !httpsKeyExists)
+        error = cert_publish_new_file(httpsKeyNew, httpsKey, &publishedHttpsKey);
+    if (error == NO_ERROR && !mqttCertExists)
+        error = cert_publish_new_file(mqttCertNew, mqttCert, &publishedMqttCert);
+    if (error == NO_ERROR && !mqttKeyExists)
+        error = cert_publish_new_file(mqttKeyNew, mqttKey, &publishedMqttKey);
+    if (error != NO_ERROR)
+    {
+        if (publishedMqttKey) fsDeleteFile(mqttKey);
+        if (publishedMqttCert) fsDeleteFile(mqttCert);
+        if (publishedHttpsKey) fsDeleteFile(httpsKey);
+        if (publishedHttpsCert) fsDeleteFile(httpsCert);
+        if (publishedCaDer) fsDeleteFile(caDer);
+        if (publishedCaKey) fsDeleteFile(caKey);
+        if (publishedCa) fsDeleteFile(ca);
+        TRACE_ERROR("TB2 certificate publication failed and newly published files were rolled back: %s\r\n",
+                    error2text(error));
+        goto staged_cleanup;
+    }
+
+    TRACE_INFO("TB2 certificate set is complete and valid; existing files were preserved\r\n");
+    error = settings_try_load_certs_id(0);
+
+staged_cleanup:
+    if (caNew != NULL) fsDeleteFile(caNew);
+    if (caDerNew != NULL) fsDeleteFile(caDerNew);
+    if (caKeyNew != NULL) fsDeleteFile(caKeyNew);
+    if (httpsCertNew != NULL) fsDeleteFile(httpsCertNew);
+    if (httpsKeyNew != NULL) fsDeleteFile(httpsKeyNew);
+    if (mqttCertNew != NULL) fsDeleteFile(mqttCertNew);
+    if (mqttKeyNew != NULL) fsDeleteFile(mqttKeyNew);
+    osFreeMem(caNew); osFreeMem(caDerNew); osFreeMem(caKeyNew);
+    osFreeMem(httpsCertNew); osFreeMem(httpsKeyNew);
+    osFreeMem(mqttCertNew); osFreeMem(mqttKeyNew);
+
+cleanup:
+    osFreeMem(ca); osFreeMem(caDer); osFreeMem(caKey);
+    osFreeMem(httpsCert); osFreeMem(httpsKey);
+    osFreeMem(mqttCert); osFreeMem(mqttKey);
+    return error;
 }
 
 error_t cert_generate_mac_tb2(const char *mac, const char *dest, bool add_to_settings)

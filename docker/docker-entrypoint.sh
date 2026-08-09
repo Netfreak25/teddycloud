@@ -5,20 +5,11 @@ set -o pipefail
 set -o nounset
 # set -o xtrace
 
-migrate_legacy_certificate_directory() {
-  local legacy_dir="$1"
-  local target_dir="$2"
-
-  mkdir -p "$target_dir"
-  if [ -d "$legacy_dir" ] && [ -z "$(ls -A "$target_dir" 2>/dev/null)" ]; then
-    echo "Migrating legacy certificates from $legacy_dir to $target_dir..."
-    cp -a "$legacy_dir"/. "$target_dir"/
-  fi
-}
-
-migrate_legacy_certificate_directory /teddycloud/certs/server /teddycloud/certs/server_tb1
-migrate_legacy_certificate_directory /teddycloud/certs/client /teddycloud/certs/client_tb1
-mkdir -p /teddycloud/certs/server_tb2 /teddycloud/certs/client_tb2
+mkdir -p \
+  /teddycloud/certs/server_tb1 \
+  /teddycloud/certs/server_tb2 \
+  /teddycloud/certs/client_tb1 \
+  /teddycloud/certs/client_tb2
 cd /teddycloud
 
 # PUID/PGID support: if set and non-zero, drop privileges to that user before

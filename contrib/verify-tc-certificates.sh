@@ -378,7 +378,7 @@ diagnostic_path() {
             /teddycloud/*|certs/*|config/*)
                 candidate="$token"
                 ;;
-            client/*|client_tb1/*|client_tb2/*|server/*|server_tb1/*|server_tb2/*)
+            client/*|client_tb1/*|client_tb2/*|server/*|server_tb1/*|server_tb2/*|.client.bak*|.server.bak*)
                 candidate="certs/$token"
                 ;;
         esac
@@ -1104,6 +1104,35 @@ check_ca_representations() {
     fi
 }
 
+check_hidden_certificate_backups() {
+    local backup count
+    while IFS= read -r backup; do
+        [[ -n "$backup" ]] || continue
+        count="$(find "$backup" -type f 2>/dev/null | wc -l | tr -d ' ')"
+        report INFO "Certificate backup ${backup#"$CERT_ROOT"/}: $count preserved file(s); not used at runtime"
+    done < <(find "$CERT_ROOT" -mindepth 1 -maxdepth 1 -type d \
+        \( -name '.server.bak' -o -name '.server.bak.*' \
+           -o -name '.client.bak' -o -name '.client.bak.*' \) \
+        -print 2>/dev/null | sort)
+}
+
+check_operational_legacy_paths() {
+    local config_file line key value
+    for config_file in "$CONFIG_FILE" "$OVERLAY_FILE"; do
+        [[ -f "$config_file" ]] || continue
+        while IFS= read -r line; do
+            [[ "$line" == *=* ]] || continue
+            key="${line%%=*}"
+            value="${line#*=}"
+            case "$value" in
+                certs/server|certs/server/*|certs/client|certs/client/*)
+                    report ERROR "Operational legacy certificate path remains in ${config_file#"$BASE_PATH"/}: $key=$value"
+                    ;;
+            esac
+        done < "$config_file"
+    done
+}
+
 directory_box_id() {
     local name="$1"
     if [[ "$name" =~ ^[0-9A-Fa-f]{12}$ ]]; then
@@ -1381,16 +1410,16 @@ check_ca_representations server_tb1
 check_ca_representations server_tb2
 check_legacy_tree server server_tb1
 check_legacy_tree client client_tb1
+check_hidden_certificate_backups
+check_operational_legacy_paths
 
 section 'Client certificate inventory'
 inventory_client_tree TB1 client_tb1
 inventory_client_tree TB2 client_tb2
-inventory_client_tree TB1 client
 
 section 'Local fake-client inventory'
 inventory_fake_tree client_tb1
 inventory_fake_tree client_tb2
-inventory_fake_tree client
 
 emit_json() {
     local result=ok clean_roles=0 index finding level message comma status severity scope path

@@ -2202,7 +2202,7 @@
             },
             "alternativeDNSSolutions": "Autres solutions sans interruption",
             "certificates": "Certificats",
-            "certificatesIntro": "Lors du premier démarrage, TeddyCloud générera la CA et les certificats avec la date de début 2015-11-03. Ceux-ci seront placés dans /certs/server/. Cela générera également le remplacement de la CA pour les certificats de la toniebox dans certs/server/ca.der.",
+            "certificatesIntro": "Au premier démarrage, TeddyCloud génère de manière sûre l'autorité de certification TB1 et les certificats serveur dans /certs/server_tb1/. L'autorité de remplacement de la Toniebox se trouve dans certs/server_tb1/ca.der.",
             "connectTBToWifi": {
                 "preparationText": "Veuillez connecter votre Toniebox à votre Wi-Fi et mettre à jour son firmware. Beaucoup de boîtes sont livrées avec un firmware de production qui doit être mis à jour. Sinon, la boîte ne fonctionnera pas correctement. Il n'est pas nécessaire de connecter la boîte à l'application mytonies ou à votre compte.",
                 "step1": "**Allumez** la Toniebox et pincez les deux oreilles pendant 5 secondes jusqu'à ce que la LED devienne bleue et que vous entendiez un son.",
@@ -2584,7 +2584,7 @@
             "extractCertificates": "Extraire les certificats",
             "flashCAreplacement": "Flasher le remplacement de CA pour TeddyCloud",
             "flashCAReplacementDescription1": "Malheureusement, le certificat CA généré par TeddyCloud lors de sa configuration initiale peut parfois entraîner une erreur `BAD_CERTIFICATE` lors de la connexion d'une Toniebox CC3235 à TeddyCloud. Pour résoudre ce problème, vous pouvez générer le certificat manuellement en utilisant l'ancien",
-            "flashCAReplacementDescription2": "avec faketime installé. Copiez les fichiers générés dans le répertoire `certs/server` au sein du dossier d'installation de TeddyCloud.",
+            "flashCAReplacementDescription2": "avec faketime installé. Copiez les fichiers générés dans le répertoire `certs/server_tb1` du dossier d'installation de TeddyCloud.",
             "flashCAReplacementDescription3": "Veuillez noter que les nouveaux certificats de serveur, y compris le nouveau certificat CA généré, peuvent perturber les connexions avec les Tonieboxes déjà connectées. Pour garantir un service ininterrompu, veuillez mettre à jour le fichier de remplacement CA sur toutes vos Tonieboxes avec le certificat nouvellement généré.",
             "flashCAreplacementLink": "Trouver les instructions de flashage ici",
             "flashCAreplacementText1": "Remplace la CA originale dans ton dump flash par la CA de remplacement et reflash ta boîte.",

@@ -2202,7 +2202,7 @@
             },
             "alternativeDNSSolutions": "Andere nicht-blockierende Lösungen",
             "certificates": "Zertifikate",
-            "certificatesIntro": "Beim ersten Start wird TeddyCloud das CA und die Zertifikate mit dem Startdatum 2015-11-03 generieren. Diese werden unter /certs/server/ abgelegt. Dabei wird auch der Ersatz-CA für die Toniebox unter certs/server/ca.der erzeugt.",
+            "certificatesIntro": "Beim ersten Start erzeugt TeddyCloud die TB1-CA und die Serverzertifikate sicher unter /certs/server_tb1/. Der Ersatz-CA für die Toniebox liegt unter certs/server_tb1/ca.der.",
             "connectTBToWifi": {
                 "preparationText": "Bitte verbinde deine Toniebox mit deinem WLAN und aktualisiere die Firmware. Viele Boxen werden mit einer Produktions-Firmware ausgeliefert, die aktualisiert werden muss. Andernfalls funktioniert die Box nicht richtig. Es ist nicht notwendig, die Box mit der mytonies App oder deinem Konto zu verbinden.",
                 "step1": "**Schalte** die Toniebox ein und drücke beide Ohren für 5 Sekunden, bis die LED blau wird und du einen Ton hörst.",
@@ -2584,7 +2584,7 @@
             "extractCertificates": "Zertifikate extrahieren",
             "flashCAreplacement": "CA-Ersatz für TeddyCloud flashen",
             "flashCAReplacementDescription1": "Leider kann das während der Ersteinrichtung von TeddyCloud generierte CA-Zertifikat manchmal zu einem BAD_CERTIFICATE-Fehler führen, wenn du eine Verbindung von einer CC3235 Toniebox zu TeddyCloud herstellst. Um dieses Problem zu lösen, versuche, das Zertifikat manuell mit dem alten",
-            "flashCAReplacementDescription2": "Skript mit faketime installiert zu generieren. Kopiere die generierten Dateien in das Verzeichnis `certs/server` innerhalb des TeddyCloud-Installationsordners.",
+            "flashCAReplacementDescription2": "Skript mit installiertem faketime zu erzeugen. Kopiere die generierten Dateien in das Verzeichnis `certs/server_tb1` innerhalb des TeddyCloud-Installationsordners.",
             "flashCAReplacementDescription3": "Bitte beachte, dass neue Serverzertifikate, einschließlich des neu generierten CA-Zertifikats, die Verbindung zu bereits verbundenen Tonieboxen stören können. Um einen unterbrechungsfreien Service zu gewährleisten, aktualisiere bitte die CA-Ersatzdatei auf all deinen Tonieboxen mit dem neu generierten Zertifikat.",
             "flashCAreplacementLink": "Anweisungen zum Flashen findest du hier",
             "flashCAreplacementText1": "Ersetze die originale CA in deinem Flash-Dump durch die Ersatz-CA und flashe sie zurück auf deine Box.",

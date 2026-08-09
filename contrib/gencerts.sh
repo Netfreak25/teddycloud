@@ -1,14 +1,14 @@
 #!/bin/bash
 
-CA_KEY="certs/server/ca-key.pem"
-CA_CRT="certs/server/ca-root.pem"
-CA_CRT_DER="certs/server/ca.der"
-SRV_CSR="certs/server/teddy-key.csr"
-SRV_KEY="certs/server/teddy-key.pem"
-SRV_CRT="certs/server/teddy-cert.pem"
-CL_CSR="certs/client/teddy-key.csr"
-CL_KEY="certs/client/teddy-key.pem"
-CL_CRT="certs/client/teddy-cert.pem"
+CA_KEY="certs/server_tb1/ca-key.pem"
+CA_CRT="certs/server_tb1/ca-root.pem"
+CA_CRT_DER="certs/server_tb1/ca.der"
+SRV_CSR="certs/server_tb1/teddy-key.csr"
+SRV_KEY="certs/server_tb1/teddy-key.pem"
+SRV_CRT="certs/server_tb1/teddy-cert.pem"
+CL_CSR="certs/client_tb1/teddy-key.csr"
+CL_KEY="certs/client_tb1/teddy-key.pem"
+CL_CRT="certs/client_tb1/teddy-cert.pem"
 DAYS="9000"
 KEY_LEN="4096"
 FAKETIME="2015-11-03 00:00:00"
@@ -19,8 +19,8 @@ if ! command -v faketime &> /dev/null; then
   exit 1
 fi
 
-mkdir -p certs/server
-mkdir -p certs/client
+mkdir -p certs/server_tb1
+mkdir -p certs/client_tb1
 
 echo "Generate CA certificate"
 faketime "${FAKETIME}" openssl genrsa -out ${CA_KEY} ${KEY_LEN}

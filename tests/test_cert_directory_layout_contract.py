@@ -20,38 +20,10 @@ class CertificateDirectoryLayoutTests(unittest.TestCase):
         for directory in EXPECTED_DIRS:
             self.assertIn(f"/teddycloud/{directory}", entrypoint)
 
-    def test_docker_entrypoint_migrates_legacy_tb1_directories_without_overwrite(self):
+    def test_docker_entrypoint_leaves_migration_to_teddycloud(self):
         entrypoint = (ROOT / "docker" / "docker-entrypoint.sh").read_text(encoding="utf-8")
-        self.assertIn(
-            "migrate_legacy_certificate_directory /teddycloud/certs/server "
-            "/teddycloud/certs/server_tb1",
-            entrypoint,
-        )
-        self.assertIn(
-            "migrate_legacy_certificate_directory /teddycloud/certs/client "
-            "/teddycloud/certs/client_tb1",
-            entrypoint,
-        )
-        self.assertIn('[ -z "$(ls -A "$target_dir" 2>/dev/null)" ]', entrypoint)
-        self.assertIn('cp -a "$legacy_dir"/. "$target_dir"/', entrypoint)
-
-    def test_ota_builder_injects_the_same_runtime_migration(self):
-        builder = (ROOT / "build-tc-ota-update-bundle.ps1").read_text(encoding="utf-8")
-        self.assertIn("function Set-BuildScriptForLegacyCertificateMigration", builder)
-        self.assertIn(
-            "Set-BuildScriptForLegacyCertificateMigration -ScriptPath $buildAndDeploy",
-            builder,
-        )
-        self.assertIn(
-            "migrate_legacy_certificate_directory /teddycloud/certs/server "
-            "/teddycloud/certs/server_tb1",
-            builder,
-        )
-        self.assertIn(
-            "migrate_legacy_certificate_directory /teddycloud/certs/client "
-            "/teddycloud/certs/client_tb1",
-            builder,
-        )
+        self.assertNotIn("migrate_legacy_certificate_directory", entrypoint)
+        self.assertNotIn("cp -a", entrypoint)
 
     def test_make_workdirs_contains_all_generation_directories(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
@@ -83,13 +55,13 @@ class CertificateDirectoryLayoutTests(unittest.TestCase):
         self.assertIn("return tb1_error", loader)
 
         self.assertIn("error_t generation_error = cert_generate_default()", settings)
-        self.assertIn("TB1 certificate generation failed", settings)
+        self.assertIn("TB1 certificate initialization failed", settings)
         self.assertIn("error_t generation_error = cert_generate_default_tb2()", settings)
-        self.assertIn("TB2 certificate generation failed", settings)
+        self.assertIn("TB2 certificate initialization failed", settings)
 
-        self.assertIn("if (!cert_file_is_nonempty(cacert_der))", cert_source)
-        self.assertIn('cert_tb2_reconcile_all("certificate initialization")', cert_source)
-        self.assertIn('cert_tb2_reconcile_all("startup validation")', settings)
+        self.assertIn("cert_validate_server_files", cert_source)
+        self.assertIn("cert_publish_new_file", cert_source)
+        self.assertNotIn('cert_tb2_reconcile_all("startup validation")', settings)
         self.assertIn("Certificate already matches; no files changed", cert_source)
 
 

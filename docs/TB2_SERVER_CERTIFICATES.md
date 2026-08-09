@@ -31,10 +31,14 @@ configured hostname plus `ici.tonie.cloud`, `ici.dev.tonie.cloud` and
 `ici.stage.tonie.cloud`. Duplicate names are removed. The configured hostname
 is also the certificate common name; clients must use SAN validation.
 
-If all checks pass, no file is changed. Otherwise TeddyCloud creates and
-validates a new leaf pair signed by the existing TB2 CA. Changing a hostname
-never regenerates or replaces that CA. Replacing the configured CA causes both
-leaf checks to fail safely and therefore rebuilds both leaves under the new CA.
+At startup, existing files are never replaced. A completely missing leaf pair
+may be generated from an intact CA; a partial or inconsistent set fails closed
+with the resolved paths in the log. This prevents a failed initialization from
+mixing a newly generated CA with an existing key or leaf.
+
+An explicit hostname change retains the established reconciliation workflow:
+TeddyCloud creates and validates a replacement leaf pair signed by the existing
+TB2 CA. Changing a hostname never regenerates or replaces that CA.
 
 ## Replacement, archive and reload
 

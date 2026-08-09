@@ -153,13 +153,20 @@ certs/client_tb1
 certs/client_tb2
 ```
 
-The legacy `certs/server` and `certs/client` trees are read for diagnostics only.
+During configuration migration TeddyCloud copies verified legacy material into
+the canonical roots, rewrites global and overlay paths and finally archives the
+old trees as `certs/.server.bak[.N]` and `certs/.client.bak[.N]`. The complete
+backup is retained, but is never considered an active certificate source.
+
+An unarchived `certs/server` or `certs/client` tree is read for diagnostics only.
 TB1 server files map to `server_tb1`; legacy `server/ici.pem` and `ici.key` map
-to `server_tb2`, while legacy client files map to `client_tb1`. If a legacy file
-has no canonical counterpart, the doctor recommends migration.
-Identical files at both locations are reported as duplicates. Different files
-for the same relative role are errors, and the report states whether either path
-is selected by the effective configuration.
+to `server_tb2`, while legacy client files map to `client_tb1`. Operational
+settings that still reference a legacy root are errors. Hidden backups are
+reported as preserved, inactive information.
+
+Identical files at active legacy and canonical locations are reported as
+duplicates. Different files for the same relative role are errors, and the
+report states whether either path is selected by the effective configuration.
 
 Repeated CA, leaf and private-key files can be normal when a global identity was
 copied into a per-box directory. They remain visible in `--verbose` output but
@@ -208,3 +215,16 @@ Summary
 There is intentionally no repair, copy, move or delete mode. Use the report to
 correct configuration or certificate placement through the normal TeddyCloud
 workflow.
+
+## Safe initialization
+
+Automatic certificate initialization runs only for the global server roles.
+An overlay can load its configured identity but can never trigger global
+generation. Existing certificate, CA or key files are never overwritten.
+
+A completely empty set may be generated. For a partial set TeddyCloud only
+adds material that is unambiguous: a missing DER representation of an intact CA
+or a completely absent leaf/key pair signed by an intact CA. A half-present
+pair, key mismatch, signature mismatch or differing PEM/DER CA fails closed.
+New files are generated and validated under temporary sibling names before
+being published; publication failures remove only the newly created files.

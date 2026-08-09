@@ -25,11 +25,11 @@ The server-side ICI settings are:
 | `mqtt_server.log_full_payloads` | `false` | Expert diagnostic switch for base64 full-payload capture of large MQTT publishes. |
 | `mqtt_server.log_connect_details` | `false` | Logs the MQTT CONNECT structure and plain client ID at global log level 5; credentials and Will fields remain masked. |
 
-Upgrades migrate only the exact former default paths `certs/server/ici.pem`
-and `certs/server/ici.key` to their `certs/server_tb2/` counterparts. Custom
-certificate paths are never rewritten. If both legacy files exist and neither
-target file exists, TeddyCloud copies and verifies the pair before removing the
-legacy files. This is a one-time migration, not a runtime TB1 fallback.
+Upgrades migrate the former `certs/server/ici.pem` and `ici.key` pair to
+`certs/server_tb2/`, then rewrite the persisted settings. The complete legacy
+server tree is retained as a numbered hidden `certs/.server.bak[.N]` backup;
+it is not a runtime fallback. Custom certificate paths outside TeddyCloud's
+legacy certificate roots are never rewritten.
 
 The ICI listener is fail-closed. TeddyCloud does not bind its MQTT port when
 either resolved PEM path is missing, unreadable or empty. A TLS context/setup

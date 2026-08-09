@@ -1,7 +1,7 @@
 #!/bin/bash
 
-CA_KEY="certs/server/ca-key.pem"
-CA_CRT="certs/server/ca-root.pem"
+CA_KEY="certs/server_tb1/ca-key.pem"
+CA_CRT="certs/server_tb1/ca-root.pem"
 DAYS="9000"
 KEY_LEN="4096"
 FAKETIME="2015-11-03 00:00:00"
@@ -29,7 +29,7 @@ fi
 
 
 # Setup directories and file paths
-BOX_DIR="certs/box/$box_name"
+BOX_DIR="certs/client_tb1/$box_name"
 mkdir -p $BOX_DIR
 CL_KEY="${BOX_DIR}/private.der"
 CL_CRT="${BOX_DIR}/client.der"
@@ -56,4 +56,3 @@ openssl x509 -outform der -in ${CA_CRT} -out ${CL_CA_DER}
 rm ${CL_CSR}
 rm ${CL_KEY_PEM}
 rm ${CL_CRT_PEM}
-

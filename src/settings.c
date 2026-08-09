@@ -28,7 +28,9 @@ static setting_item_t *settings_get_by_name_id(const char *item, uint8_t setting
 static char *settings_sanitize_box_id(const char *input_id);
 static bool settings_migrate_id(uint8_t settingsId);
 static void settings_normalize_tb2_https_modes(uint8_t settingsId);
-static void settings_migrate_legacy_mqtt_server_files(void);
+static error_t settings_prepare_certificate_layout_migration(void);
+static void settings_finalize_certificate_layout_migration(void);
+static char *settings_resolve_mqtt_server_path(settings_t *settings, const char *path);
 
 #define CLOUD_TB2_PROXY_SETTING "cloud.tb2_enabled"
 #define CLOUD_TB2_V3_SETTING "cloud.tb2_v3_enabled"
@@ -40,6 +42,12 @@ static void settings_migrate_legacy_mqtt_server_files(void);
 #define MQTT_SERVER_CERT_PATH "certs/server_tb2/ici.pem"
 #define MQTT_SERVER_KEY_PATH "certs/server_tb2/ici.key"
 #define MQTT_SERVER_CERT_DIR "certs/server_tb2"
+#define LEGACY_SERVER_CERT_DIR "certs/server"
+#define LEGACY_CLIENT_CERT_DIR "certs/client"
+#define TB1_SERVER_CERT_DIR "certs/server_tb1"
+#define TB1_CLIENT_CERT_DIR "certs/client_tb1"
+#define LEGACY_SERVER_BACKUP_DIR "certs/.server.bak"
+#define LEGACY_CLIENT_BACKUP_DIR "certs/.client.bak"
 #define CORE_SERVER_CERT_TB2_HOSTNAME_SETTING "core.server_cert_tb2.hostname"
 #define MQTT_SERVER_HOSTNAME_SETTING "mqtt_server.hostname"
 
@@ -73,6 +81,9 @@ static char *config_overlay_file_path = NULL;
 static uint32_t settings_source_config_version = CONFIG_VERSION;
 static bool settings_tb2_proxy_loaded[MAX_OVERLAYS];
 static bool settings_tb2_v3_loaded[MAX_OVERLAYS];
+static bool settings_certificate_layout_pending_server;
+static bool settings_certificate_layout_pending_client;
+static bool settings_certificate_layout_failed;
 DateTime settings_last_load;
 DateTime settings_last_load_ovl;
 
@@ -960,6 +971,126 @@ static void settings_migrate_tb2_https_capture(uint8_t settingsId)
     }
 }
 
+static bool settings_rewrite_legacy_path_option(uint8_t settingsId,
+                                                const char *optionName,
+                                                const char *legacyRoot,
+                                                const char *targetRoot)
+{
+    setting_item_t *option = settings_get_by_name_id(optionName, settingsId);
+    if (option == NULL || option->type != TYPE_STRING)
+    {
+        return false;
+    }
+    if (settingsId > 0 && !option->overlayed)
+    {
+        return false;
+    }
+
+    char **value = (char **)option->ptr;
+    if (value == NULL || *value == NULL)
+    {
+        return false;
+    }
+
+    const char *matchedLegacyRoot = legacyRoot;
+    const char *replacementRoot = targetRoot;
+    char *resolvedLegacyRoot = NULL;
+    char *resolvedTargetRoot = NULL;
+    size_t legacyLength = osStrlen(matchedLegacyRoot);
+    bool matches = osStrncmp(*value, matchedLegacyRoot, legacyLength) == 0 &&
+                   ((*value)[legacyLength] == '\0' ||
+                    (*value)[legacyLength] == PATH_SEPARATOR_LINUX ||
+                    (*value)[legacyLength] == PATH_SEPARATOR_WINDOWS);
+    if (!matches)
+    {
+        resolvedLegacyRoot = settings_resolve_mqtt_server_path(get_settings(), legacyRoot);
+        resolvedTargetRoot = settings_resolve_mqtt_server_path(get_settings(), targetRoot);
+        if (resolvedLegacyRoot != NULL && resolvedTargetRoot != NULL)
+        {
+            matchedLegacyRoot = resolvedLegacyRoot;
+            replacementRoot = resolvedTargetRoot;
+            legacyLength = osStrlen(matchedLegacyRoot);
+            matches = osStrncmp(*value, matchedLegacyRoot, legacyLength) == 0 &&
+                      ((*value)[legacyLength] == '\0' ||
+                       (*value)[legacyLength] == PATH_SEPARATOR_LINUX ||
+                       (*value)[legacyLength] == PATH_SEPARATOR_WINDOWS);
+        }
+    }
+    if (!matches)
+    {
+        osFreeMem(resolvedLegacyRoot);
+        osFreeMem(resolvedTargetRoot);
+        return false;
+    }
+
+    char *replacement = custom_asprintf("%s%s", replacementRoot, *value + legacyLength);
+    if (replacement == NULL)
+    {
+        osFreeMem(resolvedLegacyRoot);
+        osFreeMem(resolvedTargetRoot);
+        return false;
+    }
+    TRACE_INFO("Migrating certificate setting %s: '%s' -> '%s'\r\n",
+               optionName, *value, replacement);
+    osFreeMem(*value);
+    *value = replacement;
+    osFreeMem(resolvedLegacyRoot);
+    osFreeMem(resolvedTargetRoot);
+    return true;
+}
+
+static bool settings_migrate_certificate_paths(uint8_t settingsId)
+{
+    static const char *const tb1ServerOptions[] = {
+        "core.server_cert.file.ca",
+        "core.server_cert.file.ca_der",
+        "core.server_cert.file.ca_key",
+        "core.server_cert.file.crt",
+        "core.server_cert.file.key",
+    };
+    static const char *const tb1ClientOptions[] = {
+        "core.certdir",
+        "core.client_cert.file.ca",
+        "core.client_cert.file.crt",
+        "core.client_cert.file.key",
+        "core.client_cert_tb1.file.ca",
+        "core.client_cert_tb1.file.crt",
+        "core.client_cert_tb1.file.key",
+        "core.client_cert_fake.file.ca",
+        "core.client_cert_fake.file.crt",
+        "core.client_cert_fake.file.key",
+    };
+
+    bool migrated = false;
+    for (size_t i = 0; i < sizeof(tb1ServerOptions) / sizeof(tb1ServerOptions[0]); i++)
+    {
+        migrated = settings_rewrite_legacy_path_option(settingsId,
+                                                        tb1ServerOptions[i],
+                                                        LEGACY_SERVER_CERT_DIR,
+                                                        TB1_SERVER_CERT_DIR) || migrated;
+    }
+    for (size_t i = 0; i < sizeof(tb1ClientOptions) / sizeof(tb1ClientOptions[0]); i++)
+    {
+        migrated = settings_rewrite_legacy_path_option(settingsId,
+                                                        tb1ClientOptions[i],
+                                                        LEGACY_CLIENT_CERT_DIR,
+                                                        TB1_CLIENT_CERT_DIR) || migrated;
+    }
+
+    if (settingsId == 0)
+    {
+        migrated = settings_rewrite_legacy_path_option(settingsId,
+                                                        "mqtt_server.cert.crt",
+                                                        MQTT_SERVER_LEGACY_CERT_PATH,
+                                                        MQTT_SERVER_CERT_PATH) || migrated;
+        migrated = settings_rewrite_legacy_path_option(settingsId,
+                                                        "mqtt_server.cert.key",
+                                                        MQTT_SERVER_LEGACY_KEY_PATH,
+                                                        MQTT_SERVER_KEY_PATH) || migrated;
+    }
+    return migrated;
+}
+
 static bool settings_migrate_id(uint8_t settingsId)
 {
     settings_t *settings = &Settings_Overlay[settingsId];
@@ -1011,6 +1142,14 @@ static bool settings_migrate_id(uint8_t settingsId)
     if (settings->configVersion < 23)
     {
         settings_migrate_tb2_https_capture(settingsId);
+    }
+    if (settings->configVersion < 24)
+    {
+        if (settings_certificate_layout_failed)
+        {
+            return false;
+        }
+        settings_migrate_certificate_paths(settingsId);
     }
 
     return true;
@@ -1232,96 +1371,381 @@ static char *settings_resolve_mqtt_server_path(settings_t *settings, const char 
     return resolvedPath;
 }
 
-static void settings_migrate_legacy_mqtt_server_files(void)
+static bool settings_certificate_file_nonempty(const char *path)
+{
+    FsFileStat stat;
+    return path != NULL && fsGetFileStat(path, &stat) == NO_ERROR && stat.size > 0;
+}
+
+static bool settings_certificate_directory_complete(const char *path, bool server)
+{
+    static const char *const serverFiles[] = {
+        "ca-root.pem", "ca.der", "ca-key.pem", "teddy-cert.pem", "teddy-key.pem"};
+    static const char *const clientFiles[] = {"ca.der", "client.der", "private.der"};
+    const char *const *files = server ? serverFiles : clientFiles;
+    size_t fileCount = server ? sizeof(serverFiles) / sizeof(serverFiles[0])
+                              : sizeof(clientFiles) / sizeof(clientFiles[0]);
+
+    for (size_t i = 0; i < fileCount; i++)
+    {
+        char *filePath = custom_asprintf("%s%c%s", path, PATH_SEPARATOR, files[i]);
+        bool present = filePath != NULL && settings_certificate_file_nonempty(filePath);
+        osFreeMem(filePath);
+        if (!present)
+        {
+            return false;
+        }
+    }
+
+    char validation[192];
+    char *ca = custom_asprintf("%s%c%s", path, PATH_SEPARATOR,
+                               server ? "ca-root.pem" : "ca.der");
+    char *cert = custom_asprintf("%s%c%s", path, PATH_SEPARATOR,
+                                 server ? "teddy-cert.pem" : "client.der");
+    char *key = custom_asprintf("%s%c%s", path, PATH_SEPARATOR,
+                                server ? "teddy-key.pem" : "private.der");
+    char *caDer = server ? custom_asprintf("%s%cca.der", path, PATH_SEPARATOR) : NULL;
+    char *caKey = server ? custom_asprintf("%s%cca-key.pem", path, PATH_SEPARATOR) : NULL;
+    bool valid = false;
+    if (ca != NULL && cert != NULL && key != NULL &&
+        (!server || (caDer != NULL && caKey != NULL)))
+    {
+        error_t validationError = server
+                                      ? cert_validate_server_files(
+                                            ca, caDer, caKey, cert, key,
+                                            NULL, 0, FALSE, validation,
+                                            sizeof(validation))
+                                      : cert_validate_client_files(
+                                            ca, cert, key, validation,
+                                            sizeof(validation));
+        valid = validationError == NO_ERROR;
+        if (!valid)
+        {
+            TRACE_ERROR("Certificate migration target '%s' is structurally complete but invalid: %s\r\n",
+                        path, validation);
+        }
+    }
+    osFreeMem(ca);
+    osFreeMem(cert);
+    osFreeMem(key);
+    osFreeMem(caDer);
+    osFreeMem(caKey);
+    return valid;
+}
+
+static error_t settings_merge_certificate_tree(const char *source,
+                                               const char *target,
+                                               bool serverRoot,
+                                               unsigned int depth,
+                                               bool apply)
+{
+    FsDir *directory = fsOpenDir(source);
+    if (directory == NULL)
+    {
+        return ERROR_DIRECTORY_NOT_FOUND;
+    }
+
+    error_t result = NO_ERROR;
+    FsDirEntry entry;
+    while (fsReadDir(directory, &entry) == NO_ERROR)
+    {
+        if (entry.name[0] == '\0' || !osStrcmp(entry.name, ".") || !osStrcmp(entry.name, ".."))
+        {
+            continue;
+        }
+        if (serverRoot && depth == 0 &&
+            (!osStrcmp(entry.name, "ici.pem") || !osStrcmp(entry.name, "ici.key")))
+        {
+            continue;
+        }
+
+        char *sourcePath = custom_asprintf("%s%c%s", source, PATH_SEPARATOR, entry.name);
+        char *targetPath = custom_asprintf("%s%c%s", target, PATH_SEPARATOR, entry.name);
+        if (sourcePath == NULL || targetPath == NULL)
+        {
+            osFreeMem(sourcePath);
+            osFreeMem(targetPath);
+            result = ERROR_OUT_OF_MEMORY;
+            break;
+        }
+
+        if (entry.attributes & FS_FILE_ATTR_DIRECTORY)
+        {
+            if (apply && !fsDirExists(targetPath))
+            {
+                result = fsCreateDirEx(targetPath, TRUE);
+            }
+            if (result == NO_ERROR)
+            {
+                result = settings_merge_certificate_tree(sourcePath, targetPath,
+                                                         serverRoot, depth + 1, apply);
+            }
+        }
+        else if (fsFileExists(targetPath))
+        {
+            result = fsCompareFiles(sourcePath, targetPath, NULL);
+            if (result != NO_ERROR)
+            {
+                bool complete = settings_certificate_directory_complete(
+                    target, serverRoot && depth == 0);
+                if (complete)
+                {
+                    TRACE_WARNING("Certificate migration keeps complete target file '%s'; legacy file remains in backup\r\n",
+                                  targetPath);
+                    result = NO_ERROR;
+                }
+                else
+                {
+                    TRACE_ERROR("Certificate migration conflict: target set is incomplete source='%s' target='%s'\r\n",
+                                sourcePath, targetPath);
+                    result = ERROR_ABORTED;
+                }
+            }
+        }
+        else if (apply)
+        {
+            result = fsCopyFile(sourcePath, targetPath, FALSE);
+            if (result == NO_ERROR)
+            {
+                result = fsCompareFiles(sourcePath, targetPath, NULL);
+            }
+        }
+
+        osFreeMem(sourcePath);
+        osFreeMem(targetPath);
+        if (result != NO_ERROR)
+        {
+            break;
+        }
+    }
+    fsCloseDir(directory);
+    return result;
+}
+
+static error_t settings_migrate_legacy_ici_pair(const char *legacyServer,
+                                                const char *targetServer,
+                                                bool apply)
+{
+    char *sourceCert = custom_asprintf("%s%cici.pem", legacyServer, PATH_SEPARATOR);
+    char *sourceKey = custom_asprintf("%s%cici.key", legacyServer, PATH_SEPARATOR);
+    char *targetCert = custom_asprintf("%s%cici.pem", targetServer, PATH_SEPARATOR);
+    char *targetKey = custom_asprintf("%s%cici.key", targetServer, PATH_SEPARATOR);
+    if (sourceCert == NULL || sourceKey == NULL || targetCert == NULL || targetKey == NULL)
+    {
+        osFreeMem(sourceCert);
+        osFreeMem(sourceKey);
+        osFreeMem(targetCert);
+        osFreeMem(targetKey);
+        return ERROR_OUT_OF_MEMORY;
+    }
+
+    bool sourceCertExists = settings_certificate_file_nonempty(sourceCert);
+    bool sourceKeyExists = settings_certificate_file_nonempty(sourceKey);
+    if (!sourceCertExists && !sourceKeyExists)
+    {
+        osFreeMem(sourceCert);
+        osFreeMem(sourceKey);
+        osFreeMem(targetCert);
+        osFreeMem(targetKey);
+        return NO_ERROR;
+    }
+    if (!sourceCertExists || !sourceKeyExists)
+    {
+        TRACE_ERROR("Legacy ICI certificate migration aborted: incomplete source pair cert='%s' key='%s'\r\n",
+                    sourceCert, sourceKey);
+        osFreeMem(sourceCert);
+        osFreeMem(sourceKey);
+        osFreeMem(targetCert);
+        osFreeMem(targetKey);
+        return ERROR_ABORTED;
+    }
+
+    bool targetCertExists = settings_certificate_file_nonempty(targetCert);
+    bool targetKeyExists = settings_certificate_file_nonempty(targetKey);
+    error_t result = NO_ERROR;
+    if (targetCertExists || targetKeyExists)
+    {
+        if (!targetCertExists || !targetKeyExists)
+        {
+            result = ERROR_ABORTED;
+        }
+        else if (fsCompareFiles(sourceCert, targetCert, NULL) != NO_ERROR ||
+                 fsCompareFiles(sourceKey, targetKey, NULL) != NO_ERROR)
+        {
+            char *ca = custom_asprintf("%s%cca-root.pem", targetServer, PATH_SEPARATOR);
+            char *caDer = custom_asprintf("%s%cca.der", targetServer, PATH_SEPARATOR);
+            char *caKey = custom_asprintf("%s%cca-key.pem", targetServer, PATH_SEPARATOR);
+            char validation[192] = "path allocation failed";
+            bool validTarget = ca != NULL && caDer != NULL && caKey != NULL &&
+                               cert_validate_server_files(
+                                   ca, caDer, caKey, targetCert, targetKey,
+                                   NULL, 0, TRUE, validation,
+                                   sizeof(validation)) == NO_ERROR;
+            osFreeMem(ca);
+            osFreeMem(caDer);
+            osFreeMem(caKey);
+            if (validTarget)
+            {
+                TRACE_WARNING("ICI certificate migration keeps the complete and valid server_tb2 target pair; legacy pair remains in backup\r\n");
+            }
+            else
+            {
+                TRACE_ERROR("ICI certificate migration target is not a complete valid server_tb2 set: %s\r\n",
+                            validation);
+                result = ERROR_ABORTED;
+            }
+        }
+    }
+    else if (apply)
+    {
+        result = fsCopyFile(sourceCert, targetCert, FALSE);
+        if (result == NO_ERROR)
+            result = fsCopyFile(sourceKey, targetKey, FALSE);
+        if (result == NO_ERROR)
+            result = fsCompareFiles(sourceCert, targetCert, NULL);
+        if (result == NO_ERROR)
+            result = fsCompareFiles(sourceKey, targetKey, NULL);
+    }
+
+    if (result != NO_ERROR)
+    {
+        TRACE_ERROR("Legacy ICI certificate migration conflict source='%s' target='%s'\r\n",
+                    legacyServer, targetServer);
+    }
+
+    osFreeMem(sourceCert);
+    osFreeMem(sourceKey);
+    osFreeMem(targetCert);
+    osFreeMem(targetKey);
+    return result;
+}
+
+static error_t settings_prepare_certificate_layout_migration(void)
 {
     settings_t *settings = get_settings();
-    if (settings == NULL || settings->mqtt_server.cert_crt == NULL ||
-        settings->mqtt_server.cert_key == NULL ||
-        osStrcmp(settings->mqtt_server.cert_crt, MQTT_SERVER_CERT_PATH) != 0 ||
-        osStrcmp(settings->mqtt_server.cert_key, MQTT_SERVER_KEY_PATH) != 0)
+    char *legacyServer = settings_resolve_mqtt_server_path(settings, LEGACY_SERVER_CERT_DIR);
+    char *legacyClient = settings_resolve_mqtt_server_path(settings, LEGACY_CLIENT_CERT_DIR);
+    char *serverTb1 = settings_resolve_mqtt_server_path(settings, TB1_SERVER_CERT_DIR);
+    char *serverTb2 = settings_resolve_mqtt_server_path(settings, MQTT_SERVER_CERT_DIR);
+    char *clientTb1 = settings_resolve_mqtt_server_path(settings, TB1_CLIENT_CERT_DIR);
+    if (legacyServer == NULL || legacyClient == NULL || serverTb1 == NULL ||
+        serverTb2 == NULL || clientTb1 == NULL)
     {
-        return;
+        osFreeMem(legacyServer);
+        osFreeMem(legacyClient);
+        osFreeMem(serverTb1);
+        osFreeMem(serverTb2);
+        osFreeMem(clientTb1);
+        return ERROR_OUT_OF_MEMORY;
     }
 
-    char *legacyCert = settings_resolve_mqtt_server_path(settings, MQTT_SERVER_LEGACY_CERT_PATH);
-    char *legacyKey = settings_resolve_mqtt_server_path(settings, MQTT_SERVER_LEGACY_KEY_PATH);
-    char *targetCert = settings_resolve_mqtt_server_path(settings, MQTT_SERVER_CERT_PATH);
-    char *targetKey = settings_resolve_mqtt_server_path(settings, MQTT_SERVER_KEY_PATH);
-    char *targetDir = settings_resolve_mqtt_server_path(settings, MQTT_SERVER_CERT_DIR);
-    if (legacyCert == NULL || legacyKey == NULL || targetCert == NULL ||
-        targetKey == NULL || targetDir == NULL)
+    error_t result = NO_ERROR;
+    settings_certificate_layout_pending_server = fsDirExists(legacyServer);
+    settings_certificate_layout_pending_client = fsDirExists(legacyClient);
+    if (settings_certificate_layout_pending_server)
     {
-        TRACE_ERROR("Failed to allocate paths for legacy TB2 MQTT certificate migration\r\n");
-        goto cleanup;
+        result = settings_merge_certificate_tree(legacyServer, serverTb1, true, 0, false);
+        if (result == NO_ERROR)
+            result = settings_migrate_legacy_ici_pair(legacyServer, serverTb2, false);
+    }
+    if (result == NO_ERROR && settings_certificate_layout_pending_client)
+    {
+        result = settings_merge_certificate_tree(legacyClient, clientTb1, false, 0, false);
+    }
+    if (result == NO_ERROR && settings_certificate_layout_pending_server)
+    {
+        if (!fsDirExists(serverTb1))
+            result = fsCreateDirEx(serverTb1, TRUE);
+        if (result == NO_ERROR && !fsDirExists(serverTb2))
+            result = fsCreateDirEx(serverTb2, TRUE);
+        if (result == NO_ERROR)
+            result = settings_merge_certificate_tree(legacyServer, serverTb1, true, 0, true);
+        if (result == NO_ERROR)
+            result = settings_migrate_legacy_ici_pair(legacyServer, serverTb2, true);
+    }
+    if (result == NO_ERROR && settings_certificate_layout_pending_client)
+    {
+        if (!fsDirExists(clientTb1))
+            result = fsCreateDirEx(clientTb1, TRUE);
+        if (result == NO_ERROR)
+            result = settings_merge_certificate_tree(legacyClient, clientTb1, false, 0, true);
     }
 
-    const bool_t legacyCertExists = fsFileExists(legacyCert);
-    const bool_t legacyKeyExists = fsFileExists(legacyKey);
-    if (!legacyCertExists && !legacyKeyExists)
+    settings_certificate_layout_failed = result != NO_ERROR;
+    if (settings_certificate_layout_failed)
     {
-        goto cleanup;
-    }
-    if (!legacyCertExists || !legacyKeyExists)
-    {
-        TRACE_WARNING("Legacy TB2 MQTT certificate migration skipped: incomplete source pair cert='%s' key='%s'\r\n",
-                      legacyCert, legacyKey);
-        goto cleanup;
-    }
-    if (fsFileExists(targetCert) || fsFileExists(targetKey))
-    {
-        TRACE_WARNING("Legacy TB2 MQTT certificate migration skipped: destination is not empty cert='%s' key='%s'\r\n",
-                      targetCert, targetKey);
-        goto cleanup;
+        TRACE_ERROR("Certificate directory migration failed; settings paths and automatic generation remain unchanged for this start (%s)\r\n",
+                    error2text(result));
     }
 
-    error_t error = fsCreateDirEx(targetDir, TRUE);
-    if (error != NO_ERROR && !fsDirExists(targetDir))
+    osFreeMem(legacyServer);
+    osFreeMem(legacyClient);
+    osFreeMem(serverTb1);
+    osFreeMem(serverTb2);
+    osFreeMem(clientTb1);
+    return result;
+}
+
+static error_t settings_backup_legacy_certificate_directory(const char *legacyRelative,
+                                                            const char *backupRelative)
+{
+    settings_t *settings = get_settings();
+    char *legacy = settings_resolve_mqtt_server_path(settings, legacyRelative);
+    char *backupBase = settings_resolve_mqtt_server_path(settings, backupRelative);
+    if (legacy == NULL || backupBase == NULL)
     {
-        TRACE_ERROR("Legacy TB2 MQTT certificate migration failed: cannot create '%s' (%s)\r\n",
-                    targetDir, error2text(error));
-        goto cleanup;
+        osFreeMem(legacy);
+        osFreeMem(backupBase);
+        return ERROR_OUT_OF_MEMORY;
+    }
+    if (!fsDirExists(legacy))
+    {
+        osFreeMem(legacy);
+        osFreeMem(backupBase);
+        return NO_ERROR;
     }
 
-    error = fsCopyFile(legacyCert, targetCert, FALSE);
-    if (error == NO_ERROR)
+    char *backup = NULL;
+    for (unsigned int suffix = 0; suffix < 1000; suffix++)
     {
-        error = fsCopyFile(legacyKey, targetKey, FALSE);
+        osFreeMem(backup);
+        backup = suffix == 0 ? custom_asprintf("%s", backupBase)
+                             : custom_asprintf("%s.%u", backupBase, suffix);
+        if (backup != NULL && !fsDirExists(backup) && !fsFileExists(backup))
+            break;
     }
-    if (error == NO_ERROR)
+    error_t result = backup == NULL ? ERROR_OUT_OF_MEMORY : fsRenameFile(legacy, backup);
+    if (result == NO_ERROR)
     {
-        error = fsCompareFiles(legacyCert, targetCert, NULL);
-    }
-    if (error == NO_ERROR)
-    {
-        error = fsCompareFiles(legacyKey, targetKey, NULL);
-    }
-    if (error != NO_ERROR)
-    {
-        fsDeleteFile(targetCert);
-        fsDeleteFile(targetKey);
-        TRACE_ERROR("Legacy TB2 MQTT certificate migration failed: cert='%s' key='%s' error=%s\r\n",
-                    legacyCert, legacyKey, error2text(error));
-        goto cleanup;
-    }
-
-    error_t certDeleteError = fsDeleteFile(legacyCert);
-    error_t keyDeleteError = fsDeleteFile(legacyKey);
-    if (certDeleteError != NO_ERROR || keyDeleteError != NO_ERROR)
-    {
-        TRACE_WARNING("Legacy TB2 MQTT certificates copied to '%s', but legacy cleanup was incomplete\r\n",
-                      targetDir);
+        TRACE_INFO("Archived legacy certificate directory '%s' as '%s'\r\n", legacy, backup);
     }
     else
     {
-        TRACE_INFO("Migrated legacy TB2 MQTT certificates to '%s'\r\n", targetDir);
+        TRACE_ERROR("Could not archive legacy certificate directory '%s' (%s); canonical paths remain active and migration will retry\r\n",
+                    legacy, error2text(result));
     }
+    osFreeMem(legacy);
+    osFreeMem(backupBase);
+    osFreeMem(backup);
+    return result;
+}
 
-cleanup:
-    osFreeMem(legacyCert);
-    osFreeMem(legacyKey);
-    osFreeMem(targetCert);
-    osFreeMem(targetKey);
-    osFreeMem(targetDir);
+static void settings_finalize_certificate_layout_migration(void)
+{
+    if (settings_certificate_layout_failed)
+        return;
+    if (settings_certificate_layout_pending_server &&
+        settings_backup_legacy_certificate_directory(LEGACY_SERVER_CERT_DIR,
+                                                     LEGACY_SERVER_BACKUP_DIR) == NO_ERROR)
+    {
+        settings_certificate_layout_pending_server = false;
+    }
+    if (settings_certificate_layout_pending_client &&
+        settings_backup_legacy_certificate_directory(LEGACY_CLIENT_CERT_DIR,
+                                                     LEGACY_CLIENT_BACKUP_DIR) == NO_ERROR)
+    {
+        settings_certificate_layout_pending_client = false;
+    }
 }
 
 static void settings_changed()
@@ -1621,10 +2045,18 @@ error_t settings_load()
     mutex_lock(MUTEX_SETTINGS);
     error_t err = NO_ERROR;
 
+    settings_certificate_layout_pending_server = false;
+    settings_certificate_layout_pending_client = false;
+    settings_certificate_layout_failed = false;
+
     err = settings_load_ovl(false);
     if (err == NO_ERROR)
     {
         err = settings_load_ovl(true);
+    }
+    if (err == NO_ERROR)
+    {
+        settings_finalize_certificate_layout_migration();
     }
     mutex_unlock(MUTEX_SETTINGS);
     return err;
@@ -1655,6 +2087,12 @@ static error_t settings_load_ovl(bool overlay)
         TRACE_WARNING("Config file does not exist, creating it...\r\n");
 
         error_t err = settings_save_ovl(overlay);
+        if (err == NO_ERROR && !overlay)
+        {
+            settings_prepare_certificate_layout_migration();
+            settings_generate_internal_dirs(get_settings());
+            err = settings_load_certs_id(0);
+        }
         return err;
     }
 
@@ -1899,20 +2337,30 @@ static error_t settings_load_ovl(bool overlay)
         }
         if (migrated)
         {
-            settings_save_ovl(true);
+            error_t saveError = settings_save_ovl(true);
+            if (saveError != NO_ERROR)
+            {
+                TRACE_ERROR("Failed to persist migrated overlay certificate paths; legacy directories remain active\r\n");
+                return saveError;
+            }
         }
     }
     else
     {
         settings_source_config_version = Settings_Overlay[0].configVersion;
+        settings_prepare_certificate_layout_migration();
         bool migrated = settings_migrate_id(0);
         settings_normalize_tb2_https_modes(0);
         settings_generate_internal_dirs(get_settings());
-        settings_migrate_legacy_mqtt_server_files();
         settings_load_certs_id(0);
         if (migrated)
         {
-            settings_save_ovl(false);
+            error_t saveError = settings_save_ovl(false);
+            if (saveError != NO_ERROR)
+            {
+                TRACE_ERROR("Failed to persist migrated global certificate paths; legacy directories remain active\r\n");
+                return saveError;
+            }
         }
         Settings_Overlay[0].internal.config_changed = false;
     }
@@ -2761,52 +3209,46 @@ error_t settings_load_certs_id(uint8_t settingsId)
         return NO_ERROR;
     }
 
+    error_t tb1LoadError = settings_try_load_certs_id(settingsId);
+    if (settingsId > 0)
+    {
+        if (tb1LoadError != NO_ERROR)
+        {
+            TRACE_ERROR("TB1 certificate load failed for overlay=%u; overlays never trigger global certificate generation (error=%s)\r\n",
+                        settingsId, error2text(tb1LoadError));
+        }
+        return tb1LoadError;
+    }
+
+    if (settings_certificate_layout_failed)
+    {
+        TRACE_ERROR("Automatic certificate generation disabled because certificate directory migration failed\r\n");
+        return tb1LoadError != NO_ERROR ? tb1LoadError : ERROR_ABORTED;
+    }
+
     if (get_settings_id(settingsId)->internal.autogen_certs)
     {
-        if (settings_try_load_certs_id(settingsId) != NO_ERROR)
+        if (tb1LoadError != NO_ERROR)
         {
-            TRACE_INFO("********************************************\r\n");
-            TRACE_INFO("   No TB1 certificates found. Generating.\r\n");
-            TRACE_INFO("   This will take several minutes...\r\n");
-            TRACE_INFO("********************************************\r\n");
+            TRACE_WARNING("TB1 server certificate set is incomplete; attempting safe non-destructive initialization using configured paths\r\n");
             error_t generation_error = cert_generate_default();
             if (generation_error != NO_ERROR)
             {
-                TRACE_ERROR("TB1 certificate generation failed (error %d)\r\n", generation_error);
+                TRACE_ERROR("TB1 certificate initialization failed without overwriting existing files (error=%s)\r\n",
+                            error2text(generation_error));
                 return generation_error;
             }
-            TRACE_INFO("********************************************\r\n");
-            TRACE_INFO("   FINISHED TB1 GENERATION\r\n");
-            TRACE_INFO("********************************************\r\n");
         }
 
-        const char *ca_tb2 = settings_get_string_id("internal.server_tb2.ca", settingsId);
-        const char *ca_key_tb2 = settings_get_string_id("internal.server_tb2.ca_key", settingsId);
-        if (settingsId == 0 &&
-            (!ca_tb2 || osStrlen(ca_tb2) == 0 ||
-             !ca_key_tb2 || osStrlen(ca_key_tb2) == 0))
+        if (settingsId == 0)
         {
-            TRACE_INFO("********************************************\r\n");
-            TRACE_INFO("   No TB2 certificates found. Generating.\r\n");
-            TRACE_INFO("********************************************\r\n");
+            TRACE_DEBUG("Validating and safely completing the global TB2 server certificate set\r\n");
             error_t generation_error = cert_generate_default_tb2();
             if (generation_error != NO_ERROR)
             {
-                TRACE_ERROR("TB2 certificate generation failed (error %d)\r\n", generation_error);
+                TRACE_ERROR("TB2 certificate initialization failed without overwriting existing files (error=%s)\r\n",
+                            error2text(generation_error));
                 return generation_error;
-            }
-            TRACE_INFO("********************************************\r\n");
-            TRACE_INFO("   FINISHED TB2 GENERATION\r\n");
-            TRACE_INFO("********************************************\r\n");
-        }
-        else if (settingsId == 0)
-        {
-            error_t reconcile_error = cert_tb2_reconcile_all("startup validation");
-            if (reconcile_error != NO_ERROR)
-            {
-                TRACE_ERROR("TB2 server certificate reconciliation failed (error %d)\r\n",
-                            reconcile_error);
-                return reconcile_error;
             }
         }
     }
