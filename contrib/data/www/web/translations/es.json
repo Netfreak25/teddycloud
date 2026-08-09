@@ -1170,19 +1170,33 @@
         },
         "mqttForwarding": {
             "suppress": "Suprimir",
-            "description": "Los interruptores activados reenvían el tema correspondiente en ambas direcciones.",
+            "suppressed": "Suprimido",
+            "description": "Las reglas se aplican en ambas direcciones. Las reglas heredadas muestran su estado global efectivo.",
             "forward": "Reenviar",
             "global": "Usar global",
+            "inheritedStatus": "Global · {{state}}",
+            "effectiveStatus": "Efectivo: {{state}}",
+            "selectStatus": "Seleccionar estado para {{setting}}: {{state}}",
+            "searchFilters": "Buscar filtros",
             "searchSources": "Buscar fuentes de registro",
+            "rulesCount": "{{count}} reglas",
+            "suppressedCount": "{{count}} suprimidas",
             "title": "Filtros de reenvío bidireccional",
+            "filters": {
+                "all": "Todos",
+                "overrides": "Excepciones",
+                "suppressed": "Suprimidos"
+            },
             "groups": {
+                "direct": "Topics directos",
                 "logs": "Registros",
                 "metrics": "Métricas",
                 "appReply": "Respuesta de la aplicación",
                 "settings": "Ajustes",
                 "playback": "Reproducción",
                 "appControl": "Control de la aplicación"
-            }
+            },
+            "noMatches": "No hay filtros coincidentes"
         },
         "levelLabel": "Nivel de configuración",
         "navigationTitle": "Configuración",

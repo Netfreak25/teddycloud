@@ -1170,19 +1170,33 @@
         },
         "mqttForwarding": {
             "suppress": "Suppress",
-            "description": "Enabled switches forward the corresponding topic in both directions.",
+            "suppressed": "Suppressed",
+            "description": "Rules apply in both directions. Inherited rules show their effective global state.",
             "forward": "Forward",
             "global": "Use global",
+            "inheritedStatus": "Global · {{state}}",
+            "effectiveStatus": "Effective: {{state}}",
+            "selectStatus": "Select status for {{setting}}: {{state}}",
+            "searchFilters": "Search filters",
             "searchSources": "Search log sources",
+            "rulesCount": "{{count}} rules",
+            "suppressedCount": "{{count}} suppressed",
             "title": "Bidirectional forwarding filters",
+            "filters": {
+                "all": "All",
+                "overrides": "Overrides",
+                "suppressed": "Suppressed"
+            },
             "groups": {
+                "direct": "Direct topics",
                 "logs": "Logs",
                 "metrics": "Metrics",
                 "appReply": "App Reply",
                 "settings": "Settings",
                 "playback": "Playback",
                 "appControl": "App Control"
-            }
+            },
+            "noMatches": "No matching filters"
         },
         "levelLabel": "Settings level",
         "navigationTitle": "Settings",

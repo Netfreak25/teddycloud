@@ -1170,19 +1170,33 @@
         },
         "mqttForwarding": {
             "suppress": "Unterdrücken",
-            "description": "Aktive Schalter leiten das jeweilige Topic in beide Richtungen weiter.",
+            "suppressed": "Unterdrückt",
+            "description": "Regeln gelten in beide Richtungen. Geerbte Regeln zeigen ihren effektiven globalen Zustand.",
             "forward": "Weiterleiten",
             "global": "Global übernehmen",
+            "inheritedStatus": "Global · {{state}}",
+            "effectiveStatus": "Effektiv: {{state}}",
+            "selectStatus": "Status für {{setting}} auswählen: {{state}}",
+            "searchFilters": "Filter durchsuchen",
             "searchSources": "Log-Sources durchsuchen",
+            "rulesCount": "{{count}} Regeln",
+            "suppressedCount": "{{count}} unterdrückt",
             "title": "Bidirektionale Weiterleitungsfilter",
+            "filters": {
+                "all": "Alle",
+                "overrides": "Abweichungen",
+                "suppressed": "Unterdrückt"
+            },
             "groups": {
+                "direct": "Direkte Topics",
                 "logs": "Protokolle",
                 "metrics": "Metriken",
                 "appReply": "App-Antwort",
                 "settings": "Einstellungen",
                 "playback": "Wiedergabe",
                 "appControl": "App-Steuerung"
-            }
+            },
+            "noMatches": "Keine passenden Filter"
         },
         "levelLabel": "Settings level",
         "navigationTitle": "Einstellungen",

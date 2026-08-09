@@ -1170,19 +1170,33 @@
         },
         "mqttForwarding": {
             "suppress": "Supprimer",
-            "description": "Les commutateurs activés transfèrent le topic correspondant dans les deux sens.",
+            "suppressed": "Supprimé",
+            "description": "Les règles s’appliquent dans les deux sens. Les règles héritées affichent leur état global effectif.",
             "forward": "Transférer",
             "global": "Utiliser global",
+            "inheritedStatus": "Global · {{state}}",
+            "effectiveStatus": "Effectif : {{state}}",
+            "selectStatus": "Sélectionner l’état de {{setting}} : {{state}}",
+            "searchFilters": "Rechercher des filtres",
             "searchSources": "Rechercher les sources de journal",
+            "rulesCount": "{{count}} règles",
+            "suppressedCount": "{{count}} supprimées",
             "title": "Filtres de transfert bidirectionnel",
+            "filters": {
+                "all": "Tous",
+                "overrides": "Exceptions",
+                "suppressed": "Supprimés"
+            },
             "groups": {
+                "direct": "Topics directs",
                 "logs": "Journaux",
                 "metrics": "Métriques",
                 "appReply": "Réponse de l’application",
                 "settings": "Paramètres",
                 "playback": "Lecture",
                 "appControl": "Contrôle de l’application"
-            }
+            },
+            "noMatches": "Aucun filtre correspondant"
         },
         "levelLabel": "Niveau des paramètres",
         "navigationTitle": "Paramètres",

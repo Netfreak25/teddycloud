@@ -201,18 +201,33 @@
         },
         "mqttForwarding": {
             "suppress": "bot",
+            "suppressed": "botlu'",
+            "description": "cha' lurghmeyDaq Qap Hoch chut. Hoch chut Dotlh potlh 'ang Hoch DuH.",
             "forward": "lI'",
             "global": "Hoch DuH lo'",
+            "inheritedStatus": "Hoch · {{state}}",
+            "effectiveStatus": "Qapbogh Dotlh: {{state}}",
+            "selectStatus": "{{setting}} Dotlh yIwIv: {{state}}",
+            "searchFilters": "chutmey nej",
             "searchSources": "QonoS mung nej",
+            "rulesCount": "{{count}} chut",
+            "suppressedCount": "{{count}} botlu'",
             "title": "cha' lurghmey jabbI'ID DuHmey",
+            "filters": {
+                "all": "Hoch",
+                "overrides": "pImbogh",
+                "suppressed": "botlu'"
+            },
             "groups": {
+                "direct": "jabbI'ID pongmey",
                 "logs": "QonoSmey",
                 "metrics": "juvta'mey",
                 "appReply": "App jang",
                 "settings": "DuHmey",
                 "playback": "wab much",
                 "appControl": "App SeH"
-            }
+            },
+            "noMatches": "chut tu'lu'be'"
         },
         "navigationTitle": "DuHmey",
         "notifications": {
