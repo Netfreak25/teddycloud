@@ -28,13 +28,26 @@ class Tb2MqttSessionReplacementContractTests(unittest.TestCase):
             self.mqtt.index("static error_t handle_mqtt_pingreq")
         ]
         self.assertLess(connect.index("connack write failed"), connect.index("mqtt_connection_replace_existing_box_sessions(conn)"))
+        self.assertLess(connect.index("conn->established = TRUE"), connect.index("mqtt_connection_replace_existing_box_sessions(conn)"))
 
         passthrough = self.mqtt[
             self.mqtt.index("tb2_mqtt_passthrough_forward_initial") - 500 :
             self.mqtt.index("tb2_mqtt_passthrough_forward_initial") + 500
         ]
         self.assertIn("if (!error)", passthrough)
+        self.assertIn("conn->established = TRUE", passthrough)
         self.assertIn("mqtt_connection_replace_existing_box_sessions(conn)", passthrough)
+
+    def test_incomplete_connection_is_closed_after_bounded_setup_time(self):
+        task = self.mqtt[
+            self.mqtt.index("void mqtt_server_task()") :
+            self.mqtt.index("void mqtt_server_deinit()")
+        ]
+        self.assertIn("#define MQTT_CONNECTION_ESTABLISH_TIMEOUT_MS 15000U", self.mqtt)
+        self.assertIn("conn->accepted_at = osGetSystemTime()", task)
+        self.assertIn("!conn->established", task)
+        self.assertIn("elapsed >= MQTT_CONNECTION_ESTABLISH_TIMEOUT_MS", task)
+        self.assertIn('mqtt_connection_close(conn, "establishment timeout")', task)
 
     def test_topic_promotion_replaces_only_on_first_promotion(self):
         update = self.mqtt[

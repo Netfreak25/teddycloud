@@ -39,6 +39,7 @@ uint_t tcpWaitForEvents(Socket *socket, uint_t eventMask, systime_t timeout);
 #define MQTT_FRESH_TONIES_RETRY_INTERVAL_SEC 5
 #define MQTT_FRESH_TONIES_MAX_ATTEMPTS 3
 #define MQTT_FRESH_TONIES_REASON_MAX 32
+#define MQTT_CONNECTION_ESTABLISH_TIMEOUT_MS 15000U
 #define MQTT_CONNECT_FLAG_USERNAME 0x80U
 #define MQTT_CONNECT_FLAG_PASSWORD 0x40U
 #define MQTT_CONNECT_FLAG_WILL_RETAIN 0x20U
@@ -64,6 +65,8 @@ typedef struct {
     Socket *socket;
     TlsContext *tlsContext;
     bool active;
+    bool_t established;
+    systime_t accepted_at;
     uint8_t buffer[MQTT_MAX_PACKET_SIZE];
     size_t buffer_len;
     bool_t mode_decided;
@@ -2188,6 +2191,7 @@ static error_t handle_mqtt_connect(MqttClientConnection *conn, MqttMessageType t
         return error != NO_ERROR ? error : ERROR_FAILURE;
     }
 
+    conn->established = TRUE;
     mqtt_connection_replace_existing_box_sessions(conn);
 
     return NO_ERROR;
@@ -3293,6 +3297,20 @@ void mqtt_server_task()
         MqttClientConnection *conn = &connections[i];
         if (conn->active)
         {
+            if (!conn->established)
+            {
+                systime_t elapsed = osGetSystemTime() - conn->accepted_at;
+                if (elapsed >= MQTT_CONNECTION_ESTABLISH_TIMEOUT_MS)
+                {
+                    TRACE_WARNING("MQTT connection establishment timeout: slot=%d elapsed_ms=%lu stage=%s\r\n",
+                                  mqtt_connection_slot(conn),
+                                  (unsigned long)elapsed,
+                                  conn->mode_decided ? "mqtt_connect" : "tls_or_mqtt_connect");
+                    mqtt_connection_close(conn, "establishment timeout");
+                    continue;
+                }
+            }
+
             size_t received = 0;
             error_t error = NO_ERROR;
 
@@ -3361,6 +3379,7 @@ void mqtt_server_task()
                                                                              conn->buffer_len);
                                 if (!error)
                                 {
+                                    conn->established = TRUE;
                                     mqtt_connection_replace_existing_box_sessions(conn);
                                 }
                             }
@@ -3555,6 +3574,7 @@ void mqtt_server_task()
                 osMemset(conn, 0, sizeof(MqttClientConnection));
                 conn->socket = clientSocket;
                 conn->active = true;
+                conn->accepted_at = osGetSystemTime();
                 conn->next_packet_id = UINT16_MAX;
                 conn->buffer_len = 0;
                 conn->subscription_count = 0;

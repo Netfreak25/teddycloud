@@ -209,6 +209,10 @@ for the same canonical box ID and overlay. Failed or incomplete reconnects do
 not displace the working session. Pending freshness remains stored in the
 overlay and is retried on the replacement connection.
 
+An accepted TCP connection must complete TLS and MQTT setup within 15 seconds.
+Incomplete handshakes are closed with `establishment timeout`, allowing the box
+to retry instead of leaving a half-open connection pending until server restart.
+
 The capture is packet-based and records `packet_type`, optional `topic`,
 `forwarded`, optional `filter_id`, `generated`, and `packet_complete`.
 `data_base64` always contains the packet actually received from that direction.
@@ -283,6 +287,7 @@ The implementation currently has these fixed limits:
 | `MQTT_FRESH_TONIES_DEBOUNCE_SEC` | `2` | Per-overlay coalescing window before a pending `fresh-tonies` publish may be sent. |
 | `MQTT_FRESH_TONIES_RETRY_INTERVAL_SEC` | `5` | Delay before retrying an unacknowledged per-rUID freshness publish. |
 | `MQTT_FRESH_TONIES_MAX_ATTEMPTS` | `3` | Initial freshness publish plus two retries before closing the connection. |
+| `MQTT_CONNECTION_ESTABLISH_TIMEOUT_MS` | `15000` | Maximum time from TCP accept to completed MQTT CONNECT/CONNACK or transparent initial forwarding. |
 | `MQTT_SETTINGS_DESIRED_MAX_ATTEMPTS` | `3` | Maximum pending settings publishes before waiting for confirm. |
 | `MQTT_SETTINGS_DESIRED_RETRY_INTERVAL_SEC` | `5` | Retry interval for pending settings publishes. |
 | `MQTT_APP_CONTROL_REPLY_WINDOW_SEC` | `30` | Time window used to correlate an `app-control/stl` publish with a later bedtime-state reply. |
