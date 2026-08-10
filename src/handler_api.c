@@ -4677,6 +4677,60 @@ error_t handleApiBoxSleep(HttpConnection *connection, const char_t *uri, const c
     return api_write_status_response(connection, 200, true, message, NULL);
 }
 
+error_t handleApiBoxShutdown(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
+{
+    uint8_t overlay_id = 0;
+    uint_t status_code = 200;
+    const char *message = "Shutdown command published";
+    if (!api_get_box_control_overlay(queryString, &overlay_id, &status_code, &message))
+    {
+        return api_write_status_response(connection, status_code, false, message, NULL);
+    }
+
+    cJSON *json = NULL;
+    if (api_parse_box_control_json(connection, &json) != NO_ERROR || json->child != NULL)
+    {
+        cJSON_Delete(json);
+        return api_write_status_response(connection, 400, false,
+                                         "Shutdown payload must be an empty JSON object", NULL);
+    }
+    cJSON_Delete(json);
+
+    toniebox_state_t *state = get_toniebox_state_id(overlay_id);
+    bool_t bedtime_active = state != NULL && state->bedtime.valid &&
+                            (osStrcasecmp(state->bedtime.state, "on") == 0 ||
+                             osStrcasecmp(state->bedtime.state, "active") == 0);
+
+    if (!mqtt_server_has_sleep_control(overlay_id) ||
+        (!bedtime_active && !mqtt_server_has_bedtime_control(overlay_id)))
+    {
+        return api_write_status_response(connection, 409, false,
+                                         "Toniebox is offline or not subscribed to shutdown controls", NULL);
+    }
+
+    char bedtime_payload[48];
+    osSnprintf(bedtime_payload, sizeof(bedtime_payload),
+               "{\"state\":\"on\",\"duration\":%u}",
+               (unsigned int)API_TB2_BEDTIME_DURATION_MIN);
+    if (!bedtime_active &&
+        !mqtt_server_publish_app_control_stl_for_overlay(overlay_id, bedtime_payload))
+    {
+        return api_write_status_response(connection, 409, false,
+                                         "Could not activate bedtime before shutdown", NULL);
+    }
+
+    if (!mqtt_server_publish_app_control_sleep_for_overlay(overlay_id))
+    {
+        return api_write_status_response(connection, 409, false,
+                                         bedtime_active
+                                             ? "Could not publish shutdown command"
+                                             : "Bedtime was activated but the shutdown command could not be published",
+                                         NULL);
+    }
+
+    return api_write_status_response(connection, 200, true, message, NULL);
+}
+
 static error_t loadToniesCustomJsonRoot(const char *configDir, cJSON **outRoot)
 {
     if (configDir == NULL || outRoot == NULL)

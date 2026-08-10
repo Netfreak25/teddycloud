@@ -249,16 +249,32 @@ class MqttLocalControlContractTests(unittest.TestCase):
         self.assertIn("mqtt_server_publish_app_control_sleep_for_overlay", sleep)
         self.assertIn('{REQ_POST, "/api/box/sleep"', self.routes)
 
+    def test_shutdown_activates_minimum_bedtime_before_sleep_when_needed(self):
+        shutdown_start = self.handler_api.index("error_t handleApiBoxShutdown")
+        shutdown = self.handler_api[
+            shutdown_start : self.handler_api.index("static error_t loadToniesCustomJsonRoot", shutdown_start)
+        ]
+
+        self.assertIn("json->child != NULL", shutdown)
+        self.assertIn("mqtt_server_has_sleep_control", shutdown)
+        self.assertIn("mqtt_server_has_bedtime_control", shutdown)
+        self.assertIn("API_TB2_BEDTIME_DURATION_MIN", shutdown)
+        self.assertIn('{\\"state\\":\\"on\\",\\"duration\\":%u}', shutdown)
+        self.assertIn("mqtt_server_publish_app_control_sleep_for_overlay", shutdown)
+        self.assertIn('{REQ_POST, "/api/box/shutdown"', self.routes)
+
     def test_web_moon_control_exposes_bedtime_alarm_and_sleep(self):
         self.assertIn("TonieboxBedtimeCommand", self.web_types)
         self.assertIn("sleep: boolean", self.web_types)
         self.assertIn("apiControlTonieboxBedtime", self.web_api)
         self.assertIn("apiSleepToniebox", self.web_api)
+        self.assertIn("apiShutdownToniebox", self.web_api)
         self.assertIn("onClick={openBedtimeControls}", self.web_controls)
         self.assertIn("BEDTIME_MINUTES_MIN = 5", self.web_controls)
         self.assertIn("BEDTIME_MINUTES_MAX = 24 * 60", self.web_controls)
         self.assertIn("oneTimeAlarm", self.web_controls)
         self.assertIn("runtime.controls.sleep", self.web_controls)
+        self.assertIn('commandInFlight === "shutdown"', self.web_controls)
         self.assertIn("Math.ceil(runtime.bedtime.duration / 60)", self.web_controls)
 
 

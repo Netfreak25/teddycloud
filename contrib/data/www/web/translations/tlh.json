@@ -361,6 +361,11 @@
             "playlistSavedDetails": "De' pong 'ay'mey pong je polta'",
             "playlistTitle": "De' pong",
             "savePlaylist": "Hoch pol",
+            "shutdown": "Toniebox yIchu'Ha'",
+            "shutdownConfirmAction": "chu'Ha'",
+            "shutdownConfirmDescription": "nISlu'chugh, QongmeH mIw chu' TeddyCloud; ghIq Toniebox QongmoH.",
+            "shutdownConfirmTitle": "Toniebox Dachu'Ha' DaneH'a'?",
+            "shutdownUnavailable": "DaH ra'vam ngeHlaHbe' TeddyCloud",
             "sleepHint": "QongmeH mIw QaptaHvIS neH Qong ra' Qap; mIw mevbe'.",
             "sleepNow": "DaH yIQong"
         }

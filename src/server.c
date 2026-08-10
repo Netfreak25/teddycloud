@@ -183,6 +183,7 @@ request_type_t request_paths[] = {
     {REQ_POST, "/api/box/ping", SERTY_WEB, &handleApiBoxPing},
     {REQ_POST, "/api/box/bedtime", SERTY_WEB, &handleApiBoxBedtime},
     {REQ_POST, "/api/box/sleep", SERTY_WEB, &handleApiBoxSleep},
+    {REQ_POST, "/api/box/shutdown", SERTY_WEB, &handleApiBoxShutdown},
     {REQ_POST, "/api/content/playlist/", SERTY_WEB, &handleApiContentPlaylist},
     {REQ_POST, "/api/assignUnknown", SERTY_WEB, &handleApiAssignUnknown},
     {REQ_GET, "/api/settings/getIndex", SERTY_WEB, &handleApiGetIndex},

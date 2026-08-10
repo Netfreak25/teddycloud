@@ -608,6 +608,7 @@ The validated command endpoints are:
 | `POST /api/box/ping?overlay=<id>` | No caller-provided MQTT payload; the response includes the generated request ID. |
 | `POST /api/box/bedtime?overlay=<id>` | Starts bedtime with `{"state":"on","duration":300..86400}` or stops it with `{"state":"off"}`. |
 | `POST /api/box/sleep?overlay=<id>` | Accepts `{}` and sends the separate sleep command while bedtime mode is active. |
+| `POST /api/box/shutdown?overlay=<id>` | Accepts `{}`. If bedtime is inactive, publishes `{"state":"on","duration":300}` first and immediately follows it with the separate sleep command; with active bedtime it sends only sleep. |
 
 `duration` is an integer number of seconds. A start request rejects values below
 300 seconds or above 86400 seconds. A stop request does not require a duration;
