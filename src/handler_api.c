@@ -6173,7 +6173,11 @@ error_t getTagInfoJson(char ruid[17],
                 api_add_content_playlist(jsonEntry, tafInfo,
                                          client_ctx->settings, item2);
             }
-            if (tafInfo->exists && item != item2)
+            bool_t source_info_available =
+                contentJson._source_model != NULL &&
+                contentJson._source_model[0] != '\0' &&
+                item2 != NULL;
+            if (tafInfo->exists && item != item2 && source_info_available)
             {
                 cJSON *jsonSourceInfo = cJSON_CreateObject();
                 addToniesJsonInfoJson(item2, contentJson._source_model, jsonSourceInfo);
