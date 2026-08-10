@@ -603,7 +603,8 @@ static void api_add_toniebox_runtime(cJSON *json_entry, settings_t *settings, ui
     cJSON_AddBoolToObject(controls, "playback", mqtt_server_has_playback_control(overlay_id));
     cJSON_AddBoolToObject(controls, "volume", mqtt_server_has_volume_control(overlay_id));
     cJSON_AddBoolToObject(controls, "ping", mqtt_server_has_ping_control(overlay_id));
-    cJSON_AddBoolToObject(controls, "bedtime", false);
+    cJSON_AddBoolToObject(controls, "bedtime", mqtt_server_has_bedtime_control(overlay_id));
+    cJSON_AddBoolToObject(controls, "sleep", mqtt_server_has_sleep_control(overlay_id));
 
     cJSON *playback = cJSON_AddObjectToObject(runtime, "playback");
     cJSON_AddBoolToObject(playback, "valid", state->playback_state.valid);
@@ -4132,6 +4133,8 @@ static error_t parseJsonRequestBody(HttpConnection *connection, cJSON **outJson,
 }
 
 #define API_BOX_CONTROL_BODY_MAX 256
+#define API_TB2_BEDTIME_DURATION_MIN 300U
+#define API_TB2_BEDTIME_DURATION_MAX 86400U
 
 static error_t api_write_status_response(HttpConnection *connection, uint_t status_code, bool ok,
                                          const char *message, const char *request_id)
@@ -4527,8 +4530,151 @@ error_t handleApiBoxPing(HttpConnection *connection, const char_t *uri, const ch
 
 error_t handleApiBoxBedtime(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
 {
-    return api_write_status_response(connection, 501, false,
-                                          "Bedtime control is disabled until the STL payload schema is confirmed", NULL);
+    uint8_t overlay_id = 0;
+    uint_t status_code = 200;
+    const char *message = "Bedtime command published";
+    if (!api_get_box_control_overlay(queryString, &overlay_id, &status_code, &message))
+    {
+        return api_write_status_response(connection, status_code, false, message, NULL);
+    }
+
+    cJSON *json = NULL;
+    if (api_parse_box_control_json(connection, &json) != NO_ERROR)
+    {
+        return api_write_status_response(connection, 400, false, "Invalid JSON payload", NULL);
+    }
+
+    cJSON *state = cJSON_GetObjectItemCaseSensitive(json, "state");
+    bool_t state_on = cJSON_IsString(state) && state->valuestring != NULL &&
+                      osStrcmp(state->valuestring, "on") == 0;
+    bool_t state_off = cJSON_IsString(state) && state->valuestring != NULL &&
+                       osStrcmp(state->valuestring, "off") == 0;
+    if (!state_on && !state_off)
+    {
+        cJSON_Delete(json);
+        return api_write_status_response(connection, 400, false,
+                                         "Bedtime state must be 'on' or 'off'", NULL);
+    }
+
+    cJSON *duration_json = cJSON_GetObjectItemCaseSensitive(json, "duration");
+    uint32_t duration = 0;
+    bool_t duration_present = duration_json != NULL;
+    bool_t duration_valid = api_get_json_uint32(json, "duration", &duration) &&
+                            duration >= API_TB2_BEDTIME_DURATION_MIN &&
+                            duration <= API_TB2_BEDTIME_DURATION_MAX;
+    if ((state_on && !duration_valid) || (state_off && duration_present && !duration_valid))
+    {
+        cJSON_Delete(json);
+        return api_write_status_response(connection, 400, false,
+                                         "Bedtime duration must be an integer from 300 through 86400 seconds", NULL);
+    }
+
+    cJSON *one_time_alarm_json = cJSON_GetObjectItemCaseSensitive(json, "oneTimeAlarm");
+    cJSON *alarm_json = cJSON_GetObjectItemCaseSensitive(json, "alarm");
+    bool_t one_time_alarm_present = one_time_alarm_json != NULL;
+    if ((one_time_alarm_present && !cJSON_IsBool(one_time_alarm_json)) ||
+        (state_off && (one_time_alarm_present || alarm_json != NULL)))
+    {
+        cJSON_Delete(json);
+        return api_write_status_response(connection, 400, false,
+                                         "One-time alarms are only valid when bedtime is on", NULL);
+    }
+
+    bool_t one_time_alarm = cJSON_IsTrue(one_time_alarm_json);
+    cJSON *tone_json = alarm_json != NULL ? cJSON_GetObjectItemCaseSensitive(alarm_json, "tone") : NULL;
+    cJSON *volume_json = alarm_json != NULL ? cJSON_GetObjectItemCaseSensitive(alarm_json, "volume") : NULL;
+    cJSON *morning_light_json = alarm_json != NULL ? cJSON_GetObjectItemCaseSensitive(alarm_json, "morningLight") : NULL;
+    if (one_time_alarm &&
+        (!cJSON_IsObject(alarm_json) || !cJSON_IsString(tone_json) || tone_json->valuestring == NULL ||
+         tone_json->valuestring[0] == '\0' || !cJSON_IsNumber(volume_json) ||
+         !cJSON_IsBool(morning_light_json)))
+    {
+        cJSON_Delete(json);
+        return api_write_status_response(connection, 400, false,
+                                         "A one-time alarm requires tone, numeric volume and morningLight", NULL);
+    }
+    if (!one_time_alarm && alarm_json != NULL)
+    {
+        cJSON_Delete(json);
+        return api_write_status_response(connection, 400, false,
+                                         "Alarm details require oneTimeAlarm=true", NULL);
+    }
+
+    cJSON *payload = cJSON_CreateObject();
+    if (payload == NULL)
+    {
+        cJSON_Delete(json);
+        return api_write_status_response(connection, 500, false, "Out of memory", NULL);
+    }
+    cJSON_AddStringToObject(payload, "state", state_on ? "on" : "off");
+    if (state_on)
+    {
+        cJSON_AddNumberToObject(payload, "duration", duration);
+        if (one_time_alarm_present)
+        {
+            cJSON_AddBoolToObject(payload, "oneTimeAlarm", one_time_alarm);
+        }
+        if (one_time_alarm)
+        {
+            cJSON *alarm = cJSON_AddObjectToObject(payload, "alarm");
+            cJSON_AddStringToObject(alarm, "tone", tone_json->valuestring);
+            cJSON_AddNumberToObject(alarm, "volume", volume_json->valuedouble);
+            cJSON_AddBoolToObject(alarm, "morningLight", cJSON_IsTrue(morning_light_json));
+        }
+    }
+
+    char *payload_json = cJSON_PrintUnformatted(payload);
+    cJSON_Delete(payload);
+    cJSON_Delete(json);
+    if (payload_json == NULL)
+    {
+        return api_write_status_response(connection, 500, false, "Out of memory", NULL);
+    }
+
+    bool_t published = mqtt_server_publish_app_control_stl_for_overlay(overlay_id, payload_json);
+    cJSON_free(payload_json);
+    if (!published)
+    {
+        return api_write_status_response(connection, 409, false,
+                                         "Toniebox is offline or not subscribed to bedtime control", NULL);
+    }
+    return api_write_status_response(connection, 200, true, message, NULL);
+}
+
+error_t handleApiBoxSleep(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
+{
+    uint8_t overlay_id = 0;
+    uint_t status_code = 200;
+    const char *message = "Sleep command published";
+    if (!api_get_box_control_overlay(queryString, &overlay_id, &status_code, &message))
+    {
+        return api_write_status_response(connection, status_code, false, message, NULL);
+    }
+
+    cJSON *json = NULL;
+    if (api_parse_box_control_json(connection, &json) != NO_ERROR || json->child != NULL)
+    {
+        cJSON_Delete(json);
+        return api_write_status_response(connection, 400, false,
+                                         "Sleep payload must be an empty JSON object", NULL);
+    }
+    cJSON_Delete(json);
+
+    toniebox_state_t *state = get_toniebox_state_id(overlay_id);
+    bool_t bedtime_active = state != NULL && state->bedtime.valid &&
+                            (osStrcasecmp(state->bedtime.state, "on") == 0 ||
+                             osStrcasecmp(state->bedtime.state, "active") == 0);
+    if (!bedtime_active)
+    {
+        return api_write_status_response(connection, 409, false,
+                                         "Sleep requires an active bedtime mode", NULL);
+    }
+    if (!mqtt_server_publish_app_control_sleep_for_overlay(overlay_id))
+    {
+        return api_write_status_response(connection, 409, false,
+                                         "Toniebox is offline or not subscribed to sleep control", NULL);
+    }
+    return api_write_status_response(connection, 200, true, message, NULL);
 }
 
 static error_t loadToniesCustomJsonRoot(const char *configDir, cJSON **outRoot)

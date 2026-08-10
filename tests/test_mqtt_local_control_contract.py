@@ -16,6 +16,18 @@ class MqttLocalControlContractTests(unittest.TestCase):
         cls.proxy = (ROOT / "src/tb2_mqtt_passthrough.c").read_text(encoding="utf-8")
         cls.settings = (ROOT / "src/settings.c").read_text(encoding="utf-8")
         cls.handler_cloud = (ROOT / "src/handler_cloud.c").read_text(encoding="utf-8")
+        cls.handler_api = (ROOT / "src/handler_api.c").read_text(encoding="utf-8")
+        cls.routes = (ROOT / "src/server.c").read_text(encoding="utf-8")
+        cls.web_api = (
+            ROOT / "teddycloud_web/src/api/apis/TeddyCloudApi.ts"
+        ).read_text(encoding="utf-8")
+        cls.web_controls = (
+            ROOT
+            / "teddycloud_web/src/components/tonieboxes/tonieboxcard/live/TonieboxLiveControls.tsx"
+        ).read_text(encoding="utf-8")
+        cls.web_types = (
+            ROOT / "teddycloud_web/src/types/tonieboxTypes.ts"
+        ).read_text(encoding="utf-8")
         cls.web_handler = (
             ROOT / "teddyCloud_web/src/data/SettingsDataHandler.ts"
         ).read_text(encoding="utf-8")
@@ -186,6 +198,68 @@ class MqttLocalControlContractTests(unittest.TestCase):
             "use_tb1_audio_id_policy &&\n                                  settings->cloud.updateOnLowerAudioId",
             self.handler_cloud,
         )
+
+    def test_bedtime_and_sleep_use_the_existing_local_control_gate(self):
+        self.assertIn(
+            'mqtt_server_has_app_control_subscription(overlay_id, "stl")',
+            self.server,
+        )
+        self.assertIn(
+            'mqtt_server_has_app_control_subscription(overlay_id, "sleep")',
+            self.server,
+        )
+        self.assertIn(
+            'mqtt_server_publish_app_control_for_overlay(overlay_id, "sleep", "{}", FALSE)',
+            self.server,
+        )
+        self.assertIn(
+            'cJSON_AddBoolToObject(controls, "bedtime", mqtt_server_has_bedtime_control(overlay_id))',
+            self.handler_api,
+        )
+        self.assertIn(
+            'cJSON_AddBoolToObject(controls, "sleep", mqtt_server_has_sleep_control(overlay_id))',
+            self.handler_api,
+        )
+
+    def test_bedtime_http_wrapper_validates_confirmed_payload(self):
+        bedtime = self.handler_api[
+            self.handler_api.index("error_t handleApiBoxBedtime") :
+            self.handler_api.index("error_t handleApiBoxSleep")
+        ]
+        self.assertIn("API_TB2_BEDTIME_DURATION_MIN 300U", self.handler_api)
+        self.assertIn("API_TB2_BEDTIME_DURATION_MAX 86400U", self.handler_api)
+        self.assertIn('osStrcmp(state->valuestring, "on")', bedtime)
+        self.assertIn('osStrcmp(state->valuestring, "off")', bedtime)
+        self.assertIn('"oneTimeAlarm"', bedtime)
+        self.assertIn('"tone"', bedtime)
+        self.assertIn('"volume"', bedtime)
+        self.assertIn('"morningLight"', bedtime)
+        self.assertIn("mqtt_server_publish_app_control_stl_for_overlay", bedtime)
+        self.assertNotIn("501", bedtime)
+
+    def test_sleep_requires_empty_body_and_active_bedtime(self):
+        sleep_start = self.handler_api.index("error_t handleApiBoxSleep")
+        sleep = self.handler_api[
+            sleep_start :
+            self.handler_api.index("static error_t loadToniesCustomJsonRoot", sleep_start)
+        ]
+        self.assertIn("json->child != NULL", sleep)
+        self.assertIn('osStrcasecmp(state->bedtime.state, "on")', sleep)
+        self.assertIn('osStrcasecmp(state->bedtime.state, "active")', sleep)
+        self.assertIn("mqtt_server_publish_app_control_sleep_for_overlay", sleep)
+        self.assertIn('{REQ_POST, "/api/box/sleep"', self.routes)
+
+    def test_web_moon_control_exposes_bedtime_alarm_and_sleep(self):
+        self.assertIn("TonieboxBedtimeCommand", self.web_types)
+        self.assertIn("sleep: boolean", self.web_types)
+        self.assertIn("apiControlTonieboxBedtime", self.web_api)
+        self.assertIn("apiSleepToniebox", self.web_api)
+        self.assertIn("onClick={openBedtimeControls}", self.web_controls)
+        self.assertIn("BEDTIME_MINUTES_MIN = 5", self.web_controls)
+        self.assertIn("BEDTIME_MINUTES_MAX = 24 * 60", self.web_controls)
+        self.assertIn("oneTimeAlarm", self.web_controls)
+        self.assertIn("runtime.controls.sleep", self.web_controls)
+        self.assertIn("Math.ceil(runtime.bedtime.duration / 60)", self.web_controls)
 
 
 if __name__ == "__main__":

@@ -3813,6 +3813,16 @@ bool_t mqtt_server_has_ping_control(uint8_t overlay_id)
     return mqtt_server_has_app_control_subscription(overlay_id, "ping");
 }
 
+bool_t mqtt_server_has_bedtime_control(uint8_t overlay_id)
+{
+    return mqtt_server_has_app_control_subscription(overlay_id, "stl");
+}
+
+bool_t mqtt_server_has_sleep_control(uint8_t overlay_id)
+{
+    return mqtt_server_has_app_control_subscription(overlay_id, "sleep");
+}
+
 static const char *mqtt_server_playback_action_name(mqtt_server_playback_action_t action)
 {
     switch (action)
@@ -3934,6 +3944,11 @@ bool_t mqtt_server_publish_ping_for_overlay(uint8_t overlay_id, char *request_id
 bool_t mqtt_server_publish_app_control_stl_for_overlay(uint8_t overlay_id, const char *payload_json)
 {
     return mqtt_server_publish_app_control_for_overlay(overlay_id, "stl", payload_json, TRUE);
+}
+
+bool_t mqtt_server_publish_app_control_sleep_for_overlay(uint8_t overlay_id)
+{
+    return mqtt_server_publish_app_control_for_overlay(overlay_id, "sleep", "{}", FALSE);
 }
 
 static void mqtt_uid_to_ruid(uint64_t uid, char ruid[17])

@@ -20,6 +20,8 @@ bool_t mqtt_server_has_active_box_connection(uint8_t overlay_id);
 bool_t mqtt_server_has_playback_control(uint8_t overlay_id);
 bool_t mqtt_server_has_volume_control(uint8_t overlay_id);
 bool_t mqtt_server_has_ping_control(uint8_t overlay_id);
+bool_t mqtt_server_has_bedtime_control(uint8_t overlay_id);
+bool_t mqtt_server_has_sleep_control(uint8_t overlay_id);
 bool_t mqtt_server_publish_fresh_tonies(client_ctx_t *client_ctx);
 bool_t mqtt_server_publish_fresh_tonies_for_overlay(uint8_t overlay_id);
 bool_t mqtt_server_publish_fresh_tonie_for_overlay(uint8_t overlay_id,
@@ -32,3 +34,4 @@ bool_t mqtt_server_publish_playback_position_for_overlay(uint8_t overlay_id, uin
 bool_t mqtt_server_publish_volume_for_overlay(uint8_t overlay_id, uint32_t level);
 bool_t mqtt_server_publish_ping_for_overlay(uint8_t overlay_id, char *request_id, size_t request_id_size);
 bool_t mqtt_server_publish_app_control_stl_for_overlay(uint8_t overlay_id, const char *payload_json);
+bool_t mqtt_server_publish_app_control_sleep_for_overlay(uint8_t overlay_id);

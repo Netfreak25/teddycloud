@@ -563,6 +563,7 @@ Currently implemented direct publish APIs:
 | `mqtt_server_publish_volume_for_overlay()` | `toniebox/<box_cn>/app-control/volume` | Builds a level payload in the confirmed range from 0 through 10. |
 | `mqtt_server_publish_ping_for_overlay()` | `toniebox/<box_cn>/app-control/ping` | Generates a bounded server request ID and builds the ping payload. |
 | `mqtt_server_publish_app_control_stl_for_overlay()` | `toniebox/<box_cn>/app-control/stl` | Sends the caller-provided JSON payload after syntax validation and records a local correlation marker. |
+| `mqtt_server_publish_app_control_sleep_for_overlay()` | `toniebox/<box_cn>/app-control/sleep` | Sends the empty JSON object required to put a box with active bedtime mode to sleep. |
 
 App-control publishes are box-only. The server sends them only to active
 connections that were mapped from a TLS client certificate to the requested
@@ -605,10 +606,37 @@ The validated command endpoints are:
 | `POST /api/box/playback?overlay=<id>` | A confirmed action, or `setPosition` with `chapter` and `ms`. |
 | `POST /api/box/volume?overlay=<id>` | `{"level":0..10}`. |
 | `POST /api/box/ping?overlay=<id>` | No caller-provided MQTT payload; the response includes the generated request ID. |
-| `POST /api/box/bedtime?overlay=<id>` | Returns `501` until the STL command schema is confirmed. |
+| `POST /api/box/bedtime?overlay=<id>` | Starts bedtime with `{"state":"on","duration":300..86400}` or stops it with `{"state":"off"}`. |
+| `POST /api/box/sleep?overlay=<id>` | Accepts `{}` and sends the separate sleep command while bedtime mode is active. |
+
+`duration` is an integer number of seconds. A start request rejects values below
+300 seconds or above 86400 seconds. A stop request does not require a duration;
+an optional supplied duration must still be inside the same range, so zero never
+acts as a stop shortcut.
+
+The bedtime start payload can optionally include one one-time alarm:
+
+```json
+{
+  "state": "on",
+  "duration": 1800,
+  "oneTimeAlarm": true,
+  "alarm": {
+    "tone": "<tone-id>",
+    "volume": 50,
+    "morningLight": true
+  }
+}
+```
+
+The HTTP wrapper validates the field types but deliberately does not invent a
+protocol range for alarm volume or a list of tone IDs. The WebUI uses 0 through
+100 as a conservative input range. `sleep` is not equivalent to
+`{"state":"off"}`: it asks an already active bedtime session to fade and put the
+box into its sleep state.
 
 Invalid input returns `400`, an unknown overlay returns `404`, and a non-TB2,
-offline or not-exactly-subscribed box returns `409`.
+offline or not-subscribed box returns `409`.
 
 The WebUI polls the bundled box response every two seconds while the browser
 tab is visible and refreshes immediately after a command. It resolves Tonie

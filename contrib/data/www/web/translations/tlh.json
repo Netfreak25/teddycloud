@@ -321,6 +321,20 @@
             "uploadTonieboxCertificates": "Toniebox{{name}} certificates ngeH"
         },
         "live": {
+            "alarmTone": "ghogh ID",
+            "alarmTonePlaceholder": "ghogh ID lugh yIghItlh",
+            "alarmVolume": "ghuH ghogh HoS",
+            "bedtime": "QongmeH mIw",
+            "bedtimeCancel": "qIl",
+            "bedtimeControl": "QongmeH mIw SeH",
+            "bedtimeDuration": "{{minutes}} tup",
+            "bedtimeDurationHint": "5 tupvo' 24 repvaD",
+            "bedtimeDurationLabel": "poH",
+            "bedtimeStart": "tagh",
+            "bedtimeStop": "mev",
+            "bedtimeUnknown": "QongmeH Dotlh Sovbe'lu'",
+            "bedtimeUpdate": "choH",
+            "bedtimeUntil": "{{time}}-vaD",
             "cancelPlaylistEdit": "qIl",
             "chapter": "'ay' {{number}}",
             "chapterDuration": "poH {{time}}",
@@ -328,6 +342,10 @@
             "chapters": "'ay'mey",
             "customContent": "De' le'",
             "editPlaylist": "choH",
+            "minutes": "tup",
+            "morningLight": "po wov",
+            "oneTimeAlarm": "wa'logh Qapbogh ghuH",
+            "oneTimeAlarmHint": "QongmeH mIw tlhejlaH ghuH",
             "playlistTypes": {
                 "directTaf": "nIqHom le'",
                 "tap": "TeddyAudio QonoS"
@@ -342,7 +360,9 @@
             "playlistSaved": "QoQ tetlh pollu'",
             "playlistSavedDetails": "De' pong 'ay'mey pong je polta'",
             "playlistTitle": "De' pong",
-            "savePlaylist": "Hoch pol"
+            "savePlaylist": "Hoch pol",
+            "sleepHint": "QongmeH mIw QaptaHvIS neH Qong ra' Qap; mIw mevbe'.",
+            "sleepNow": "DaH yIQong"
         }
     },
     "tonies": {
