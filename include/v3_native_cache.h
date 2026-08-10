@@ -55,10 +55,19 @@ typedef struct
 
 typedef struct
 {
+    uint8_t overlay_id;
+    char ruid[TB2_RUID_SIZE];
+    uint32_t content_version;
+} v3_native_library_origin_t;
+
+typedef struct
+{
     char content_hash[V3_NATIVE_LIBRARY_HASH_HEX_SIZE];
     uint32_t audio_id;
     v3_native_library_collection_chapter_t *chapters;
     size_t chapter_count;
+    v3_native_library_origin_t *origins;
+    size_t origin_count;
 } v3_native_library_collection_t;
 
 typedef struct

@@ -4,7 +4,13 @@ This subsystem stores display names for directly assigned custom TAF files. It i
 
 ## Behavior
 
-The live TB2 playlist uses the custom TAF header as its authoritative structure. Its chapter count is always `n_track_page_nums`; original Tonie titles and their count must not enlarge or relabel custom content. TAF track positions are chapter start offsets and the WebUI labels them accordingly.
+The live TB2 playlist uses the custom TAF header as its authoritative structure. Its chapter count is always `n_track_page_nums`; metadata belonging only to the physical Tonie must not enlarge or relabel custom content. TAF track positions are chapter start offsets and the WebUI labels them accordingly.
+
+When the assigned TAF's exact `audio_id` and SHA-1 identify a catalog entry and
+its track count equals the real TAF chapter count, that entry supplies the
+initial content and chapter titles. This is content-specific metadata, not a
+fallback to the physical Tonie's model. User-saved playlist metadata always
+wins. Unknown or count-mismatched TAFs keep the neutral `Chapter N` fallback.
 
 Users can store one content title and one title for every real chapter. The metadata is addressed by the direct TAF content identity and lives at:
 
@@ -35,12 +41,22 @@ Changing the assigned TAF selects a different metadata document, while assigning
 
 ### `src/handler_api.c`, `include/handler_api.h`, and `src/server.c`
 
-- What changed: `getTagInfoJson()` exposes the exact direct-TAF chapter count and saved/default names, and `POST /api/content/playlist/<RUID>` saves one complete set of names for the selected overlay.
+- What changed: `getTagInfoJson()` exposes the exact direct-TAF chapter count, user-saved names or exact TAF catalog defaults, and `POST /api/content/playlist/<RUID>` saves one complete set of names for the selected overlay. Native TB2 collections expose a separate read-only playlist resolved from their recorded origins and chapters.
 - Why: the server is the only place that can validate the current direct TAF identity and chapter count before accepting edited names.
-- Why this approach: accepting a client-provided content hash or chapter count would allow stale browser state to write metadata for the wrong source.
+- Why this approach: accepting a client-provided content hash or chapter count would allow stale browser state to write metadata for the wrong source. Resolving defaults from the exact TAF identity avoids reusing unrelated metadata from the physical Tonie.
+
+### `include/v3_native_cache.h` and `src/v3_native_cache.c`
+
+- What changed: validated native collections expose their recorded overlay,
+  rUID and content-version origins to read-only API consumers.
+- Why: the live playlist must resolve source metadata from the collection that
+  is actually assigned, including when it is assigned to a different Tonie.
+- Why this approach: using the target Tonie's model would silently show the
+  wrong title whenever two Tonies share a chapter count; origins are already
+  part of the immutable library manifest and require no new persisted format.
 
 ### `teddycloud_web/src/components/tonieboxes/tonieboxcard/live`
 
-- What changed: directly assigned custom TAF content no longer falls back to original Tonie track names. The drawer edits the content title and all real chapter titles, saves them together, and refreshes the current card after success.
+- What changed: directly assigned custom TAF content consumes only the playlist metadata selected by the backend. The same resolver now renders read-only native-collection playlists. The drawer edits the content title and all real TAF chapter titles, saves them together, and refreshes the current card after success.
 - Why: partial per-row saves could leave a mixed title set, and the original Tonie catalog is unrelated after a private TAF is assigned.
-- Why this approach: one explicit save keeps the editor simple and matches the backend's content-version-level document.
+- Why this approach: one explicit save keeps the editor simple and matches the backend's content-version-level document; keeping source resolution in the backend prevents the browser from guessing whether catalog metadata belongs to the assigned bytes.

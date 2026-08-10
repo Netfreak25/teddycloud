@@ -5821,7 +5821,8 @@ bool isHexString(const char *buf, size_t maxLen)
 
 static void api_add_content_playlist(cJSON *json_entry,
                                      tonie_info_t *taf_info,
-                                     settings_t *settings)
+                                     settings_t *settings,
+                                     const toniesJson_item_t *source_item)
 {
     if (!content_playlist_is_editable(taf_info))
     {
@@ -5832,6 +5833,9 @@ static void api_add_content_playlist(cJSON *json_entry,
     content_playlist_t saved;
     error_t load_error = content_playlist_load(settings, taf_info, &saved);
     bool_t has_saved_playlist = load_error == NO_ERROR && saved.valid;
+    bool_t has_exact_source_metadata =
+        source_item != NULL && source_item->tracks != NULL &&
+        source_item->tracks_count == chapter_count;
     if (load_error != NO_ERROR && load_error != ERROR_NOT_FOUND)
     {
         TRACE_WARNING("Ignoring invalid custom content playlist metadata audioId=%08" PRIX32 ": %s\r\n",
@@ -5844,7 +5848,11 @@ static void api_add_content_playlist(cJSON *json_entry,
     cJSON_AddBoolToObject(playlist, "editable", TRUE);
     cJSON_AddNumberToObject(playlist, "chapterCount", chapter_count);
     cJSON_AddStringToObject(playlist, "title",
-                            has_saved_playlist ? saved.title : "");
+                            has_saved_playlist
+                                ? saved.title
+                                : (has_exact_source_metadata && source_item->title != NULL
+                                       ? source_item->title
+                                       : ""));
     cJSON *tracks = cJSON_AddArrayToObject(playlist, "tracks");
     for (size_t i = 0; i < chapter_count; i++)
     {
@@ -5852,6 +5860,10 @@ static void api_add_content_playlist(cJSON *json_entry,
         if (has_saved_playlist && i < saved.track_count)
         {
             title = saved.tracks[i];
+        }
+        else if (has_exact_source_metadata && source_item->tracks[i] != NULL)
+        {
+            title = source_item->tracks[i];
         }
         cJSON_AddItemToArray(tracks, cJSON_CreateString(title));
     }
@@ -5886,6 +5898,94 @@ static void api_add_content_playlist(cJSON *json_entry,
 
     osFreeMem(calculated_durations);
     content_playlist_free(&saved);
+}
+
+static toniesJson_item_t *api_native_collection_source_metadata(
+    const v3_native_library_collection_t *collection)
+{
+    if (collection == NULL)
+    {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < collection->origin_count; i++)
+    {
+        const v3_native_library_origin_t *origin = &collection->origins[i];
+        settings_t *origin_settings = get_settings_id(origin->overlay_id);
+        if (origin_settings == NULL || !origin_settings->internal.config_used)
+        {
+            continue;
+        }
+
+        char *content_path = NULL;
+        getContentPathFromCharRUID((char *)origin->ruid, &content_path,
+                                  origin_settings);
+        if (content_path == NULL)
+        {
+            continue;
+        }
+
+        contentJson_t content_json;
+        osMemset(&content_json, 0, sizeof(content_json));
+        error_t error = load_content_json(content_path, &content_json, FALSE,
+                                          origin_settings);
+        osFreeMem(content_path);
+        toniesJson_item_t *item = error == NO_ERROR
+                                      ? tonies_byModel(content_json.tonie_model)
+                                      : NULL;
+        free_content_json(&content_json);
+        if (item != NULL && item->tracks != NULL &&
+            item->tracks_count == collection->chapter_count)
+        {
+            return item;
+        }
+    }
+    return NULL;
+}
+
+static void api_add_native_collection_playlist(cJSON *json_entry,
+                                                tonie_info_t *taf_info,
+                                                settings_t *settings)
+{
+    if (json_entry == NULL || taf_info == NULL || settings == NULL ||
+        taf_info->json._source_type != CT_SOURCE_NATIVE_COLLECTION)
+    {
+        return;
+    }
+
+    v3_native_library_collection_t collection;
+    error_t error = v3_native_library_collection_load(
+        settings->internal.librarydirfull, taf_info->json.source, FALSE,
+        &collection);
+    if (error != NO_ERROR)
+    {
+        TRACE_WARNING("Ignoring invalid native TB2 playlist source %s: %s\r\n",
+                      taf_info->json.source, error2text(error));
+        return;
+    }
+
+    toniesJson_item_t *source_item =
+        api_native_collection_source_metadata(&collection);
+    cJSON *playlist = cJSON_AddObjectToObject(json_entry, "playlist");
+    cJSON_AddStringToObject(playlist, "kind", "native_collection");
+    cJSON_AddBoolToObject(playlist, "editable", FALSE);
+    cJSON_AddNumberToObject(playlist, "chapterCount",
+                           collection.chapter_count);
+    cJSON_AddStringToObject(
+        playlist, "title",
+        source_item != NULL && source_item->title != NULL ? source_item->title
+                                                          : "");
+
+    cJSON *tracks = cJSON_AddArrayToObject(playlist, "tracks");
+    for (size_t i = 0; i < collection.chapter_count; i++)
+    {
+        const char *title = source_item != NULL && source_item->tracks[i] != NULL
+                                ? source_item->tracks[i]
+                                : collection.chapters[i].original_name;
+        cJSON_AddItemToArray(tracks, cJSON_CreateString(title));
+    }
+    cJSON_AddArrayToObject(playlist, "durations");
+    v3_native_library_collection_free(&collection);
 }
 
 static void api_add_tap_playlist(cJSON *json_entry,
@@ -6063,9 +6163,15 @@ error_t getTagInfoJson(char ruid[17],
                 api_add_tap_playlist(jsonEntry, tafInfo, client_ctx->settings, ruid,
                                      content_version_valid, content_version);
             }
+            else if (tafInfo->json._source_type == CT_SOURCE_NATIVE_COLLECTION)
+            {
+                api_add_native_collection_playlist(jsonEntry, tafInfo,
+                                                   client_ctx->settings);
+            }
             else
             {
-                api_add_content_playlist(jsonEntry, tafInfo, client_ctx->settings);
+                api_add_content_playlist(jsonEntry, tafInfo,
+                                         client_ctx->settings, item2);
             }
             if (tafInfo->exists && item != item2)
             {

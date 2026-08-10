@@ -1531,6 +1531,7 @@ void v3_native_library_collection_free(
         }
     }
     osFreeMem(collection->chapters);
+    osFreeMem(collection->origins);
     osMemset(collection, 0, sizeof(*collection));
 }
 
@@ -1646,8 +1647,12 @@ error_t v3_native_library_collection_load(
     cJSON *chapters = root != NULL
                           ? cJSON_GetObjectItemCaseSensitive(root, "chapters")
                           : NULL;
+    cJSON *origins = root != NULL
+                         ? cJSON_GetObjectItemCaseSensitive(root, "origins")
+                         : NULL;
     uint32_t schema = 0;
     int chapter_count = cJSON_IsArray(chapters) ? cJSON_GetArraySize(chapters) : 0;
+    int origin_count = cJSON_IsArray(origins) ? cJSON_GetArraySize(origins) : -1;
     bool_t valid = root != NULL &&
                    end == (const char *)entry_data + entry_length &&
                    v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(
@@ -1663,7 +1668,8 @@ error_t v3_native_library_collection_load(
                    v3_native_library_json_string_equals(
                        cJSON_GetObjectItemCaseSensitive(root, "contentHash"),
                        collection->content_hash) &&
-                   chapter_count > 0 && chapter_count <= TONIEFILE_MAX_SOURCES;
+                   chapter_count > 0 && chapter_count <= TONIEFILE_MAX_SOURCES &&
+                   origin_count >= 0;
     if (!valid)
     {
         cJSON_Delete(root);
@@ -1682,6 +1688,54 @@ error_t v3_native_library_collection_load(
     osMemset(collection->chapters, 0,
              sizeof(*collection->chapters) * (size_t)chapter_count);
     collection->chapter_count = (size_t)chapter_count;
+
+    if (origin_count > 0)
+    {
+        collection->origins = osAllocMem(
+            sizeof(*collection->origins) * (size_t)origin_count);
+        if (collection->origins == NULL)
+        {
+            cJSON_Delete(root);
+            error = ERROR_OUT_OF_MEMORY;
+            goto cleanup;
+        }
+        osMemset(collection->origins, 0,
+                 sizeof(*collection->origins) * (size_t)origin_count);
+        collection->origin_count = (size_t)origin_count;
+
+        for (size_t i = 0; i < collection->origin_count; i++)
+        {
+            cJSON *origin = cJSON_GetArrayItem(origins, (int)i);
+            cJSON *ruid = origin != NULL
+                              ? cJSON_GetObjectItemCaseSensitive(origin, "ruid")
+                              : NULL;
+            uint32_t overlay_id = 0;
+            uint32_t content_version = 0;
+            valid = cJSON_IsObject(origin) && cJSON_IsString(ruid) &&
+                    ruid->valuestring != NULL &&
+                    v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(
+                                           origin, "overlay"),
+                                       &overlay_id, TRUE) &&
+                    overlay_id < MAX_OVERLAYS &&
+                    v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(
+                                           origin, "contentVersion"),
+                                       &content_version, FALSE) &&
+                    tb2_ruid_canonicalize(
+                        ruid->valuestring, collection->origins[i].ruid);
+            if (!valid)
+            {
+                error = ERROR_INVALID_FILE;
+                break;
+            }
+            collection->origins[i].overlay_id = (uint8_t)overlay_id;
+            collection->origins[i].content_version = content_version;
+        }
+        if (!valid)
+        {
+            cJSON_Delete(root);
+            goto cleanup;
+        }
+    }
 
     for (size_t i = 0; i < collection->chapter_count; i++)
     {

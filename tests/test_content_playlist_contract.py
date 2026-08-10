@@ -59,9 +59,7 @@ class ContentPlaylistContractTests(unittest.TestCase):
         self.assertIn('REQ_POST, "/api/content/playlist/"', self.server)
 
     def test_custom_playlist_does_not_reuse_original_tonie_tracks(self):
-        custom_start = self.controls.index(
-            'if (tonie?.playlist?.kind === "direct_taf" || tonie?.playlist?.editable)'
-        )
+        custom_start = self.controls.index('tonie?.playlist?.kind === "direct_taf"')
         original_start = self.controls.index("const trackCount = Math.max", custom_start)
         custom_path = self.controls[custom_start:original_start]
         self.assertIn("tonie.playlist.chapterCount", custom_path)
@@ -112,7 +110,7 @@ class ContentPlaylistContractTests(unittest.TestCase):
         self.assertIn("trackDurations={tonie?.playlist?.durations}", self.controls)
         self.assertIn("chapterDuration", self.drawer)
 
-    def test_custom_title_does_not_fall_back_to_original_tonie_metadata(self):
+    def test_custom_title_uses_only_exact_taf_metadata_as_default(self):
         custom_start = self.controls.index("const series = customContent")
         custom_title = self.controls[
             custom_start : self.controls.index(": tonie?.tonieInfo.series", custom_start)
@@ -122,10 +120,26 @@ class ContentPlaylistContractTests(unittest.TestCase):
         self.assertNotIn("sourceInfo", custom_title)
         playlist_api = self.api[
             self.api.index("static void api_add_content_playlist") :
-            self.api.index("error_t getTagInfoJson", self.api.index("static void api_add_content_playlist"))
+            self.api.index(
+                "static toniesJson_item_t *api_native_collection_source_metadata",
+                self.api.index("static void api_add_content_playlist"),
+            )
         ]
-        self.assertNotIn("source_item", playlist_api)
-        self.assertIn('has_saved_playlist ? saved.title : ""', playlist_api)
+        self.assertIn("source_item->tracks_count == chapter_count", playlist_api)
+        self.assertIn("source_item->title", playlist_api)
+        self.assertIn("source_item->tracks[i]", playlist_api)
+        self.assertIn("has_saved_playlist", playlist_api)
+
+    def test_native_collection_exposes_its_own_playlist_metadata(self):
+        native_api = self.api[
+            self.api.index("static toniesJson_item_t *api_native_collection_source_metadata") :
+            self.api.index("static void api_add_tap_playlist")
+        ]
+        self.assertIn("collection->origins", native_api)
+        self.assertIn("item->tracks_count == collection->chapter_count", native_api)
+        self.assertIn('cJSON_AddStringToObject(playlist, "kind", "native_collection")', native_api)
+        self.assertIn("collection.chapters[i].original_name", native_api)
+        self.assertIn('tonie?.playlist?.kind === "native_collection"', self.controls)
 
     def test_all_languages_contain_playlist_editor_labels(self):
         required = {
