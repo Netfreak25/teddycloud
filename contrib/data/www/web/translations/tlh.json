@@ -385,6 +385,9 @@
             "cachePreferenceAuto": "TeddyCloud wIv",
             "cachePreferenceTaf": "TAF maS",
             "cachePreferenceV3": "V3 mung maS",
+            "restoreOriginalHint": "wavlu'bogh De' teq; polta'bogh mung De' Hoch lo'.",
+            "restoreOriginalTaf": "mung TAF lo'",
+            "restoreOriginalV3": "mung V3 lo'",
             "modelInfoLanguage": "Hol",
             "save": "pol"
         },

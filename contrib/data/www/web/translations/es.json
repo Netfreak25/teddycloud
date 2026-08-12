@@ -3151,6 +3151,9 @@
             "cachePreferenceAuto": "Automático",
             "cachePreferenceTaf": "Preferir TAF",
             "cachePreferenceV3": "Preferir V3 nativo",
+            "restoreOriginalHint": "Eliminar el contenido asignado y utilizar una caché original completa.",
+            "restoreOriginalTaf": "Usar TAF original",
+            "restoreOriginalV3": "Usar original V3 nativo",
             "source": "Fuente",
             "title": "Editar Tonie/Coin"
         },

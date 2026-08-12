@@ -3151,6 +3151,9 @@
             "cachePreferenceAuto": "Automatisch",
             "cachePreferenceTaf": "TAF bevorzugen",
             "cachePreferenceV3": "Natives V3 bevorzugen",
+            "restoreOriginalHint": "Zugewiesenen Inhalt entfernen und einen vollständigen Original-Cache verwenden.",
+            "restoreOriginalTaf": "Original-TAF verwenden",
+            "restoreOriginalV3": "Natives V3-Original verwenden",
             "source": "Quelle",
             "title": "Tonie/Tag bearbeiten"
         },

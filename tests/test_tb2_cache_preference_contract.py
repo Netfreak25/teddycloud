@@ -119,8 +119,46 @@ class Tb2CachePreferenceContractTests(unittest.TestCase):
                 "cachePreferenceAuto",
                 "cachePreferenceTaf",
                 "cachePreferenceV3",
+                "restoreOriginalHint",
+                "restoreOriginalTaf",
+                "restoreOriginalV3",
             ):
                 self.assertTrue(edit_modal[key], f"{locale}: {key}")
+
+    def test_complete_original_caches_can_replace_an_assigned_source(self) -> None:
+        card = (
+            self.web / "src/components/tonies/toniecard/TonieCard.tsx"
+        ).read_text(encoding="utf-8")
+        modal = (
+            self.web / "src/components/tonies/toniecard/modals/EditTonieModal.tsx"
+        ).read_text(encoding="utf-8")
+        save_flow = (
+            self.web
+            / "src/components/tonies/toniecard/hooks/useTonieCardSaveFlow.ts"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "originalTafAvailable={tonieCard.cacheState?.tafComplete === true}",
+            card,
+        )
+        self.assertIn(
+            "originalV3Available={tonieCard.cacheState?.v3Complete === true}",
+            card,
+        )
+        self.assertIn("hasAssignedSource &&", modal)
+        self.assertIn("originalTafAvailable || originalV3Available", modal)
+        restore = self.section(
+            modal,
+            'const handleRestoreOriginal = (preference: "taf" | "v3") => {',
+            "return (",
+        )
+        self.assertIn('onSelectedSourceChange("")', restore)
+        self.assertIn("onSelectedCachePreferenceChange?.(preference)", restore)
+        self.assertIn('handleRestoreOriginal("taf")', modal)
+        self.assertIn('handleRestoreOriginal("v3")', modal)
+        self.assertIn("handleSourceSave(needsCachePreferenceSave)", save_flow)
+        self.assertIn("sourcePayload + cachePreferencePayload", save_flow)
+        self.assertIn("needsCachePreferenceSave && !cachePreferenceSaved", save_flow)
 
 
 if __name__ == "__main__":
