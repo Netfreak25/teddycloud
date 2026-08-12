@@ -145,8 +145,15 @@ class Tb2CachePreferenceContractTests(unittest.TestCase):
             "originalV3Available={tonieCard.cacheState?.v3Complete === true}",
             card,
         )
-        self.assertIn("hasAssignedSource &&", modal)
-        self.assertIn("originalTafAvailable || originalV3Available", modal)
+        self.assertIn(
+            'originalTafAvailable && (hasAssignedSource || normalizedCachePreference !== "taf")',
+            modal,
+        )
+        self.assertIn(
+            'originalV3Available && (hasAssignedSource || normalizedCachePreference !== "v3")',
+            modal,
+        )
+        self.assertIn("canRestoreOriginalTaf || canRestoreOriginalV3", modal)
         restore = self.section(
             modal,
             'const handleRestoreOriginal = (preference: "taf" | "v3") => {',

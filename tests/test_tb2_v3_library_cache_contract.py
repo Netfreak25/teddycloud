@@ -152,10 +152,15 @@ class Tb2V3LibraryCacheContractTests(unittest.TestCase):
             "error_t handleCloudContentMetaV3(",
             "error_t handleCloudChapterV3(",
         )
-        replay = meta_handler.index("v3_native_cache_read_active_manifest(")
+        self.assertIn("v3_native_serve_cached_original(", meta_handler)
+        cached_replay = self.section(
+            self.handler,
+            "static bool_t v3_native_serve_cached_original(",
+            "static void v3_native_meta_response(",
+        )
         self.assertIn(
-            "v3_native_import_library_if_enabled(client_ctx, canonical_ruid)",
-            meta_handler[replay : replay + 1800],
+            "v3_native_import_library_if_enabled(client_ctx, ruid)",
+            cached_replay,
         )
 
     def test_common_library_view_hides_staging_and_keeps_taf_actions_taf_only(self) -> None:

@@ -35,6 +35,13 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
         self.assertIn("CONTENT_JSON_CACHE_PREFERENCE_AUTO", self.download_api)
         self.assertIn("handleCloudContentDownloadV3", self.download_api)
 
+    def test_explicit_v3_download_uses_selected_overlay_credentials_not_generation(self):
+        initial_validation = self.manual[
+            : self.manual.index("if (!settings->cloud.tb2_v3_enabled)")
+        ]
+        self.assertIn("!tb2_ruid_canonicalize", initial_validation)
+        self.assertNotIn("boxGeneration", initial_validation)
+
     def test_tb1_v1_v2_download_path_remains_unchanged(self):
         self.assertIn('osSprintf((char *)uri, "/v1/content/%s"', self.download_api)
         self.assertIn('osSprintf((char *)uri, "/v2/content/%s"', self.download_api)
@@ -64,6 +71,16 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
             self.assertIn(marker, self.cloud)
         for forbidden in ("fsOpenFile", "fsWriteFile", "fsRenameFile"):
             self.assertNotIn(forbidden, self.manual)
+
+    def test_complete_manual_download_runs_the_idempotent_library_finalizer(self):
+        activation = self.manual.index("if (!activated)")
+        completed = self.manual.index(
+            'TRACE_INFO("Completed TB2 manual content download', activation
+        )
+        self.assertIn(
+            "v3_native_import_library_if_enabled(client_ctx, canonical_ruid)",
+            self.manual[activation:completed],
+        )
 
     def test_download_plan_uses_validated_names_and_opaque_auth(self):
         self.assertIn("V3_NATIVE_CACHE_CHAPTER_AUTH_SIZE", self.cache_header)

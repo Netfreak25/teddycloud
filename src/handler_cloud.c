@@ -4633,8 +4633,7 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
     {
         return ERROR_INVALID_PARAMETER;
     }
-    if (settings->toniebox.boxGeneration != GENERATION_TB2 ||
-        !tb2_ruid_canonicalize(ruid, canonical_ruid))
+    if (!tb2_ruid_canonicalize(ruid, canonical_ruid))
     {
         return v3_manual_download_fail(connection, settings,
                                        V3_MANUAL_DOWNLOAD_GENERATION,
@@ -4869,6 +4868,11 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
                                        NULL, 0, version, completed, total,
                                        TRUE);
     }
+
+    // The objects may already have been complete before this request. In that
+    // case no chapter callback runs, so finalize metadata/library state here as
+    // well. The helper is idempotent for an existing collection.
+    v3_native_import_library_if_enabled(client_ctx, canonical_ruid);
 
     TRACE_INFO("Completed TB2 manual content download overlay=%u rUID=%s version=%" PRIu32 " objects=%" PRIuSIZE "\r\n",
                (unsigned)settings->internal.overlayNumber, canonical_ruid,
