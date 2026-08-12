@@ -146,9 +146,10 @@ class Tb2CachePreferenceContractTests(unittest.TestCase):
             card,
         )
         self.assertIn(
-            'originalTafAvailable && (hasAssignedSource || normalizedCachePreference !== "taf")',
+            "originalTafAvailable || originalTafLibrarySource.length > 0",
             modal,
         )
+        self.assertIn("originalTafAvailableForRestore && !usingOriginalTaf", modal)
         self.assertIn(
             'originalV3Available && (hasAssignedSource || normalizedCachePreference !== "v3")',
             modal,
@@ -159,7 +160,10 @@ class Tb2CachePreferenceContractTests(unittest.TestCase):
             'const handleRestoreOriginal = (preference: "taf" | "v3") => {',
             "return (",
         )
-        self.assertIn('onSelectedSourceChange("")', restore)
+        self.assertIn(
+            'onSelectedSourceChange(preference === "taf" ? originalTafLibrarySource : "")',
+            restore,
+        )
         self.assertIn("onSelectedCachePreferenceChange?.(preference)", restore)
         self.assertIn('handleRestoreOriginal("taf")', modal)
         self.assertIn('handleRestoreOriginal("v3")', modal)
