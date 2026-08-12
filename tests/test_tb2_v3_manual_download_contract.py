@@ -26,12 +26,13 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
         manual_end = cls.cloud.index("error_t handleCloudContentMetaV3(", manual_start)
         cls.manual = cls.cloud[manual_start:manual_end]
 
-    def test_download_action_branches_on_selected_overlay_generation(self):
-        tb2_branch = self.download_api.index(
-            "client_ctx->settings->toniebox.boxGeneration == GENERATION_TB2"
-        )
+    def test_download_action_uses_explicit_preference_or_auto_generation(self):
+        tb2_branch = self.download_api.index("automatic_tb2_cache")
         tb1_v1 = self.download_api.index('osSprintf((char *)uri, "/v1/content/%s"')
         self.assertLess(tb2_branch, tb1_v1)
+        self.assertIn("prefer_v3_cache || automatic_tb2_cache", self.download_api)
+        self.assertIn("CONTENT_JSON_CACHE_PREFERENCE_V3", self.download_api)
+        self.assertIn("CONTENT_JSON_CACHE_PREFERENCE_AUTO", self.download_api)
         self.assertIn("handleCloudContentDownloadV3", self.download_api)
 
     def test_tb1_v1_v2_download_path_remains_unchanged(self):

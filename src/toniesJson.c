@@ -480,6 +480,75 @@ toniesJson_item_t *tonies_byAudioId(uint32_t audio_id)
     return item;
 }
 
+static bool tonies_audio_id_matches(const toniesJson_item_t *item,
+                                    uint32_t audio_id)
+{
+    for (size_t i = 0; i < item->audio_ids_count; i++)
+    {
+        if (item->audio_ids[i] == audio_id ||
+            (audio_id < TEDDY_BENCH_AUDIO_ID_DEDUCT &&
+             item->audio_ids[i] == audio_id + TEDDY_BENCH_AUDIO_ID_DEDUCT))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static toniesJson_item_t *tonies_byAudioIdTrackCountUnique_base(
+    uint32_t audio_id,
+    size_t track_count,
+    toniesJson_item_t *cache,
+    size_t cache_count,
+    bool *has_audio_id_match)
+{
+    toniesJson_item_t *single = NULL;
+    toniesJson_item_t *single_exact = NULL;
+    size_t matches = 0;
+    size_t exact_matches = 0;
+
+    for (size_t i = 0; i < cache_count; i++)
+    {
+        if (!tonies_audio_id_matches(&cache[i], audio_id))
+        {
+            continue;
+        }
+        single = &cache[i];
+        matches++;
+        if ((size_t)cache[i].tracks_count == track_count)
+        {
+            single_exact = &cache[i];
+            exact_matches++;
+        }
+    }
+
+    *has_audio_id_match = matches > 0;
+    if (matches == 1)
+    {
+        return single;
+    }
+    return exact_matches == 1 ? single_exact : NULL;
+}
+
+toniesJson_item_t *tonies_byAudioIdTrackCountUnique(uint32_t audio_id,
+                                                    size_t track_count)
+{
+    bool has_custom_match = false;
+    mutex_lock(MUTEX_TONIES_JSON_CACHE);
+    toniesJson_item_t *item = tonies_byAudioIdTrackCountUnique_base(
+        audio_id, track_count, toniesCustomJsonCache, toniesCustomJsonCount,
+        &has_custom_match);
+    if (!has_custom_match)
+    {
+        bool has_catalog_match = false;
+        item = tonies_byAudioIdTrackCountUnique_base(
+            audio_id, track_count, toniesJsonCache, toniesJsonCount,
+            &has_catalog_match);
+    }
+    mutex_unlock(MUTEX_TONIES_JSON_CACHE);
+    return item;
+}
+
 toniesJson_item_t *tonies_byAudioIdHash(uint32_t audio_id, uint8_t *hash)
 {
     mutex_lock(MUTEX_TONIES_JSON_CACHE);

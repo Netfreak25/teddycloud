@@ -74,18 +74,41 @@ typedef struct
 static void v3_native_import_library_if_enabled(client_ctx_t *client_ctx,
                                                 const char *ruid)
 {
-    if (client_ctx == NULL || client_ctx->settings == NULL || ruid == NULL ||
-        !client_ctx->settings->cloud.cacheContentV3 ||
-        !v3_native_cache_active_version(
-            client_ctx->settings->internal.cachedirfull,
-            client_ctx->settings->internal.overlayNumber, ruid, NULL))
+    if (client_ctx == NULL || client_ctx->settings == NULL || ruid == NULL)
     {
         return;
     }
 
-    bool_t tonieplay = v3_native_cache_active_is_tonieplay(
+    bool_t tonieplay = FALSE;
+    if (!v3_native_cache_active_info(
         client_ctx->settings->internal.cachedirfull,
-        client_ctx->settings->internal.overlayNumber, ruid);
+        client_ctx->settings->internal.overlayNumber, ruid, NULL, NULL,
+        &tonieplay))
+    {
+        return;
+    }
+
+    if (!tonieplay)
+    {
+        char canonical_ruid[TB2_RUID_SIZE];
+        if (tb2_ruid_canonicalize(ruid, canonical_ruid))
+        {
+            tonie_info_t *tonie_info = getTonieInfoFromRuid(
+                canonical_ruid, true, client_ctx->settings);
+            if (tonie_info != NULL)
+            {
+                v3_original_content_metadata_complete(
+                    client_ctx->settings, tonie_info, canonical_ruid);
+                freeTonieInfo(tonie_info);
+            }
+        }
+    }
+
+    if (!client_ctx->settings->cloud.cacheContentV3)
+    {
+        return;
+    }
+
     if ((tonieplay &&
          !client_ctx->settings->cloud.cacheTonieplayToLibraryV3) ||
         (!tonieplay && !client_ctx->settings->cloud.cacheToLibraryV3))
@@ -111,6 +134,97 @@ static void v3_native_import_library_if_enabled(client_ctx_t *client_ctx,
                       (unsigned)client_ctx->settings->internal.overlayNumber,
                       ruid, error2text(error));
     }
+}
+
+bool_t v3_original_content_metadata_complete(settings_t *settings,
+                                             tonie_info_t *tonie_info,
+                                             const char *ruid)
+{
+    char canonical_ruid[TB2_RUID_SIZE];
+    if (settings == NULL || tonie_info == NULL ||
+        !tonie_info->json._valid ||
+        !tb2_ruid_canonicalize(ruid, canonical_ruid) ||
+        (tonie_info->json.source != NULL &&
+         tonie_info->json.source[0] != '\0') ||
+        (tonie_info->json.tonie_model != NULL &&
+         tonie_info->json.tonie_model[0] != '\0'))
+    {
+        return FALSE;
+    }
+
+    uint32_t version = 0;
+    size_t object_count = 0;
+    bool_t tonieplay = FALSE;
+    if (!v3_native_cache_active_info(
+            settings->internal.cachedirfull,
+            settings->internal.overlayNumber, canonical_ruid, &version,
+            &object_count, &tonieplay) ||
+        tonieplay)
+    {
+        return FALSE;
+    }
+
+    toniesJson_item_t *item =
+        tonies_byAudioIdTrackCountUnique(version, object_count);
+    if (item == NULL || item->model == NULL || item->model[0] == '\0')
+    {
+        TRACE_DEBUG("No unique TONIES model for complete TB2 V3 cache overlay=%u rUID=%s version=%" PRIu32 " chapters=%" PRIuSIZE "\r\n",
+                    (unsigned)settings->internal.overlayNumber,
+                    canonical_ruid, version, object_count);
+        return FALSE;
+    }
+
+    osFreeMem(tonie_info->json.tonie_model);
+    tonie_info->json.tonie_model = strdup(item->model);
+    if (tonie_info->json.tonie_model == NULL)
+    {
+        return FALSE;
+    }
+    tonie_info->json._updated = TRUE;
+    TRACE_INFO("Mapped complete TB2 V3 cache to TONIES model overlay=%u rUID=%s version=%" PRIu32 " chapters=%" PRIuSIZE " model=%s\r\n",
+               (unsigned)settings->internal.overlayNumber, canonical_ruid,
+               version, object_count, item->model);
+    return TRUE;
+}
+
+static bool_t v3_native_serve_cached_original(
+    HttpConnection *connection,
+    client_ctx_t *client_ctx,
+    const char *ruid,
+    bool_t cache_stale,
+    error_t *response_error)
+{
+    if (connection == NULL || client_ctx == NULL ||
+        client_ctx->settings == NULL || ruid == NULL ||
+        response_error == NULL || cache_stale)
+    {
+        return FALSE;
+    }
+
+    uint8_t *manifest = NULL;
+    size_t manifest_length = 0;
+    uint32_t manifest_version = 0;
+    error_t cache_error = v3_native_cache_read_active_manifest(
+        client_ctx->settings->internal.cachedirfull,
+        client_ctx->settings->internal.overlayNumber, ruid, &manifest,
+        &manifest_length, &manifest_version);
+    if (cache_error != NO_ERROR)
+    {
+        osFreeMem(manifest);
+        return FALSE;
+    }
+
+    TRACE_INFO("TB2 V3 content route source=original-cache cache=hit overlay=%u rUID=%s effectiveVersion=%" PRIu32 " activeVersion=%" PRIu32 " requestedVersion=unknown action=local\r\n",
+               (unsigned)client_ctx->settings->internal.overlayNumber, ruid,
+               manifest_version, manifest_version);
+    v3_native_import_library_if_enabled(client_ctx, ruid);
+    connection->response.keepAlive = true;
+    connection->response.noCache = true;
+    httpPrepareHeader(connection, "application/json", manifest_length);
+    *response_error = httpWriteResponse(connection, manifest, manifest_length,
+                                        false);
+    osFreeMem(manifest);
+    return TRUE;
 }
 
 static void v3_native_meta_response(void *source, HttpClientContext *cloud)
@@ -4793,6 +4907,26 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
     bool_t cache_ruid_valid = tb2_ruid_canonicalize(ruid, canonical_ruid);
     bool_t source_configured = tonieInfo->json.source != NULL &&
                                tonieInfo->json.source[0] != '\0';
+    uint64_t cache_uid = 0;
+    bool_t cache_stale = cache_ruid_valid &&
+                         freshness_ruid_to_uid(canonical_ruid, &cache_uid) &&
+                         freshness_settings_array_contains(client_ctx->settings,
+                                                           "internal.freshnessCache",
+                                                           cache_uid);
+    bool_t prefer_taf_cache =
+        tonieInfo->json.cache_preference != NULL &&
+        !osStrcmp(tonieInfo->json.cache_preference,
+                  CONTENT_JSON_CACHE_PREFERENCE_TAF);
+
+    error_t cached_response_error = NO_ERROR;
+    if (!source_configured && !prefer_taf_cache && cache_ruid_valid &&
+        v3_native_serve_cached_original(connection, client_ctx,
+                                        canonical_ruid, cache_stale,
+                                        &cached_response_error))
+    {
+        freeTonieInfo(tonieInfo);
+        return cached_response_error;
+    }
 
     bool_t local_candidate = tonieInfo->json._source_type == CT_SOURCE_NATIVE_COLLECTION ||
                              tonieInfo->json._source_type == CT_SOURCE_TONIEPLAY_COLLECTION ||
@@ -4914,37 +5048,13 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
                       ruid);
     }
 
-    uint64_t cache_uid = 0;
-    bool_t cache_stale = cache_ruid_valid &&
-                         freshness_ruid_to_uid(canonical_ruid, &cache_uid) &&
-                         freshness_settings_array_contains(client_ctx->settings,
-                                                           "internal.freshnessCache",
-                                                           cache_uid);
-    if (!source_configured && cache_ruid_valid &&
-        client_ctx->settings->cloud.cacheContentV3 && !cache_stale)
+    if (!source_configured && prefer_taf_cache && cache_ruid_valid &&
+        v3_native_serve_cached_original(connection, client_ctx,
+                                        canonical_ruid, cache_stale,
+                                        &cached_response_error))
     {
-        uint8_t *manifest = NULL;
-        size_t manifest_length = 0;
-        uint32_t manifest_version = 0;
-        error_t cache_error = v3_native_cache_read_active_manifest(
-            client_ctx->settings->internal.cachedirfull,
-            client_ctx->settings->internal.overlayNumber,
-            canonical_ruid, &manifest, &manifest_length, &manifest_version);
-        if (cache_error == NO_ERROR)
-        {
-            TRACE_INFO("TB2 V3 content route source=original-cache cache=hit overlay=%u rUID=%s effectiveVersion=%" PRIu32 " activeVersion=%" PRIu32 " requestedVersion=unknown action=local\r\n",
-                       (unsigned)client_ctx->settings->internal.overlayNumber,
-                       canonical_ruid, manifest_version, manifest_version);
-            v3_native_import_library_if_enabled(client_ctx, canonical_ruid);
-            connection->response.keepAlive = true;
-            connection->response.noCache = true;
-            httpPrepareHeader(connection, "application/json", manifest_length);
-            error = httpWriteResponse(connection, manifest, manifest_length, false);
-            osFreeMem(manifest);
-            freeTonieInfo(tonieInfo);
-            return error;
-        }
-        osFreeMem(manifest);
+        freeTonieInfo(tonieInfo);
+        return cached_response_error;
     }
 
     if (client_ctx->settings->cloud.tb2_v3_enabled &&

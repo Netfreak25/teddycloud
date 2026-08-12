@@ -24,6 +24,7 @@ typedef struct
     bool_t live;
     bool_t nocloud;
     char *source;
+    char *cache_preference;
     size_t skip_seconds;
     bool_t cache;
     char *cloud_ruid;
@@ -73,7 +74,11 @@ typedef struct
     tonie_info_additional_t additional;
 } tonie_info_t;
 
-#define CONTENT_JSON_VERSION 5
+#define CONTENT_JSON_VERSION 6
+
+#define CONTENT_JSON_CACHE_PREFERENCE_AUTO "auto"
+#define CONTENT_JSON_CACHE_PREFERENCE_TAF "taf"
+#define CONTENT_JSON_CACHE_PREFERENCE_V3 "v3"
 
 error_t load_content_json(const char *content_path, contentJson_t *content_json, bool create_if_missing, settings_t *settings);
 error_t save_content_json(const char *json_path, contentJson_t *content_json);

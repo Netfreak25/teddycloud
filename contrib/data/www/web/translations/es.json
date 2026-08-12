@@ -3147,6 +3147,10 @@
             "setAudioFromModel": "Establecer audio del modelo",
             "setAudioFromModelUnavailableInLibrary": "El audio del modelo aún no está disponible en la biblioteca.",
             "setModelFromAudio": "Establecer modelo desde el audio",
+            "cachePreference": "Caché de contenido original",
+            "cachePreferenceAuto": "Automático",
+            "cachePreferenceTaf": "Preferir TAF",
+            "cachePreferenceV3": "Preferir V3 nativo",
             "source": "Fuente",
             "title": "Editar Tonie/Coin"
         },

@@ -61,6 +61,14 @@ static bool_t content_json_is_native_library_metadata(const char *json_path,
     return protected_path;
 }
 
+static bool_t is_cache_preference_valid(const char *cache_preference)
+{
+    return cache_preference != NULL &&
+           (!osStrcmp(cache_preference, CONTENT_JSON_CACHE_PREFERENCE_AUTO) ||
+            !osStrcmp(cache_preference, CONTENT_JSON_CACHE_PREFERENCE_TAF) ||
+            !osStrcmp(cache_preference, CONTENT_JSON_CACHE_PREFERENCE_V3));
+}
+
 error_t load_content_json(const char *content_path, contentJson_t *content_json, bool create_if_missing, settings_t *settings)
 {
     char *jsonPath = custom_asprintf("%s.json", content_path);
@@ -69,6 +77,7 @@ error_t load_content_json(const char *content_path, contentJson_t *content_json,
     content_json->live = false;
     content_json->nocloud = false;
     content_json->source = NULL;
+    content_json->cache_preference = strdup(CONTENT_JSON_CACHE_PREFERENCE_AUTO);
     content_json->skip_seconds = 0;
     content_json->cache = false;
     content_json->_updated = false;
@@ -132,6 +141,17 @@ error_t load_content_json(const char *content_path, contentJson_t *content_json,
                 content_json->live = jsonGetBool(contentJson, "live");
                 content_json->nocloud = jsonGetBool(contentJson, "nocloud");
                 content_json->source = jsonGetString(contentJson, "source");
+                char *cache_preference =
+                    jsonGetString(contentJson, "cache_preference");
+                if (is_cache_preference_valid(cache_preference))
+                {
+                    osFreeMem(content_json->cache_preference);
+                    content_json->cache_preference = cache_preference;
+                }
+                else
+                {
+                    osFreeMem(cache_preference);
+                }
                 content_json->_source_resolved = jsonGetString(contentJson, "source");
                 content_json->skip_seconds = jsonGetUInt32(contentJson, "skip_seconds");
                 content_json->cache = jsonGetBool(contentJson, "cache");
@@ -295,6 +315,8 @@ error_t save_content_json(const char *json_path, contentJson_t *content_json)
     cJSON_AddBoolToObject(contentJson, "live", content_json->live);
     cJSON_AddBoolToObject(contentJson, "nocloud", content_json->nocloud);
     jsonAddStringToObject(contentJson, "source", content_json->source);
+    jsonAddStringToObject(contentJson, "cache_preference",
+                          content_json->cache_preference);
     cJSON_AddNumberToObject(contentJson, "skip_seconds", content_json->skip_seconds);
     cJSON_AddBoolToObject(contentJson, "cache", content_json->cache);
     jsonAddStringToObject(contentJson, "cloud_ruid", content_json->cloud_ruid);
@@ -370,6 +392,11 @@ void free_content_json(contentJson_t *content_json)
     {
         osFreeMem(content_json->source);
         content_json->source = NULL;
+    }
+    if (content_json->cache_preference)
+    {
+        osFreeMem(content_json->cache_preference);
+        content_json->cache_preference = NULL;
     }
     if (content_json->cloud_ruid)
     {

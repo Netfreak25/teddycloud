@@ -3147,6 +3147,10 @@
             "setAudioFromModel": "Définir l'audio du modèle",
             "setAudioFromModelUnavailableInLibrary": "L'audio du modèle n'est pas encore disponible dans la bibliothèque.",
             "setModelFromAudio": "Définir le modèle depuis l'audio",
+            "cachePreference": "Cache du contenu original",
+            "cachePreferenceAuto": "Automatique",
+            "cachePreferenceTaf": "Préférer TAF",
+            "cachePreferenceV3": "Préférer V3 natif",
             "source": "Source",
             "title": "Modifier Tonie/Tag"
         },

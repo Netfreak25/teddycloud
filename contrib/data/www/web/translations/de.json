@@ -3147,6 +3147,10 @@
             "setAudioFromModel": "Audio aus Modell setzen",
             "setAudioFromModelUnavailableInLibrary": "Audio aus dem Modell ist noch nicht in der Bibliothek verfügbar.",
             "setModelFromAudio": "Modell aus Audio setzen",
+            "cachePreference": "Originalinhalt-Cache",
+            "cachePreferenceAuto": "Automatisch",
+            "cachePreferenceTaf": "TAF bevorzugen",
+            "cachePreferenceV3": "Natives V3 bevorzugen",
             "source": "Quelle",
             "title": "Tonie/Tag bearbeiten"
         },

@@ -3147,6 +3147,10 @@
             "setAudioFromModel": "Set audio from model",
             "setAudioFromModelUnavailableInLibrary": "Model audio is not yet available in the library.",
             "setModelFromAudio": "Set model from audio",
+            "cachePreference": "Original content cache",
+            "cachePreferenceAuto": "Automatic",
+            "cachePreferenceTaf": "Prefer TAF",
+            "cachePreferenceV3": "Prefer native V3",
             "source": "Source",
             "title": "Edit Tonie/Tag"
         },

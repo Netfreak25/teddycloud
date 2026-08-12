@@ -65,6 +65,8 @@ error_t tonieboxes_update();
 void tonies_readJson(char *source, toniesJson_item_t **retCache, size_t *retCount);
 void toniesV2_readJson(char *source, toniesV2Json_item_t **toniesCache, size_t *toniesCount);
 toniesJson_item_t *tonies_byAudioId(uint32_t audio_id);
+toniesJson_item_t *tonies_byAudioIdTrackCountUnique(uint32_t audio_id,
+                                                    size_t track_count);
 toniesJson_item_t *tonies_byAudioIdHash(uint32_t audio_id, uint8_t *hash);
 toniesJson_item_t *tonies_byModel(char *model);
 toniesJson_item_t *tonies_byAudioIdHashModel(uint32_t audio_id, uint8_t *hash, char *model);

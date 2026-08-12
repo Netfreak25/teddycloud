@@ -29,6 +29,9 @@ error_t handleCloudContentV2(HttpConnection *connection, const char_t *uri, cons
 error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *ruid,
                                      const contentJson_t *content,
                                      client_ctx_t *client_ctx);
+bool_t v3_original_content_metadata_complete(settings_t *settings,
+                                             tonie_info_t *tonie_info,
+                                             const char *ruid);
 error_t handleCloudFreshnessCheck(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
 error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
 error_t handleCloudReset(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);

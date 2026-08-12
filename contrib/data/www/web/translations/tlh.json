@@ -381,6 +381,10 @@
             "title": "De'"
         },
         "editModal": {
+            "cachePreference": "mung De' polwI'",
+            "cachePreferenceAuto": "TeddyCloud wIv",
+            "cachePreferenceTaf": "TAF maS",
+            "cachePreferenceV3": "V3 mung maS",
             "modelInfoLanguage": "Hol",
             "save": "pol"
         },

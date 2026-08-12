@@ -766,6 +766,48 @@ bool_t v3_native_cache_active_is_tonieplay(const char *cache_root,
     return tonieplay;
 }
 
+bool_t v3_native_cache_active_info(const char *cache_root,
+                                   uint8_t overlay_id,
+                                   const char *ruid,
+                                   uint32_t *version,
+                                   size_t *object_count,
+                                   bool_t *tonieplay)
+{
+    uint8_t *manifest = NULL;
+    size_t manifest_length = 0;
+    uint32_t active_version = 0;
+    if (v3_native_cache_read_active_manifest(cache_root, overlay_id, ruid,
+                                             &manifest, &manifest_length,
+                                             &active_version) != NO_ERROR)
+    {
+        return FALSE;
+    }
+    osFreeMem(manifest);
+
+    mutex_lock(MUTEX_V3_NATIVE_CACHE);
+    const v3_native_route_t *route = &routes[overlay_id];
+    bool_t valid = route->valid && route->active &&
+                   route->version == active_version &&
+                   route->chapter_count > 0;
+    if (valid)
+    {
+        if (version != NULL)
+        {
+            *version = active_version;
+        }
+        if (object_count != NULL)
+        {
+            *object_count = route->chapter_count;
+        }
+        if (tonieplay != NULL)
+        {
+            *tonieplay = v3_native_route_is_tonieplay(route);
+        }
+    }
+    mutex_unlock(MUTEX_V3_NATIVE_CACHE);
+    return valid;
+}
+
 static error_t v3_native_remove_tree(const char *path)
 {
     if (path == NULL || !fsDirExists(path))

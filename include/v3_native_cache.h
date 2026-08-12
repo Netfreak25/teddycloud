@@ -160,6 +160,14 @@ bool_t v3_native_cache_active_is_tonieplay(const char *cache_root,
                                            uint8_t overlay_id,
                                            const char *ruid);
 
+/** Return validated metadata for one complete active original generation. */
+bool_t v3_native_cache_active_info(const char *cache_root,
+                                   uint8_t overlay_id,
+                                   const char *ruid,
+                                   uint32_t *version,
+                                   size_t *object_count,
+                                   bool_t *tonieplay);
+
 /**
  * Copy one complete active TONIES generation into the native TB2 library.
  *

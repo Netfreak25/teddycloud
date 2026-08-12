@@ -2673,7 +2673,16 @@ error_t handleApiContentDownload(HttpConnection *connection, const char_t *uri, 
     }
     ruid[16] = '\0';
 
-    if (client_ctx->settings->toniebox.boxGeneration == GENERATION_TB2)
+    bool_t prefer_v3_cache = contentJson.cache_preference != NULL &&
+                             !osStrcmp(contentJson.cache_preference,
+                                       CONTENT_JSON_CACHE_PREFERENCE_V3);
+    bool_t automatic_tb2_cache =
+        (contentJson.cache_preference == NULL ||
+         !osStrcmp(contentJson.cache_preference,
+                   CONTENT_JSON_CACHE_PREFERENCE_AUTO)) &&
+        client_ctx->settings->toniebox.boxGeneration == GENERATION_TB2;
+
+    if (prefer_v3_cache || automatic_tb2_cache)
     {
         error_t error = handleCloudContentDownloadV3(connection, ruid,
                                                       &contentJson,
@@ -5715,6 +5724,25 @@ error_t handleApiContentJsonSet(HttpConnection *connection, const char_t *uri, c
             updated = true;
         }
     }
+    if (queryGet(post_data, "cache_preference", item_data, sizeof(item_data)))
+    {
+        if (osStrcmp(item_data, CONTENT_JSON_CACHE_PREFERENCE_AUTO) &&
+            osStrcmp(item_data, CONTENT_JSON_CACHE_PREFERENCE_TAF) &&
+            osStrcmp(item_data, CONTENT_JSON_CACHE_PREFERENCE_V3))
+        {
+            osFreeMem(contentPath);
+            free_content_json(&content_json);
+            free(old_source);
+            return ERROR_INVALID_REQUEST;
+        }
+        if (content_json.cache_preference == NULL ||
+            osStrcmp(item_data, content_json.cache_preference))
+        {
+            osFreeMem(content_json.cache_preference);
+            content_json.cache_preference = strdup(item_data);
+            updated = true;
+        }
+    }
     if (queryGet(post_data, "tonie_model", item_data, sizeof(item_data)))
     {
         if (osStrcmp(item_data, content_json.tonie_model))
@@ -5908,9 +5936,23 @@ static toniesJson_item_t *api_native_collection_source_metadata(
         return NULL;
     }
 
+    toniesJson_item_t *fallback_item = NULL;
+
     for (size_t i = 0; i < collection->origin_count; i++)
     {
         const v3_native_library_origin_t *origin = &collection->origins[i];
+        toniesJson_item_t *item = tonies_byAudioIdTrackCountUnique(
+            origin->content_version, collection->chapter_count);
+        if (item != NULL &&
+            (size_t)item->tracks_count == collection->chapter_count)
+        {
+            return item;
+        }
+        if (fallback_item == NULL)
+        {
+            fallback_item = item;
+        }
+
         settings_t *origin_settings = get_settings_id(origin->overlay_id);
         if (origin_settings == NULL || !origin_settings->internal.config_used)
         {
@@ -5930,17 +5972,63 @@ static toniesJson_item_t *api_native_collection_source_metadata(
         error_t error = load_content_json(content_path, &content_json, FALSE,
                                           origin_settings);
         osFreeMem(content_path);
-        toniesJson_item_t *item = error == NO_ERROR
-                                      ? tonies_byModel(content_json.tonie_model)
-                                      : NULL;
+        item = error == NO_ERROR ? tonies_byModel(content_json.tonie_model)
+                                 : NULL;
         free_content_json(&content_json);
-        if (item != NULL && item->tracks != NULL &&
-            item->tracks_count == collection->chapter_count)
+        if (item != NULL &&
+            (size_t)item->tracks_count == collection->chapter_count)
         {
             return item;
         }
+        if (fallback_item == NULL)
+        {
+            fallback_item = item;
+        }
     }
-    return NULL;
+    return fallback_item;
+}
+
+static void api_add_native_playlist(cJSON *json_entry,
+                                    toniesJson_item_t *source_item,
+                                    size_t chapter_count,
+                                    bool_t content_version_valid,
+                                    uint32_t content_version)
+{
+    cJSON *playlist = cJSON_AddObjectToObject(json_entry, "playlist");
+    cJSON_AddStringToObject(playlist, "kind", "native_collection");
+    cJSON_AddBoolToObject(playlist, "editable", FALSE);
+    cJSON_AddNumberToObject(playlist, "chapterCount", chapter_count);
+    if (content_version_valid)
+    {
+        cJSON_AddNumberToObject(playlist, "contentVersion", content_version);
+    }
+    cJSON_AddStringToObject(
+        playlist, "title",
+        source_item != NULL && source_item->title != NULL ? source_item->title
+                                                          : "");
+
+    bool_t exact_catalog_tracks =
+        source_item != NULL && source_item->tracks != NULL &&
+        (size_t)source_item->tracks_count == chapter_count;
+    cJSON *tracks = cJSON_AddArrayToObject(playlist, "tracks");
+    for (size_t i = 0; i < chapter_count; i++)
+    {
+        if (exact_catalog_tracks && source_item->tracks[i] != NULL &&
+            source_item->tracks[i][0] != '\0')
+        {
+            cJSON_AddItemToArray(tracks,
+                                 cJSON_CreateString(source_item->tracks[i]));
+            continue;
+        }
+
+        char *chapter_title = custom_asprintf("Chapter %u",
+                                              (unsigned int)(i + 1));
+        cJSON_AddItemToArray(
+            tracks, cJSON_CreateString(chapter_title != NULL ? chapter_title
+                                                              : ""));
+        osFreeMem(chapter_title);
+    }
+    cJSON_AddArrayToObject(playlist, "durations");
 }
 
 static void api_add_native_collection_playlist(cJSON *json_entry,
@@ -5966,25 +6054,16 @@ static void api_add_native_collection_playlist(cJSON *json_entry,
 
     toniesJson_item_t *source_item =
         api_native_collection_source_metadata(&collection);
-    cJSON *playlist = cJSON_AddObjectToObject(json_entry, "playlist");
-    cJSON_AddStringToObject(playlist, "kind", "native_collection");
-    cJSON_AddBoolToObject(playlist, "editable", FALSE);
-    cJSON_AddNumberToObject(playlist, "chapterCount",
-                           collection.chapter_count);
-    cJSON_AddStringToObject(
-        playlist, "title",
-        source_item != NULL && source_item->title != NULL ? source_item->title
-                                                          : "");
-
-    cJSON *tracks = cJSON_AddArrayToObject(playlist, "tracks");
-    for (size_t i = 0; i < collection.chapter_count; i++)
+    if (source_item == NULL && taf_info->json._source_model != NULL)
     {
-        const char *title = source_item != NULL && source_item->tracks[i] != NULL
-                                ? source_item->tracks[i]
-                                : collection.chapters[i].original_name;
-        cJSON_AddItemToArray(tracks, cJSON_CreateString(title));
+        source_item = tonies_byModel(taf_info->json._source_model);
     }
-    cJSON_AddArrayToObject(playlist, "durations");
+    if (source_item == NULL && taf_info->json.tonie_model != NULL)
+    {
+        source_item = tonies_byModel(taf_info->json.tonie_model);
+    }
+    api_add_native_playlist(json_entry, source_item, collection.chapter_count,
+                            FALSE, 0);
     v3_native_library_collection_free(&collection);
 }
 
@@ -6090,6 +6169,20 @@ error_t getTagInfoJson(char ruid[17],
         /* read TAF info - would create .json if not existing */
         // tonie_info_t *tafInfo = getTonieInfoFromRuid(ruid, true, client_ctx->settings);
         tonie_info_t *tafInfo = getTonieInfo(fullTagPath, false, client_ctx->settings);
+        bool_t taf_cache_complete = fsFileExists(fullTagPath) &&
+                                    isValidTaf(fullTagPath, false);
+        uint32_t v3_cache_version = 0;
+        size_t v3_object_count = 0;
+        bool_t v3_cache_tonieplay = FALSE;
+        bool_t v3_cache_complete = v3_native_cache_active_info(
+            client_ctx->settings->internal.cachedirfull,
+            client_ctx->settings->internal.overlayNumber, ruid,
+            &v3_cache_version, &v3_object_count, &v3_cache_tonieplay);
+        if (v3_cache_complete && !v3_cache_tonieplay)
+        {
+            v3_original_content_metadata_complete(client_ctx->settings,
+                                                  tafInfo, ruid);
+        }
         /* now update with updated model if found. */
         saveTonieInfo(tafInfo, true);
         contentJson = tafInfo->json;
@@ -6129,6 +6222,21 @@ error_t getTagInfoJson(char ruid[17],
             cJSON_AddBoolToObject(jsonEntry, "hide", tafInfo->json.hide);
             cJSON_AddBoolToObject(jsonEntry, "claimed", tafInfo->json.claimed);
             cJSON_AddStringToObject(jsonEntry, "source", tafInfo->json.source);
+            cJSON_AddStringToObject(jsonEntry, "cachePreference",
+                                   tafInfo->json.cache_preference != NULL
+                                       ? tafInfo->json.cache_preference
+                                       : CONTENT_JSON_CACHE_PREFERENCE_AUTO);
+            cJSON *cache_state = cJSON_AddObjectToObject(jsonEntry,
+                                                         "cacheState");
+            cJSON_AddBoolToObject(cache_state, "tafComplete",
+                                  taf_cache_complete);
+            cJSON_AddBoolToObject(cache_state, "v3Complete",
+                                  v3_cache_complete);
+            if (v3_cache_complete)
+            {
+                cJSON_AddNumberToObject(cache_state, "v3ContentVersion",
+                                        v3_cache_version);
+            }
 
             cJSON *tracksArray = cJSON_AddArrayToObject(jsonEntry, "trackSeconds");
             for (size_t i = 0; i < tafInfo->additional.track_positions.count; i++)
@@ -6139,7 +6247,36 @@ error_t getTagInfoJson(char ruid[17],
             char *downloadUrl = custom_asprintf("/content/download/%s?overlay=%s", tagPath, client_ctx->settings->internal.overlayUniqueId);
             char *audioUrl = custom_asprintf("%s&skip_header=true", downloadUrl);
             cJSON_AddStringToObject(jsonEntry, "audioUrl", audioUrl);
-            if (!tafInfo->exists && !tafInfo->json.nocloud)
+            const char *cache_preference =
+                tafInfo->json.cache_preference != NULL
+                    ? tafInfo->json.cache_preference
+                    : CONTENT_JSON_CACHE_PREFERENCE_AUTO;
+            bool_t source_configured = tafInfo->json.source != NULL &&
+                                       tafInfo->json.source[0] != '\0';
+            bool_t preferred_cache_complete = FALSE;
+            if (source_configured)
+            {
+                preferred_cache_complete = tafInfo->exists;
+            }
+            else if (!osStrcmp(cache_preference,
+                               CONTENT_JSON_CACHE_PREFERENCE_TAF))
+            {
+                preferred_cache_complete = taf_cache_complete;
+            }
+            else if (!osStrcmp(cache_preference,
+                               CONTENT_JSON_CACHE_PREFERENCE_V3))
+            {
+                preferred_cache_complete = v3_cache_complete;
+            }
+            else
+            {
+                preferred_cache_complete =
+                    client_ctx->settings->toniebox.boxGeneration ==
+                            GENERATION_TB2
+                        ? v3_cache_complete
+                        : taf_cache_complete;
+            }
+            if (!preferred_cache_complete && !tafInfo->json.nocloud)
             {
                 if (contentJson._has_cloud_auth || isSys)
                 {
@@ -6157,6 +6294,17 @@ error_t getTagInfoJson(char ruid[17],
             addToniesJsonInfoJson(item, contentJson.tonie_model, jsonEntry);
 
             toniesJson_item_t *item2 = tonies_byModel(contentJson._source_model);
+            bool_t tb2_context =
+                client_ctx->settings->toniebox.boxGeneration == GENERATION_TB2;
+            bool_t prefer_native_cache =
+                !osStrcmp(cache_preference,
+                           CONTENT_JSON_CACHE_PREFERENCE_V3) ||
+                !osStrcmp(cache_preference,
+                           CONTENT_JSON_CACHE_PREFERENCE_AUTO);
+            bool_t use_original_v3_playlist =
+                !source_configured && tb2_context && v3_cache_complete &&
+                !v3_cache_tonieplay &&
+                (prefer_native_cache || !taf_cache_complete);
             if (tafInfo->json._source_type == CT_SOURCE_TAP_STREAM ||
                 tafInfo->json._source_type == CT_SOURCE_TAP_CACHED)
             {
@@ -6167,6 +6315,11 @@ error_t getTagInfoJson(char ruid[17],
             {
                 api_add_native_collection_playlist(jsonEntry, tafInfo,
                                                    client_ctx->settings);
+            }
+            else if (use_original_v3_playlist)
+            {
+                api_add_native_playlist(jsonEntry, item, v3_object_count,
+                                        TRUE, v3_cache_version);
             }
             else
             {
