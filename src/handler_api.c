@@ -644,10 +644,13 @@ static void api_add_toniebox_runtime(cJSON *json_entry, settings_t *settings, ui
         cJSON_AddNullToObject(playback, "chapterDuration");
     }
 
+    toniebox_state_volume_t volume_state;
+    tbs_toniebox2_volume_snapshot(overlay_id, &volume_state);
     cJSON *volume = cJSON_AddObjectToObject(runtime, "volume");
-    cJSON_AddBoolToObject(volume, "valid", state->volume.valid);
-    cJSON_AddNumberToObject(volume, "updatedAt", state->volume.updated_at);
-    api_add_optional_uint32(volume, "level", state->volume.valid, state->volume.level);
+    cJSON_AddBoolToObject(volume, "valid", volume_state.valid);
+    cJSON_AddNumberToObject(volume, "updatedAt", volume_state.updated_at);
+    cJSON_AddNumberToObject(volume, "level", volume_state.level);
+    cJSON_AddStringToObject(volume, "source", tbs_toniebox2_volume_source_name(&volume_state));
 
     cJSON *battery = cJSON_AddObjectToObject(runtime, "battery");
     cJSON_AddBoolToObject(battery, "valid", state->battery.valid);
@@ -4544,10 +4547,13 @@ error_t handleApiBoxVolume(HttpConnection *connection, const char_t *uri, const 
         return api_write_status_response(connection, 400, false,
                                          "Volume level must be an integer between 1 and 12", NULL);
     }
+    toniebox_state_volume_t previous_volume;
+    tbs_toniebox2_volume_snapshot(overlay_id, &previous_volume);
     if (!mqtt_server_publish_volume_for_overlay(overlay_id, level))
     {
         return api_write_status_response(connection, 409, false, "Toniebox is offline or not subscribed to volume control", NULL);
     }
+    tbs_toniebox2_volume_command(overlay_id, level, previous_volume.revision);
     return api_write_status_response(connection, 200, true, message, NULL);
 }
 

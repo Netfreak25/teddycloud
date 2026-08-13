@@ -9,9 +9,12 @@
 #include "mqtt.h"
 
 void toniebox_state_init();
+void toniebox_state_restore();
 toniebox_state_t *get_toniebox_state();
 toniebox_state_t *get_toniebox_state_id(uint8_t id);
 const char *tbs_toniebox2_playback_status_name(toniebox_state_tb2_playback_status_t status);
+const char *tbs_toniebox2_volume_source_name(const toniebox_state_volume_t *volume);
+void tbs_toniebox2_volume_snapshot(uint8_t overlay_id, toniebox_state_volume_t *volume);
 
 void tbs_tag_placed(client_ctx_t *client_ctx, uint64_t uid, bool valid);
 void tbs_tag_removed(client_ctx_t *client_ctx, uint64_t uid, bool valid);
@@ -37,6 +40,8 @@ void tbs_toniebox2_headphones_metrics(client_ctx_t *client_ctx,
                                       bool connected_valid, uint32_t connected_count,
                                       const char *connected_json);
 void tbs_toniebox2_volume_state(client_ctx_t *client_ctx, uint32_t level);
+void tbs_toniebox2_volume_command(uint8_t overlay_id, uint32_t level,
+                                  uint32_t expected_revision);
 void tbs_toniebox2_pong(client_ctx_t *client_ctx, const char *request_id,
                         bool round_trip_ms_valid, uint32_t round_trip_ms);
 void tbs_toniebox2_setup_status(client_ctx_t *client_ctx, const char *payload, bool truncated);

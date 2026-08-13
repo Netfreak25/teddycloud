@@ -264,6 +264,53 @@ class MqttLocalControlContractTests(unittest.TestCase):
         self.assertIn("const VOLUME_MIN = 1", self.web_controls)
         self.assertIn("const VOLUME_MAX = 12", self.web_controls)
 
+    def test_tb2_volume_restores_persistent_state_and_uses_two_only_as_fallback(self):
+        self.assertIn("#define TBS_TB2_VOLUME_FALLBACK_LEVEL 2U", self.state)
+        self.assertIn('TBS_TB2_VOLUME_STATE_DIRECTORY "runtime"', self.state)
+        self.assertIn('TBS_TB2_VOLUME_STATE_BOX_DIRECTORY "toniebox-state"', self.state)
+        self.assertIn("settings_canonicalize_box_id", self.state)
+        self.assertIn("fsFlushFile(file)", self.state)
+        self.assertIn("fsMoveFile(temporary, path, TRUE)", self.state)
+        writer = self.state[
+            self.state.index("static error_t tbs_volume_state_write") :
+            self.state.index("static void tbs_volume_update")
+        ]
+        self.assertIn('cJSON_AddStringToObject(json, "source", source)', writer)
+        self.assertNotIn("TBS_TB2_VOLUME_SOURCE_FALLBACK", writer)
+
+        initialization = self.state[
+            self.state.index("void toniebox_state_init") :
+            self.state.index("toniebox_state_t *get_toniebox_state")
+        ]
+        self.assertIn("TBS_TB2_VOLUME_FALLBACK_LEVEL", initialization)
+        self.assertIn("TBS_TB2_VOLUME_SOURCE_FALLBACK", initialization)
+        self.assertIn("TBS_TB2_VOLUME_SOURCE_PERSISTED", initialization)
+
+        runtime_api = self.handler_api[
+            self.handler_api.index('cJSON *volume = cJSON_AddObjectToObject(runtime, "volume")') - 160 :
+            self.handler_api.index('cJSON *battery = cJSON_AddObjectToObject(runtime, "battery")')
+        ]
+        self.assertIn('cJSON_AddNumberToObject(volume, "level", volume_state.level)', runtime_api)
+        self.assertIn('cJSON_AddStringToObject(volume, "source"', runtime_api)
+
+        command = self.handler_api[
+            self.handler_api.index("error_t handleApiBoxVolume") :
+            self.handler_api.index("error_t handleApiBoxPing")
+        ]
+        publish_position = command.index("mqtt_server_publish_volume_for_overlay")
+        record_position = command.index("tbs_toniebox2_volume_command")
+        self.assertLess(publish_position, record_position)
+        self.assertIn("previous_volume.revision", command)
+        self.assertIn("volume->revision != expected_revision", self.state)
+
+        self.assertIn("const VOLUME_FALLBACK = 2", self.web_controls)
+        volume_gate = self.web_controls[
+            self.web_controls.index("const volumeEnabled =") :
+            self.web_controls.index("const bedtimeState =")
+        ]
+        self.assertNotIn("runtime.volume.valid", volume_gate)
+        self.assertNotIn("runtime.volume.level !== null", volume_gate)
+
     def test_bedtime_http_wrapper_validates_confirmed_payload(self):
         bedtime = self.handler_api[
             self.handler_api.index("error_t handleApiBoxBedtime") :

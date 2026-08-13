@@ -1,10 +1,252 @@
 #include "toniebox_state.h"
+#include "cJSON.h"
+#include "debug.h"
+#include "error.h"
+#include "fs_ext.h"
+#include "fs_port_config.h"
+#include "mutex_manager.h"
 #include "settings.h"
 #include "server_helpers.h"
 #include <ctype.h>
 #include <time.h>
 
+#define TBS_TB2_VOLUME_FALLBACK_LEVEL 2U
+#define TBS_TB2_VOLUME_STATE_SCHEMA 1U
+#define TBS_TB2_VOLUME_STATE_MAX_FILE_SIZE 1024U
+#define TBS_TB2_VOLUME_STATE_DIRECTORY "runtime"
+#define TBS_TB2_VOLUME_STATE_BOX_DIRECTORY "toniebox-state"
+
 static toniebox_state_t Box_State_Overlay[MAX_OVERLAYS];
+
+static bool_t tbs_volume_json_u32(const cJSON *item, uint32_t *value)
+{
+    if (!cJSON_IsNumber(item) || item->valuedouble < 0 ||
+        item->valuedouble > UINT32_MAX ||
+        item->valuedouble != (double)(uint32_t)item->valuedouble)
+    {
+        return FALSE;
+    }
+    *value = (uint32_t)item->valuedouble;
+    return TRUE;
+}
+
+static char *tbs_volume_state_directory()
+{
+    settings_t *settings = get_settings();
+    if (settings == NULL || settings->internal.datadirfull == NULL ||
+        settings->internal.datadirfull[0] == '\0')
+    {
+        return NULL;
+    }
+    return custom_asprintf("%s%c%s%c%s", settings->internal.datadirfull,
+                           PATH_SEPARATOR, TBS_TB2_VOLUME_STATE_DIRECTORY,
+                           PATH_SEPARATOR, TBS_TB2_VOLUME_STATE_BOX_DIRECTORY);
+}
+
+static char *tbs_volume_state_path(const char *directory, const char *box_id)
+{
+    return directory != NULL && box_id != NULL
+               ? custom_asprintf("%s%c%s.json", directory, PATH_SEPARATOR, box_id)
+               : NULL;
+}
+
+static error_t tbs_volume_state_read(const char *path, uint32_t *level,
+                                     uint32_t *updated_at)
+{
+    uint32_t file_size = 0;
+    error_t error = fsGetFileSize(path, &file_size);
+    if (error != NO_ERROR)
+    {
+        return error;
+    }
+    if (file_size == 0 || file_size > TBS_TB2_VOLUME_STATE_MAX_FILE_SIZE)
+    {
+        return ERROR_INVALID_LENGTH;
+    }
+
+    FsFile *file = fsOpenFile(path, FS_FILE_MODE_READ);
+    char *data = file != NULL ? osAllocMem((size_t)file_size + 1) : NULL;
+    if (file == NULL || data == NULL)
+    {
+        if (file != NULL)
+        {
+            fsCloseFile(file);
+        }
+        osFreeMem(data);
+        return file == NULL ? ERROR_FILE_OPENING_FAILED : ERROR_OUT_OF_MEMORY;
+    }
+
+    size_t received = 0;
+    error = fsReadFile(file, data, file_size, &received);
+    fsCloseFile(file);
+    if (error != NO_ERROR || received != file_size)
+    {
+        osFreeMem(data);
+        return error != NO_ERROR ? error : ERROR_END_OF_STREAM;
+    }
+    data[file_size] = '\0';
+
+    cJSON *json = cJSON_ParseWithLength(data, file_size);
+    osFreeMem(data);
+    if (json == NULL)
+    {
+        return ERROR_INVALID_FILE;
+    }
+
+    uint32_t schema = 0;
+    uint32_t stored_level = 0;
+    uint32_t stored_updated_at = 0;
+    const cJSON *source = cJSON_GetObjectItemCaseSensitive(json, "source");
+    bool_t valid = tbs_volume_json_u32(cJSON_GetObjectItemCaseSensitive(json, "schemaVersion"), &schema) &&
+                   schema == TBS_TB2_VOLUME_STATE_SCHEMA &&
+                   tbs_volume_json_u32(cJSON_GetObjectItemCaseSensitive(json, "volumeLevel"), &stored_level) &&
+                   stored_level >= TBS_TB2_VOLUME_LEVEL_MIN &&
+                   stored_level <= TBS_TB2_VOLUME_LEVEL_MAX &&
+                   tbs_volume_json_u32(cJSON_GetObjectItemCaseSensitive(json, "updatedAt"), &stored_updated_at) &&
+                   cJSON_IsString(source) && source->valuestring != NULL &&
+                   (!osStrcmp(source->valuestring, "reported") ||
+                    !osStrcmp(source->valuestring, "command"));
+    cJSON_Delete(json);
+    if (!valid)
+    {
+        return ERROR_INVALID_FILE;
+    }
+
+    *level = stored_level;
+    *updated_at = stored_updated_at;
+    return NO_ERROR;
+}
+
+static error_t tbs_volume_state_write(const char *box_id, uint32_t level,
+                                      uint32_t updated_at,
+                                      const char *source)
+{
+    char *directory = tbs_volume_state_directory();
+    char *path = tbs_volume_state_path(directory, box_id);
+    char *temporary = path != NULL ? custom_asprintf("%s.tmp", path) : NULL;
+    error_t error = directory == NULL || path == NULL || temporary == NULL
+                        ? ERROR_OUT_OF_MEMORY
+                        : NO_ERROR;
+    if (error == NO_ERROR && !fsDirExists(directory))
+    {
+        error = fsCreateDirEx(directory, TRUE);
+        if (error != NO_ERROR && fsDirExists(directory))
+        {
+            error = NO_ERROR;
+        }
+    }
+
+    cJSON *json = NULL;
+    char *serialized = NULL;
+    if (error == NO_ERROR)
+    {
+        json = cJSON_CreateObject();
+        if (json == NULL ||
+            cJSON_AddNumberToObject(json, "schemaVersion", TBS_TB2_VOLUME_STATE_SCHEMA) == NULL ||
+            cJSON_AddNumberToObject(json, "volumeLevel", level) == NULL ||
+            cJSON_AddNumberToObject(json, "updatedAt", updated_at) == NULL ||
+            cJSON_AddStringToObject(json, "source", source) == NULL)
+        {
+            error = ERROR_OUT_OF_MEMORY;
+        }
+    }
+    if (error == NO_ERROR)
+    {
+        serialized = cJSON_PrintUnformatted(json);
+        if (serialized == NULL)
+        {
+            error = ERROR_OUT_OF_MEMORY;
+        }
+    }
+    if (error == NO_ERROR)
+    {
+        FsFile *file = fsOpenFile(temporary,
+                                  FS_FILE_MODE_WRITE | FS_FILE_MODE_CREATE | FS_FILE_MODE_TRUNC);
+        error = file != NULL
+                    ? fsWriteFile(file, serialized, osStrlen(serialized))
+                    : ERROR_FILE_OPENING_FAILED;
+        if (file != NULL)
+        {
+            if (error == NO_ERROR)
+            {
+                error = fsFlushFile(file);
+            }
+            fsCloseFile(file);
+        }
+        if (error == NO_ERROR)
+        {
+            error = fsMoveFile(temporary, path, TRUE);
+        }
+        if (error != NO_ERROR && fsFileExists(temporary))
+        {
+            fsDeleteFile(temporary);
+        }
+    }
+
+    cJSON_free(serialized);
+    cJSON_Delete(json);
+    osFreeMem(temporary);
+    osFreeMem(path);
+    osFreeMem(directory);
+    return error;
+}
+
+static void tbs_volume_update(uint8_t overlay_id, uint32_t level,
+                              toniebox_state_volume_source_t source, bool_t persist,
+                              bool_t require_revision, uint32_t expected_revision)
+{
+    if (overlay_id >= MAX_OVERLAYS ||
+        level < TBS_TB2_VOLUME_LEVEL_MIN || level > TBS_TB2_VOLUME_LEVEL_MAX)
+    {
+        return;
+    }
+
+    mutex_lock(MUTEX_TB2_VOLUME_STATE);
+    toniebox_state_volume_t *volume = &Box_State_Overlay[overlay_id].volume;
+    if (require_revision && volume->revision != expected_revision)
+    {
+        TRACE_DEBUG("Skipped stale TB2 volume command state for overlay %u\r\n",
+                    (unsigned)overlay_id);
+        mutex_unlock(MUTEX_TB2_VOLUME_STATE);
+        return;
+    }
+    volume->valid = true;
+    volume->level = level;
+    volume->updated_at = (uint32_t)time(NULL);
+    volume->revision++;
+    if (volume->revision == 0)
+    {
+        volume->revision = 1;
+    }
+    volume->source = source;
+
+    if (persist)
+    {
+        settings_t *settings = get_settings_id(overlay_id);
+        char box_id[13] = "";
+        if (settings == NULL ||
+            !settings_canonicalize_box_id(settings->commonName, box_id, sizeof(box_id)))
+        {
+            TRACE_WARNING("Cannot persist TB2 volume for overlay %u: invalid box identity\r\n",
+                          (unsigned)overlay_id);
+        }
+        else
+        {
+            const char *source_name = source == TBS_TB2_VOLUME_SOURCE_REPORTED
+                                          ? "reported"
+                                          : "command";
+            error_t error = tbs_volume_state_write(box_id, level,
+                                                   volume->updated_at,
+                                                   source_name);
+            if (error != NO_ERROR)
+            {
+                TRACE_WARNING("Failed to persist TB2 volume for %s: %s\r\n",
+                              box_id, error2text(error));
+            }
+        }
+    }
+    mutex_unlock(MUTEX_TB2_VOLUME_STATE);
+}
 
 static bool tbs_is_hex_ruid(const char *ruid)
 {
@@ -40,6 +282,36 @@ const char *tbs_toniebox2_playback_status_name(toniebox_state_tb2_playback_statu
     }
 }
 
+const char *tbs_toniebox2_volume_source_name(const toniebox_state_volume_t *volume)
+{
+    if (volume == NULL)
+    {
+        return "fallback";
+    }
+    switch (volume->source)
+    {
+    case TBS_TB2_VOLUME_SOURCE_REPORTED:
+        return "reported";
+    case TBS_TB2_VOLUME_SOURCE_COMMAND:
+        return "command";
+    case TBS_TB2_VOLUME_SOURCE_PERSISTED:
+        return "persisted";
+    default:
+        return "fallback";
+    }
+}
+
+void tbs_toniebox2_volume_snapshot(uint8_t overlay_id, toniebox_state_volume_t *volume)
+{
+    if (overlay_id >= MAX_OVERLAYS || volume == NULL)
+    {
+        return;
+    }
+    mutex_lock(MUTEX_TB2_VOLUME_STATE);
+    *volume = Box_State_Overlay[overlay_id].volume;
+    mutex_unlock(MUTEX_TB2_VOLUME_STATE);
+}
+
 static void tbs_record_last_ruid(client_ctx_t *client_ctx, const char *ruid, bool refresh_same_ruid)
 {
     if (client_ctx == NULL || client_ctx->settingsNoOverlay == NULL || !tbs_is_hex_ruid(ruid))
@@ -69,7 +341,62 @@ void toniebox_state_init()
     for (size_t i = 0; i < MAX_OVERLAYS; i++)
     {
         osMemset(&Box_State_Overlay[i], 0, sizeof(toniebox_state_t));
+        Box_State_Overlay[i].volume.level = TBS_TB2_VOLUME_FALLBACK_LEVEL;
+        Box_State_Overlay[i].volume.source = TBS_TB2_VOLUME_SOURCE_FALLBACK;
     }
+}
+
+void toniebox_state_restore()
+{
+    char *directory = tbs_volume_state_directory();
+    if (directory == NULL)
+    {
+        TRACE_WARNING("TB2 volume state directory is unavailable\r\n");
+        return;
+    }
+
+    mutex_lock(MUTEX_TB2_VOLUME_STATE);
+    for (uint8_t overlay_id = 1; overlay_id < MAX_OVERLAYS; overlay_id++)
+    {
+        settings_t *settings = get_settings_id(overlay_id);
+        char box_id[13] = "";
+        if (settings == NULL || !settings->internal.config_used ||
+            !settings_canonicalize_box_id(settings->commonName, box_id, sizeof(box_id)))
+        {
+            continue;
+        }
+
+        char *path = tbs_volume_state_path(directory, box_id);
+        if (path == NULL)
+        {
+            continue;
+        }
+        if (fsFileExists(path))
+        {
+            uint32_t level = 0;
+            uint32_t updated_at = 0;
+            error_t error = tbs_volume_state_read(path, &level, &updated_at);
+            if (error == NO_ERROR)
+            {
+                toniebox_state_volume_t *volume = &Box_State_Overlay[overlay_id].volume;
+                volume->valid = true;
+                volume->level = level;
+                volume->updated_at = updated_at;
+                volume->revision = 1;
+                volume->source = TBS_TB2_VOLUME_SOURCE_PERSISTED;
+                TRACE_INFO("Restored TB2 volume for %s: level=%" PRIu32 "\r\n",
+                           box_id, level);
+            }
+            else
+            {
+                TRACE_WARNING("Ignoring invalid TB2 volume state for %s at '%s': %s\r\n",
+                              box_id, path, error2text(error));
+            }
+        }
+        osFreeMem(path);
+    }
+    mutex_unlock(MUTEX_TB2_VOLUME_STATE);
+    osFreeMem(directory);
 }
 
 toniebox_state_t *get_toniebox_state()
@@ -433,19 +760,25 @@ void tbs_toniebox2_headphones_metrics(client_ctx_t *client_ctx,
 void tbs_toniebox2_volume_state(client_ctx_t *client_ctx, uint32_t level)
 {
     if (client_ctx == NULL || client_ctx->state == NULL ||
+        client_ctx->settingsNoOverlay == NULL ||
         level < TBS_TB2_VOLUME_LEVEL_MIN || level > TBS_TB2_VOLUME_LEVEL_MAX)
     {
         return;
     }
 
-    toniebox_state_volume_t *volume = &client_ctx->state->volume;
-    volume->valid = true;
-    volume->level = level;
-    volume->updated_at = (uint32_t)time(NULL);
+    tbs_volume_update(client_ctx->settingsNoOverlay->internal.overlayNumber, level,
+                      TBS_TB2_VOLUME_SOURCE_REPORTED, TRUE, FALSE, 0);
 
     char value[16];
     osSnprintf(value, sizeof(value), "%" PRIu32, level);
     mqtt_sendBoxEvent("VolumeLevel", value, client_ctx);
+}
+
+void tbs_toniebox2_volume_command(uint8_t overlay_id, uint32_t level,
+                                  uint32_t expected_revision)
+{
+    tbs_volume_update(overlay_id, level, TBS_TB2_VOLUME_SOURCE_COMMAND, TRUE,
+                      TRUE, expected_revision);
 }
 
 void tbs_toniebox2_pong(client_ctx_t *client_ctx, const char *request_id,

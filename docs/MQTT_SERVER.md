@@ -671,14 +671,25 @@ and do not overwrite the last valid runtime state. The direct local MQTT path
 and the packet-aware MQTT upstream use the same validation and state handler;
 transparent packets and raw capture bytes are not rewritten.
 
+The last usable TB2 volume is stored per canonical box ID below
+`data/runtime/toniebox-state/`. A reported `volume/state` and a successfully
+published local absolute command both update this small atomic state file. On
+restart TeddyCloud restores the stored level. If no level has ever been known,
+the runtime API exposes level 2 with `valid=false` and `source="fallback"`; this
+fallback is never persisted. `runtime.volume.source` distinguishes `reported`,
+`command`, `persisted` and `fallback`. A later reported state always replaces
+an optimistic command or restored value.
+
 The WebUI polls the bundled box response every two seconds while the browser
 tab is visible and refreshes immediately after a command. It resolves Tonie
 metadata only when the current playback rUID changes. The existing
 `internal.last_ruid`/`internal.last_ruid_time` Last Played state remains visible
 after stop, `tonie:null` and offline transitions, while Now Playing becomes
-inactive. Playback, chapter selection and volume controls are disabled when
-the box is offline, the exact capability is absent, or a running proxy does not
-permit local control. All `toniebox2.*` settings that produce
+inactive. Playback and chapter selection are disabled when the box is offline,
+the exact capability is absent, or a running proxy does not permit local
+control. Volume uses the same availability gates, but remains usable with the
+unconfirmed level 2 fallback so an absolute command can resynchronize the box.
+All `toniebox2.*` settings that produce
 `settings/desired` are disabled by the same effective setting. Bedtime state is
 shown, but its control stays disabled until the STL schema is confirmed.
 

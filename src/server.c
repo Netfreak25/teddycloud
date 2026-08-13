@@ -1039,6 +1039,7 @@ void server_init(bool test)
     }
 
     mutex_manager_init();
+    toniebox_state_restore();
     if (!sanityChecks())
     {
         return;

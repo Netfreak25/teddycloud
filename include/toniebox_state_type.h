@@ -139,11 +139,21 @@ typedef struct
     uint32_t updated_at;
 } toniebox_state_headphones_t;
 
+typedef enum
+{
+    TBS_TB2_VOLUME_SOURCE_FALLBACK = 0,
+    TBS_TB2_VOLUME_SOURCE_REPORTED,
+    TBS_TB2_VOLUME_SOURCE_COMMAND,
+    TBS_TB2_VOLUME_SOURCE_PERSISTED
+} toniebox_state_volume_source_t;
+
 typedef struct
 {
     bool valid;
     uint32_t level;
     uint32_t updated_at;
+    uint32_t revision;
+    toniebox_state_volume_source_t source;
 } toniebox_state_volume_t;
 
 typedef struct
