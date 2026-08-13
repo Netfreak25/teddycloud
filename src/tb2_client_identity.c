@@ -22,7 +22,8 @@ static bool_t tb2_identity_is_complete(const settings_cert_t *identity)
 
 static bool_t tb2_identity_has_explicit_overlay(const settings_t *settings)
 {
-    if (settings == NULL || settings->internal.overlayNumber == 0)
+    if (settings == NULL || settings->internal.overlayNumber == 0 ||
+        settings->toniebox.boxGeneration != GENERATION_TB2)
     {
         return FALSE;
     }

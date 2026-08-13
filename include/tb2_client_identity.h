@@ -20,8 +20,10 @@ typedef struct
  * Resolve the client identity used for upstream TB2 HTTPS connections.
  *
  * The global client_tb2 identity is the default. A box identity is selected
- * only when at least one TB2 client-certificate setting is explicitly
- * overlaid for that box. An incomplete explicit override fails closed.
+ * only for a TB2 overlay when at least one TB2 client-certificate setting is
+ * explicitly overlaid for that box. Inactive TB2 settings on TB1 or unknown
+ * overlays do not replace the global identity. An incomplete explicit TB2
+ * override fails closed.
  */
 const settings_cert_t *tb2_client_identity_resolve(settings_t *box_settings,
                                                    const char **source);

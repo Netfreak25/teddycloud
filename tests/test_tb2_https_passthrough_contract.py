@@ -64,6 +64,17 @@ class Tb2HttpsPassthroughContractTests(unittest.TestCase):
         self.assertIn(": &get_settings()->internal.client_tb2", self.identity)
         self.assertIn("refusing global fallback", self.identity)
 
+    def test_inactive_tb2_identity_on_non_tb2_overlay_uses_global_default(self):
+        overlay_check = self.identity[
+            self.identity.index("static bool_t tb2_identity_has_explicit_overlay") :
+            self.identity.index("const settings_cert_t *tb2_client_identity_resolve")
+        ]
+        generation_gate = overlay_check.index(
+            "settings->toniebox.boxGeneration != GENERATION_TB2"
+        )
+        option_scan = overlay_check.index("for (size_t index = 0")
+        self.assertLess(generation_gate, option_scan)
+
     def test_capture_defaults_are_registered(self):
         self.assertIn('"cloud.tb2_enabled"', self.settings)
         self.assertIn('"cloud.tb2_v3_enabled"', self.settings)
