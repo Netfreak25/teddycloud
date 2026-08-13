@@ -65,6 +65,8 @@ typedef struct
     char *generation_dir;
     v3_native_object_t *chapters;
     size_t chapter_count;
+    char *library_source;
+    char **library_paths;
 } v3_native_route_t;
 
 typedef struct
@@ -108,6 +110,15 @@ static void v3_native_route_clear(v3_native_route_t *route)
     {
         return;
     }
+    if (route->library_paths != NULL)
+    {
+        for (size_t i = 0; i < route->chapter_count; i++)
+        {
+            osFreeMem(route->library_paths[i]);
+        }
+    }
+    osFreeMem(route->library_paths);
+    osFreeMem(route->library_source);
     osFreeMem(route->generation_dir);
     osFreeMem(route->chapters);
     osMemset(route, 0, sizeof(*route));
@@ -497,10 +508,15 @@ static error_t v3_native_write_descriptor(const char *stage_dir,
     return error;
 }
 
-static void v3_native_load_descriptor_content_types(
+static void v3_native_load_descriptor(
     const char *generation_dir,
-    v3_native_route_t *route)
+    v3_native_route_t *route,
+    char **library_source)
 {
+    if (library_source != NULL)
+    {
+        *library_source = NULL;
+    }
     char *path = generation_dir != NULL
                      ? v3_native_format("%s%cdescriptor.json", generation_dir,
                                         PATH_SEPARATOR)
@@ -523,9 +539,28 @@ static void v3_native_load_descriptor_content_types(
                               ? cJSON_GetObjectItemCaseSensitive(root,
                                                                  "contentType")
                               : NULL;
-    if (root != NULL && end == (const char *)data + length &&
+    cJSON *source = root != NULL
+                        ? cJSON_GetObjectItemCaseSensitive(root,
+                                                           "librarySource")
+                        : NULL;
+    cJSON *stored_ruid = root != NULL
+                             ? cJSON_GetObjectItemCaseSensitive(root, "ruid")
+                             : NULL;
+    uint32_t stored_overlay = 0;
+    uint32_t stored_version = 0;
+    bool_t descriptor_valid =
+        root != NULL && end == (const char *)data + length &&
         cJSON_IsArray(objects) &&
-        cJSON_GetArraySize(objects) == (int)route->chapter_count)
+        cJSON_GetArraySize(objects) == (int)route->chapter_count &&
+        cJSON_IsString(stored_ruid) && stored_ruid->valuestring != NULL &&
+        !osStrcasecmp(stored_ruid->valuestring, route->ruid) &&
+        v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(root, "overlay"),
+                           &stored_overlay, TRUE) &&
+        stored_overlay == route->overlay_id &&
+        v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(root, "version"),
+                           &stored_version, FALSE) &&
+        stored_version == route->version;
+    if (descriptor_valid)
     {
         if (cJSON_IsString(content_type) && content_type->valuestring != NULL &&
             osStrlen(content_type->valuestring) < sizeof(route->content_type))
@@ -552,11 +587,17 @@ static void v3_native_load_descriptor_content_types(
             }
         }
     }
+    if (descriptor_valid && library_source != NULL && cJSON_IsString(source) &&
+        source->valuestring != NULL &&
+        v3_native_library_source_is_candidate(source->valuestring))
+    {
+        *library_source = strdup(source->valuestring);
+    }
     cJSON_Delete(root);
     osFreeMem(data);
 }
 
-static bool_t v3_native_files_complete(const v3_native_route_t *route)
+static bool_t v3_native_cache_files_complete(const v3_native_route_t *route)
 {
     for (size_t i = 0; i < route->chapter_count; i++)
     {
@@ -574,6 +615,191 @@ static bool_t v3_native_files_complete(const v3_native_route_t *route)
         }
     }
     return TRUE;
+}
+
+static bool_t v3_native_origin_list_has(
+    const v3_native_library_origin_t *origins,
+    size_t origin_count,
+    uint8_t overlay_id,
+    const char *ruid,
+    uint32_t version)
+{
+    for (size_t i = 0; i < origin_count; i++)
+    {
+        if (origins[i].overlay_id == overlay_id &&
+            origins[i].content_version == version &&
+            !osStrcasecmp(origins[i].ruid, ruid))
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static bool_t v3_native_library_paths_complete(const v3_native_route_t *route)
+{
+    if (route == NULL || route->library_source == NULL ||
+        route->library_paths == NULL)
+    {
+        return FALSE;
+    }
+    for (size_t i = 0; i < route->chapter_count; i++)
+    {
+        uint32_t size = 0;
+        if (route->library_paths[i] == NULL ||
+            fsGetFileSize(route->library_paths[i], &size) != NO_ERROR ||
+            size != route->chapters[i].file_size)
+        {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static void v3_native_route_clear_library_backing(v3_native_route_t *route)
+{
+    if (route == NULL)
+    {
+        return;
+    }
+    if (route->library_paths != NULL)
+    {
+        for (size_t i = 0; i < route->chapter_count; i++)
+        {
+            osFreeMem(route->library_paths[i]);
+        }
+    }
+    osFreeMem(route->library_paths);
+    osFreeMem(route->library_source);
+    route->library_paths = NULL;
+    route->library_source = NULL;
+}
+
+static bool_t v3_native_route_use_library(
+    const char *library_root,
+    const char *library_source,
+    v3_native_route_t *route)
+{
+    if (library_root == NULL || library_source == NULL || route == NULL ||
+        route->chapter_count == 0)
+    {
+        return FALSE;
+    }
+
+    char **paths = osAllocMem(route->chapter_count * sizeof(*paths));
+    if (paths == NULL)
+    {
+        return FALSE;
+    }
+    osMemset(paths, 0, route->chapter_count * sizeof(*paths));
+    bool_t valid = TRUE;
+
+    if (v3_native_route_is_tonieplay(route))
+    {
+        v3_tonieplay_library_collection_t collection;
+        osMemset(&collection, 0, sizeof(collection));
+        error_t error = v3_tonieplay_library_collection_load(
+            library_root, library_source, FALSE, &collection);
+        valid = error == NO_ERROR &&
+                collection.content_version == route->version &&
+                collection.object_count == route->chapter_count &&
+                v3_native_origin_list_has(
+                    collection.origins, collection.origin_count,
+                    route->overlay_id, route->ruid, route->version);
+        for (size_t i = 0; valid && i < route->chapter_count; i++)
+        {
+            valid = collection.objects[i].index == i &&
+                    collection.objects[i].file_size ==
+                        route->chapters[i].file_size &&
+                    !osStrcmp(collection.objects[i].name,
+                              route->chapters[i].name);
+            if (valid)
+            {
+                paths[i] = strdup(collection.objects[i].path);
+                valid = paths[i] != NULL;
+            }
+        }
+        v3_tonieplay_library_collection_free(&collection);
+    }
+    else
+    {
+        v3_native_library_collection_t collection;
+        osMemset(&collection, 0, sizeof(collection));
+        error_t error = v3_native_library_collection_load(
+            library_root, library_source, FALSE, &collection);
+        valid = error == NO_ERROR &&
+                collection.chapter_count == route->chapter_count &&
+                v3_native_origin_list_has(
+                    collection.origins, collection.origin_count,
+                    route->overlay_id, route->ruid, route->version);
+        for (size_t i = 0; valid && i < route->chapter_count; i++)
+        {
+            valid = collection.chapters[i].index == i &&
+                    collection.chapters[i].file_size ==
+                        route->chapters[i].file_size;
+            if (valid)
+            {
+                paths[i] = strdup(collection.chapters[i].path);
+                valid = paths[i] != NULL;
+            }
+        }
+        v3_native_library_collection_free(&collection);
+    }
+    if (valid)
+    {
+        route->library_source = strdup(library_source);
+        valid = route->library_source != NULL;
+    }
+    if (valid)
+    {
+        route->library_paths = paths;
+        return TRUE;
+    }
+
+    for (size_t i = 0; i < route->chapter_count; i++)
+    {
+        osFreeMem(paths[i]);
+    }
+    osFreeMem(paths);
+    osFreeMem(route->library_source);
+    route->library_source = NULL;
+    return FALSE;
+}
+
+static void v3_native_compact_cache_files(v3_native_route_t *route)
+{
+    if (!v3_native_library_paths_complete(route))
+    {
+        return;
+    }
+    size_t removed = 0;
+    for (size_t i = 0; i < route->chapter_count; i++)
+    {
+        char *path = v3_native_format("%s%cchapters%c%s",
+                                      route->generation_dir,
+                                      PATH_SEPARATOR, PATH_SEPARATOR,
+                                      route->chapters[i].name);
+        if (path != NULL && fsFileExists(path))
+        {
+            if (fsDeleteFile(path) == NO_ERROR)
+            {
+                removed++;
+            }
+            else
+            {
+                TRACE_WARNING("Could not remove duplicate TB2 V3 cache object overlay=%u rUID=%s version=%" PRIu32 " name=%s\r\n",
+                              (unsigned)route->overlay_id, route->ruid,
+                              route->version, route->chapters[i].name);
+            }
+        }
+        osFreeMem(path);
+    }
+    if (removed > 0)
+    {
+        TRACE_INFO("Compacted TB2 V3 cache to library backing overlay=%u rUID=%s version=%" PRIu32 " objects=%" PRIuSIZE "\r\n",
+                   (unsigned)route->overlay_id, route->ruid, route->version,
+                   removed);
+    }
 }
 
 static error_t v3_native_read_active_marker(const char *cache_root,
@@ -632,6 +858,7 @@ static error_t v3_native_read_active_marker(const char *cache_root,
 }
 
 error_t v3_native_cache_read_active_manifest(const char *cache_root,
+                                             const char *library_root,
                                              uint8_t overlay_id,
                                              const char *ruid,
                                              uint8_t **data,
@@ -706,9 +933,18 @@ error_t v3_native_cache_read_active_manifest(const char *cache_root,
     loaded.chapters = chapters;
     loaded.chapter_count = chapter_count;
     osStrcpy(loaded.ruid, canonical_ruid);
-    v3_native_load_descriptor_content_types(generation_dir, &loaded);
-    if (!loaded.valid || !v3_native_files_complete(&loaded))
+    char *library_source = NULL;
+    v3_native_load_descriptor(generation_dir, &loaded, &library_source);
+    mutex_lock(MUTEX_V3_NATIVE_LIBRARY);
+    bool_t library_complete = loaded.valid &&
+                              v3_native_route_use_library(
+                                  library_root, library_source, &loaded);
+    bool_t cache_complete = loaded.valid &&
+                            v3_native_cache_files_complete(&loaded);
+    osFreeMem(library_source);
+    if (!loaded.valid || (!library_complete && !cache_complete))
     {
+        mutex_unlock(MUTEX_V3_NATIVE_LIBRARY);
         v3_native_route_clear(&loaded);
         osFreeMem(manifest_data);
         return error != NO_ERROR ? error : ERROR_INVALID_FILE;
@@ -717,7 +953,12 @@ error_t v3_native_cache_read_active_manifest(const char *cache_root,
     mutex_lock(MUTEX_V3_NATIVE_CACHE);
     v3_native_route_clear(&routes[overlay_id]);
     routes[overlay_id] = loaded;
+    if (library_complete)
+    {
+        v3_native_compact_cache_files(&routes[overlay_id]);
+    }
     mutex_unlock(MUTEX_V3_NATIVE_CACHE);
+    mutex_unlock(MUTEX_V3_NATIVE_LIBRARY);
 
     *data = manifest_data;
     *length = manifest_length;
@@ -747,13 +988,15 @@ bool_t v3_native_cache_active_version(const char *cache_root,
 }
 
 bool_t v3_native_cache_active_is_tonieplay(const char *cache_root,
+                                           const char *library_root,
                                            uint8_t overlay_id,
                                            const char *ruid)
 {
     uint8_t *manifest = NULL;
     size_t manifest_length = 0;
     uint32_t version = 0;
-    if (v3_native_cache_read_active_manifest(cache_root, overlay_id, ruid,
+    if (v3_native_cache_read_active_manifest(cache_root, library_root,
+                                             overlay_id, ruid,
                                              &manifest, &manifest_length,
                                              &version) != NO_ERROR)
     {
@@ -767,6 +1010,7 @@ bool_t v3_native_cache_active_is_tonieplay(const char *cache_root,
 }
 
 bool_t v3_native_cache_active_info(const char *cache_root,
+                                   const char *library_root,
                                    uint8_t overlay_id,
                                    const char *ruid,
                                    uint32_t *version,
@@ -776,7 +1020,8 @@ bool_t v3_native_cache_active_info(const char *cache_root,
     uint8_t *manifest = NULL;
     size_t manifest_length = 0;
     uint32_t active_version = 0;
-    if (v3_native_cache_read_active_manifest(cache_root, overlay_id, ruid,
+    if (v3_native_cache_read_active_manifest(cache_root, library_root,
+                                             overlay_id, ruid,
                                              &manifest, &manifest_length,
                                              &active_version) != NO_ERROR)
     {
@@ -1324,29 +1569,6 @@ static error_t v3_native_library_add_origin(const char *collection_dir,
     return error;
 }
 
-static bool_t v3_native_library_collection_has_origin(
-    const v3_native_library_collection_t *collection,
-    uint8_t overlay_id,
-    const char *ruid,
-    uint32_t version)
-{
-    if (collection == NULL || ruid == NULL)
-    {
-        return FALSE;
-    }
-    for (size_t i = 0; i < collection->origin_count; i++)
-    {
-        const v3_native_library_origin_t *origin = &collection->origins[i];
-        if (origin->overlay_id == overlay_id &&
-            origin->content_version == version &&
-            !osStrcasecmp(origin->ruid, ruid))
-        {
-            return TRUE;
-        }
-    }
-    return FALSE;
-}
-
 static error_t v3_native_cache_descriptor_set_library_source_locked(
     const char *cache_root,
     uint8_t overlay_id,
@@ -1458,86 +1680,74 @@ error_t v3_native_cache_active_library_source(const char *cache_root,
     }
     *library_source = NULL;
 
+    uint8_t *manifest = NULL;
+    size_t manifest_length = 0;
     uint32_t active_version = 0;
-    if (!v3_native_cache_active_version(cache_root, overlay_id, canonical_ruid,
-                                        &active_version) ||
-        (version != 0 && active_version != version))
+    error_t error = v3_native_cache_read_active_manifest(
+        cache_root, library_root, overlay_id, canonical_ruid, &manifest,
+        &manifest_length, &active_version);
+    osFreeMem(manifest);
+    if (error != NO_ERROR || (version != 0 && active_version != version))
     {
-        return ERROR_FILE_NOT_FOUND;
+        return error != NO_ERROR ? error : ERROR_FILE_NOT_FOUND;
     }
 
-    char *generation_dir = v3_native_generation_dir(
-        cache_root, "versions", overlay_id, canonical_ruid, active_version);
-    char *descriptor_path = generation_dir != NULL
-                                ? v3_native_format("%s%cdescriptor.json",
-                                                   generation_dir,
-                                                   PATH_SEPARATOR)
-                                : NULL;
-    osFreeMem(generation_dir);
-    uint8_t *data = NULL;
-    size_t length = 0;
-    error_t error = descriptor_path == NULL
-                        ? ERROR_OUT_OF_MEMORY
-                        : v3_native_read_file(descriptor_path, &data, &length);
-    osFreeMem(descriptor_path);
-    if (error != NO_ERROR)
+    mutex_lock(MUTEX_V3_NATIVE_CACHE);
+    const v3_native_route_t *route = &routes[overlay_id];
+    bool_t valid = route->valid && route->active &&
+                   route->version == active_version &&
+                   !osStrcasecmp(route->ruid, canonical_ruid) &&
+                   v3_native_library_paths_complete(route);
+    if (valid)
     {
-        return error;
+        *library_source = strdup(route->library_source);
     }
+    mutex_unlock(MUTEX_V3_NATIVE_CACHE);
+    return !valid ? ERROR_FILE_NOT_FOUND
+                  : (*library_source != NULL ? NO_ERROR
+                                             : ERROR_OUT_OF_MEMORY);
+}
 
-    const char *end = NULL;
-    cJSON *root = cJSON_ParseWithLengthOpts((const char *)data, length, &end, 0);
-    uint32_t descriptor_overlay = 0;
-    uint32_t descriptor_version = 0;
-    cJSON *descriptor_ruid = root != NULL
-                                 ? cJSON_GetObjectItemCaseSensitive(root, "ruid")
-                                 : NULL;
-    cJSON *source = root != NULL
-                        ? cJSON_GetObjectItemCaseSensitive(root, "librarySource")
-                        : NULL;
-    bool_t valid = root != NULL && end == (const char *)data + length &&
-                   cJSON_IsString(descriptor_ruid) &&
-                   descriptor_ruid->valuestring != NULL &&
-                   !osStrcasecmp(descriptor_ruid->valuestring,
-                                 canonical_ruid) &&
-                   v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(
-                                          root, "overlay"),
-                                      &descriptor_overlay, TRUE) &&
-                   descriptor_overlay == overlay_id &&
-                   v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(
-                                          root, "version"),
-                                      &descriptor_version, FALSE) &&
-                   descriptor_version == active_version &&
-                   cJSON_IsString(source) && source->valuestring != NULL &&
-                   v3_native_library_source_is_candidate(source->valuestring);
-    char *candidate = valid ? strdup(source->valuestring) : NULL;
-    cJSON_Delete(root);
-    osFreeMem(data);
-    if (!valid || candidate == NULL)
+static error_t v3_native_cache_link_library_source(
+    const char *cache_root,
+    const char *library_root,
+    uint8_t overlay_id,
+    const char *ruid,
+    uint32_t version,
+    const char *library_source)
+{
+    error_t error = v3_native_cache_descriptor_set_library_source(
+        cache_root, overlay_id, ruid, version, library_source);
+    uint8_t *manifest = NULL;
+    size_t manifest_length = 0;
+    uint32_t active_version = 0;
+    if (error == NO_ERROR)
     {
-        osFreeMem(candidate);
-        return valid ? ERROR_OUT_OF_MEMORY : ERROR_FILE_NOT_FOUND;
+        error = v3_native_cache_read_active_manifest(
+            cache_root, library_root, overlay_id, ruid, &manifest,
+            &manifest_length, &active_version);
     }
-
-    v3_native_library_collection_t collection;
-    osMemset(&collection, 0, sizeof(collection));
-    error = v3_native_library_collection_load(library_root, candidate, FALSE,
-                                               &collection);
-    if (error == NO_ERROR &&
-        !v3_native_library_collection_has_origin(
-            &collection, overlay_id, canonical_ruid, active_version))
+    osFreeMem(manifest);
+    if (error == NO_ERROR && active_version != version)
     {
         error = ERROR_INVALID_FILE;
     }
     if (error == NO_ERROR)
     {
-        *library_source = candidate;
+        mutex_lock(MUTEX_V3_NATIVE_CACHE);
+        const v3_native_route_t *route = &routes[overlay_id];
+        bool_t linked = route->valid && route->active &&
+                        route->version == version &&
+                        !osStrcasecmp(route->ruid, ruid) &&
+                        route->library_source != NULL &&
+                        !osStrcmp(route->library_source, library_source) &&
+                        v3_native_library_paths_complete(route);
+        mutex_unlock(MUTEX_V3_NATIVE_CACHE);
+        if (!linked)
+        {
+            error = ERROR_INVALID_FILE;
+        }
     }
-    else
-    {
-        osFreeMem(candidate);
-    }
-    v3_native_library_collection_free(&collection);
     return error;
 }
 
@@ -1562,11 +1772,38 @@ error_t v3_native_cache_import_active_library(const char *cache_root,
     size_t manifest_length = 0;
     uint32_t version = 0;
     error_t error = v3_native_cache_read_active_manifest(
-        cache_root, overlay_id, canonical_ruid, &manifest, &manifest_length,
-        &version);
+        cache_root, library_root, overlay_id, canonical_ruid, &manifest,
+        &manifest_length, &version);
     if (error != NO_ERROR)
     {
         return error;
+    }
+    mutex_lock(MUTEX_V3_NATIVE_CACHE);
+    const v3_native_route_t *loaded_route = &routes[overlay_id];
+    bool_t already_linked = loaded_route->valid && loaded_route->active &&
+                            loaded_route->version == version &&
+                            !osStrcasecmp(loaded_route->ruid, canonical_ruid) &&
+                            v3_native_library_paths_complete(loaded_route);
+    char *linked_source = already_linked
+                              ? strdup(loaded_route->library_source)
+                              : NULL;
+    mutex_unlock(MUTEX_V3_NATIVE_CACHE);
+    if (already_linked)
+    {
+        osFreeMem(manifest);
+        if (linked_source == NULL)
+        {
+            return ERROR_OUT_OF_MEMORY;
+        }
+        if (library_source != NULL)
+        {
+            *library_source = linked_source;
+        }
+        else
+        {
+            osFreeMem(linked_source);
+        }
+        return NO_ERROR;
     }
     uint32_t parsed_version = 0;
     char manifest_content_type[V3_NATIVE_CACHE_OBJECT_TYPE_SIZE] = {0};
@@ -1745,8 +1982,9 @@ cleanup:
         }
         else
         {
-            error = v3_native_cache_descriptor_set_library_source(
-                cache_root, overlay_id, canonical_ruid, version, source);
+            error = v3_native_cache_link_library_source(
+                cache_root, library_root, overlay_id, canonical_ruid, version,
+                source);
             if (error == NO_ERROR && library_source != NULL)
             {
                 *library_source = source;
@@ -1800,6 +2038,170 @@ bool_t v3_native_library_source_is_candidate(const char *source)
     return TRUE;
 }
 
+static bool_t v3_native_descriptor_references_library(
+    const char *cache_root,
+    const char *generation_dir,
+    const char *library_source,
+    uint8_t *overlay_id,
+    char ruid[TB2_RUID_SIZE],
+    uint32_t *version)
+{
+    char *descriptor_path = v3_native_format("%s%cdescriptor.json",
+                                              generation_dir,
+                                              PATH_SEPARATOR);
+    uint8_t *data = NULL;
+    size_t length = 0;
+    if (descriptor_path == NULL ||
+        v3_native_read_file(descriptor_path, &data, &length) != NO_ERROR)
+    {
+        osFreeMem(descriptor_path);
+        return FALSE;
+    }
+    osFreeMem(descriptor_path);
+
+    const char *end = NULL;
+    cJSON *root = cJSON_ParseWithLengthOpts((const char *)data, length, &end, 0);
+    cJSON *source = root != NULL
+                        ? cJSON_GetObjectItemCaseSensitive(root, "librarySource")
+                        : NULL;
+    cJSON *stored_ruid = root != NULL
+                             ? cJSON_GetObjectItemCaseSensitive(root, "ruid")
+                             : NULL;
+    uint32_t stored_overlay = 0;
+    uint32_t stored_version = 0;
+    char canonical_ruid[TB2_RUID_SIZE];
+    bool_t valid = root != NULL && end == (const char *)data + length &&
+                   cJSON_IsString(source) && source->valuestring != NULL &&
+                   !osStrcmp(source->valuestring, library_source) &&
+                   cJSON_IsString(stored_ruid) &&
+                   stored_ruid->valuestring != NULL &&
+                   tb2_ruid_canonicalize(stored_ruid->valuestring,
+                                         canonical_ruid) &&
+                   v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(
+                                          root, "overlay"),
+                                      &stored_overlay, TRUE) &&
+                   stored_overlay < MAX_OVERLAYS &&
+                   v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(
+                                          root, "version"),
+                                      &stored_version, FALSE);
+    char *expected_dir = valid
+                             ? v3_native_generation_dir(
+                                   cache_root, "versions",
+                                   (uint8_t)stored_overlay, canonical_ruid,
+                                   stored_version)
+                             : NULL;
+    valid = valid && expected_dir != NULL &&
+            !osStrcmp(expected_dir, generation_dir);
+    osFreeMem(expected_dir);
+    cJSON_Delete(root);
+    osFreeMem(data);
+    if (!valid)
+    {
+        return FALSE;
+    }
+    *overlay_id = (uint8_t)stored_overlay;
+    osStrcpy(ruid, canonical_ruid);
+    *version = stored_version;
+    return TRUE;
+}
+
+static error_t v3_native_invalidate_library_source_recursive(
+    const char *cache_root,
+    const char *directory,
+    const char *library_source,
+    unsigned depth)
+{
+    if (!fsDirExists(directory))
+    {
+        return NO_ERROR;
+    }
+    if (depth == 3U)
+    {
+        uint8_t overlay_id = 0;
+        char ruid[TB2_RUID_SIZE];
+        uint32_t version = 0;
+        if (!v3_native_descriptor_references_library(
+                cache_root, directory, library_source, &overlay_id, ruid,
+                &version))
+        {
+            return NO_ERROR;
+        }
+
+        uint32_t active_version = 0;
+        if (v3_native_read_active_marker(cache_root, overlay_id, ruid,
+                                         &active_version, NULL) == NO_ERROR &&
+            active_version == version)
+        {
+            char *marker = v3_native_active_marker_path(cache_root, overlay_id,
+                                                         ruid);
+            error_t error = marker == NULL
+                                ? ERROR_OUT_OF_MEMORY
+                                : fsDeleteFile(marker);
+            osFreeMem(marker);
+            if (error != NO_ERROR)
+            {
+                return error;
+            }
+        }
+        v3_native_route_t *route = &routes[overlay_id];
+        if (route->valid && route->version == version &&
+            !osStrcasecmp(route->ruid, ruid) &&
+            route->library_source != NULL &&
+            !osStrcmp(route->library_source, library_source))
+        {
+            v3_native_route_clear(route);
+        }
+        TRACE_INFO("Invalidating TB2 V3 cache generation for deleted library source overlay=%u rUID=%s version=%" PRIu32 "\r\n",
+                   (unsigned)overlay_id, ruid, version);
+        return v3_native_remove_tree(directory);
+    }
+
+    FsDir *dir = fsOpenDir(directory);
+    if (dir == NULL)
+    {
+        return ERROR_FILE_OPENING_FAILED;
+    }
+    error_t error = NO_ERROR;
+    FsDirEntry entry;
+    while (error == NO_ERROR && fsReadDir(dir, &entry) == NO_ERROR)
+    {
+        if (!osStrcmp(entry.name, ".") || !osStrcmp(entry.name, "..") ||
+            !(entry.attributes & FS_FILE_ATTR_DIRECTORY))
+        {
+            continue;
+        }
+        char *child = v3_native_format("%s%c%s", directory, PATH_SEPARATOR,
+                                       entry.name);
+        error = child == NULL
+                    ? ERROR_OUT_OF_MEMORY
+                    : v3_native_invalidate_library_source_recursive(
+                          cache_root, child, library_source, depth + 1U);
+        osFreeMem(child);
+    }
+    fsCloseDir(dir);
+    return error;
+}
+
+static error_t v3_native_cache_invalidate_library_source(
+    const char *cache_root,
+    const char *library_source)
+{
+    char *versions_root = v3_native_format("%s%c%s%cversions", cache_root,
+                                           PATH_SEPARATOR,
+                                           V3_NATIVE_CACHE_DIR,
+                                           PATH_SEPARATOR);
+    if (versions_root == NULL)
+    {
+        return ERROR_OUT_OF_MEMORY;
+    }
+    mutex_lock(MUTEX_V3_NATIVE_CACHE);
+    error_t error = v3_native_invalidate_library_source_recursive(
+        cache_root, versions_root, library_source, 0U);
+    mutex_unlock(MUTEX_V3_NATIVE_CACHE);
+    osFreeMem(versions_root);
+    return error;
+}
+
 void v3_native_library_collection_free(
     v3_native_library_collection_t *collection)
 {
@@ -1836,21 +2238,30 @@ error_t v3_native_library_collection_delete(const char *library_root,
     char *derived_taf = v3_native_format(
         "%s%ctb1-native-library%c%s.taf", cache_root, PATH_SEPARATOR,
         PATH_SEPARATOR, content_hash);
-    if (collection_dir == NULL || derived_taf == NULL)
+    char *library_source = v3_native_format(
+        "lib://by/contentHash/%s/library-entry.json", content_hash);
+    if (collection_dir == NULL || derived_taf == NULL || library_source == NULL)
     {
         osFreeMem(collection_dir);
         osFreeMem(derived_taf);
+        osFreeMem(library_source);
         return ERROR_OUT_OF_MEMORY;
     }
     if (!fsDirExists(collection_dir))
     {
         osFreeMem(collection_dir);
         osFreeMem(derived_taf);
+        osFreeMem(library_source);
         return ERROR_FILE_NOT_FOUND;
     }
 
     mutex_lock(MUTEX_V3_NATIVE_LIBRARY);
-    error_t error = v3_native_remove_tree(collection_dir);
+    error_t error = v3_native_cache_invalidate_library_source(
+        cache_root, library_source);
+    if (error == NO_ERROR)
+    {
+        error = v3_native_remove_tree(collection_dir);
+    }
     if (error == NO_ERROR && fsFileExists(derived_taf))
     {
         error = fsDeleteFile(derived_taf);
@@ -1859,6 +2270,7 @@ error_t v3_native_library_collection_delete(const char *library_root,
 
     osFreeMem(collection_dir);
     osFreeMem(derived_taf);
+    osFreeMem(library_source);
     return error;
 }
 
@@ -2128,6 +2540,7 @@ void v3_tonieplay_library_collection_free(
         osFreeMem(collection->objects[i].path);
     }
     osFreeMem(collection->objects);
+    osFreeMem(collection->origins);
     osFreeMem(collection->manifest_path);
     osFreeMem(collection->manifest);
     osMemset(collection, 0, sizeof(*collection));
@@ -2204,6 +2617,9 @@ error_t v3_tonieplay_library_collection_load(
     cJSON *objects = root != NULL
                          ? cJSON_GetObjectItemCaseSensitive(root, "objects")
                          : NULL;
+    cJSON *origins = root != NULL
+                         ? cJSON_GetObjectItemCaseSensitive(root, "origins")
+                         : NULL;
     uint32_t schema = 0;
     uint32_t manifest_size = 0;
     uint32_t version = 0;
@@ -2216,6 +2632,7 @@ error_t v3_tonieplay_library_collection_load(
                                                                  "path")
                               : NULL;
     int count = cJSON_IsArray(objects) ? cJSON_GetArraySize(objects) : 0;
+    int origin_count = cJSON_IsArray(origins) ? cJSON_GetArraySize(origins) : -1;
     bool_t valid = root != NULL && end == (const char *)entry_data + entry_length &&
                    v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(
                                           root, "schemaVersion"),
@@ -2241,7 +2658,7 @@ error_t v3_tonieplay_library_collection_load(
                    v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(
                                           manifest, "fileSize"),
                                       &manifest_size, FALSE) &&
-                   count > 0;
+                   count > 0 && origin_count >= 0;
     if (!valid)
     {
         cJSON_Delete(root);
@@ -2258,6 +2675,48 @@ error_t v3_tonieplay_library_collection_load(
         goto cleanup;
     }
     collection->content_version = version;
+    if (origin_count > 0)
+    {
+        collection->origins = osAllocMem(
+            sizeof(*collection->origins) * (size_t)origin_count);
+        if (collection->origins == NULL)
+        {
+            cJSON_Delete(root);
+            error = ERROR_OUT_OF_MEMORY;
+            goto cleanup;
+        }
+        osMemset(collection->origins, 0,
+                 sizeof(*collection->origins) * (size_t)origin_count);
+        collection->origin_count = (size_t)origin_count;
+        for (size_t i = 0; i < collection->origin_count; i++)
+        {
+            cJSON *origin = cJSON_GetArrayItem(origins, (int)i);
+            cJSON *ruid = origin != NULL
+                              ? cJSON_GetObjectItemCaseSensitive(origin, "ruid")
+                              : NULL;
+            uint32_t overlay_id = 0;
+            uint32_t content_version = 0;
+            valid = cJSON_IsObject(origin) && cJSON_IsString(ruid) &&
+                    ruid->valuestring != NULL &&
+                    v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(
+                                           origin, "overlay"),
+                                       &overlay_id, TRUE) &&
+                    overlay_id < MAX_OVERLAYS &&
+                    v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(
+                                           origin, "contentVersion"),
+                                       &content_version, FALSE) &&
+                    tb2_ruid_canonicalize(
+                        ruid->valuestring, collection->origins[i].ruid);
+            if (!valid)
+            {
+                cJSON_Delete(root);
+                error = ERROR_INVALID_FILE;
+                goto cleanup;
+            }
+            collection->origins[i].overlay_id = (uint8_t)overlay_id;
+            collection->origins[i].content_version = content_version;
+        }
+    }
     collection->manifest_path = v3_native_format("%s%ccontent-meta.json",
                                                   collection_dir,
                                                   PATH_SEPARATOR);
@@ -2562,11 +3021,23 @@ error_t v3_native_cache_import_active_tonieplay_library(
     size_t manifest_length = 0;
     uint32_t version = 0;
     error_t error = v3_native_cache_read_active_manifest(
-        cache_root, overlay_id, canonical_ruid, &manifest, &manifest_length,
-        &version);
+        cache_root, library_root, overlay_id, canonical_ruid, &manifest,
+        &manifest_length, &version);
     if (error != NO_ERROR)
     {
         return error;
+    }
+    mutex_lock(MUTEX_V3_NATIVE_CACHE);
+    const v3_native_route_t *loaded_route = &routes[overlay_id];
+    bool_t already_linked = loaded_route->valid && loaded_route->active &&
+                            loaded_route->version == version &&
+                            !osStrcasecmp(loaded_route->ruid, canonical_ruid) &&
+                            v3_native_library_paths_complete(loaded_route);
+    mutex_unlock(MUTEX_V3_NATIVE_CACHE);
+    if (already_linked)
+    {
+        osFreeMem(manifest);
+        return NO_ERROR;
     }
 
     char manifest_content_type[V3_NATIVE_CACHE_OBJECT_TYPE_SIZE] = {0};
@@ -2705,6 +3176,7 @@ error_t v3_native_cache_import_active_tonieplay_library(
         char *source = v3_native_format(
             "lib://by/contentHash/%s/library-entry.json", content_hash);
         v3_tonieplay_library_collection_t existing;
+        osMemset(&existing, 0, sizeof(existing));
         error = source != NULL
                     ? v3_tonieplay_library_collection_load(
                           library_root, source, TRUE, &existing)
@@ -2712,6 +3184,8 @@ error_t v3_native_cache_import_active_tonieplay_library(
         if (error == NO_ERROR)
         {
             v3_tonieplay_library_collection_free(&existing);
+            error = v3_native_library_add_origin(
+                final_dir, overlay_id, canonical_ruid, version);
         }
         osFreeMem(source);
         goto tonieplay_cleanup;
@@ -2793,6 +3267,7 @@ error_t v3_native_cache_import_active_tonieplay_library(
         char *source = v3_native_format(
             "lib://by/contentHash/%s/library-entry.json", content_hash);
         v3_tonieplay_library_collection_t published;
+        osMemset(&published, 0, sizeof(published));
         error = source != NULL
                     ? v3_tonieplay_library_collection_load(
                           library_root, source, TRUE, &published)
@@ -2831,6 +3306,17 @@ tonieplay_cleanup:
     osFreeMem(source_dir);
     osFreeMem(parsed);
     osFreeMem(manifest);
+    if (error == NO_ERROR)
+    {
+        char *source = v3_native_format(
+            "lib://by/contentHash/%s/library-entry.json", content_hash);
+        error = source == NULL
+                    ? ERROR_OUT_OF_MEMORY
+                    : v3_native_cache_link_library_source(
+                          cache_root, library_root, overlay_id,
+                          canonical_ruid, version, source);
+        osFreeMem(source);
+    }
     return error;
 }
 
@@ -3047,7 +3533,7 @@ static error_t v3_native_write_active_marker(const char *cache_root,
 
 static error_t v3_native_activate_route(v3_native_route_t *route, const char *cache_root)
 {
-    if (!v3_native_files_complete(route))
+    if (!v3_native_cache_files_complete(route))
     {
         return ERROR_IN_PROGRESS;
     }
@@ -3253,7 +3739,7 @@ error_t v3_native_cache_meta_capture_finish(v3_native_cache_meta_capture_t *capt
         staged.chapters = chapters;
         staged.chapter_count = chapter_count;
         osStrcpy(staged.content_type, manifest_content_type);
-        v3_native_load_descriptor_content_types(stage_dir, &staged);
+        v3_native_load_descriptor(stage_dir, &staged, NULL);
         osStrcpy(manifest_content_type, staged.content_type);
         error = v3_native_write_descriptor(stage_dir, capture->overlay_id,
                                            capture->ruid, version,
@@ -3284,9 +3770,8 @@ error_t v3_native_cache_meta_capture_finish(v3_native_cache_meta_capture_t *capt
         {
             osFreeMem(route->generation_dir);
             route->generation_dir = version_dir;
-            v3_native_load_descriptor_content_types(route->generation_dir,
-                                                    route);
-            route->active = v3_native_files_complete(route);
+            v3_native_load_descriptor(route->generation_dir, route, NULL);
+            route->active = v3_native_cache_files_complete(route);
             if (!route->active)
             {
                 error = ERROR_INVALID_FILE;
@@ -3296,7 +3781,8 @@ error_t v3_native_cache_meta_capture_finish(v3_native_cache_meta_capture_t *capt
         {
             osFreeMem(version_dir);
         }
-        if (error == NO_ERROR && !route->active && v3_native_files_complete(route))
+        if (error == NO_ERROR && !route->active &&
+            v3_native_cache_files_complete(route))
         {
             error = v3_native_activate_route(route, capture->cache_root);
         }
@@ -3427,6 +3913,7 @@ static void v3_native_capture_paths_free(
 
 v3_native_cache_chapter_action_t v3_native_cache_chapter_prepare(
     const char *cache_root,
+    const char *library_root,
     uint8_t overlay_id,
     const char *name,
     v3_native_cache_chapter_capture_t *capture,
@@ -3438,7 +3925,8 @@ v3_native_cache_chapter_action_t v3_native_cache_chapter_prepare(
     }
     osMemset(capture, 0, sizeof(*capture));
     *serve_path = NULL;
-    if (cache_root == NULL || overlay_id >= MAX_OVERLAYS ||
+    if (cache_root == NULL || library_root == NULL ||
+        overlay_id >= MAX_OVERLAYS ||
         !v3_native_cache_chapter_name_is_safe(name))
     {
         return V3_NATIVE_CHAPTER_BYPASS;
@@ -3475,8 +3963,27 @@ v3_native_cache_chapter_action_t v3_native_cache_chapter_prepare(
         return V3_NATIVE_CHAPTER_FORWARD;
     }
 
-    char *path = v3_native_format("%s%cchapters%c%s", route->generation_dir,
-                                  PATH_SEPARATOR, PATH_SEPARATOR, name);
+    if (route->active && route->library_source != NULL &&
+        !v3_native_library_paths_complete(route))
+    {
+        if (v3_native_cache_files_complete(route))
+        {
+            TRACE_WARNING("TB2 V3 library backing unavailable; using complete cache copy overlay=%u rUID=%s version=%" PRIu32 "\r\n",
+                          (unsigned)overlay_id, route->ruid, route->version);
+            v3_native_route_clear_library_backing(route);
+        }
+        else
+        {
+            mutex_unlock(MUTEX_V3_NATIVE_CACHE);
+            return V3_NATIVE_CHAPTER_FORWARD;
+        }
+    }
+
+    char *path = route->active && route->library_source != NULL
+                     ? strdup(route->library_paths[index])
+                     : v3_native_format("%s%cchapters%c%s",
+                                        route->generation_dir,
+                                        PATH_SEPARATOR, PATH_SEPARATOR, name);
     uint32_t existing_size = 0;
     bool_t complete_file = path != NULL &&
                            fsGetFileSize(path, &existing_size) == NO_ERROR &&
@@ -3661,7 +4168,7 @@ error_t v3_native_cache_chapter_finish(v3_native_cache_chapter_capture_t *captur
         {
             error = ERROR_ABORTED;
         }
-        else if (v3_native_files_complete(route))
+        else if (v3_native_cache_files_complete(route))
         {
             error = v3_native_activate_route(route, capture->cache_root);
         }

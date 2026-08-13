@@ -148,7 +148,7 @@ class Tb2V3LibraryCacheContractTests(unittest.TestCase):
             "void v3_native_cache_invalidate(",
         )
         self.assertIn("char **library_source", import_flow)
-        self.assertIn("v3_native_cache_descriptor_set_library_source", import_flow)
+        self.assertIn("v3_native_cache_link_library_source", import_flow)
         self.assertIn('"lib://by/contentHash/%s/library-entry.json"', import_flow)
         setter = self.section(
             self.source,
@@ -161,16 +161,53 @@ class Tb2V3LibraryCacheContractTests(unittest.TestCase):
         getter = self.section(
             self.source,
             "error_t v3_native_cache_active_library_source(",
-            "error_t v3_native_cache_import_active_library(",
+            "static error_t v3_native_cache_link_library_source(",
         )
-        self.assertIn("v3_native_cache_active_version", getter)
+        self.assertIn("v3_native_cache_read_active_manifest", getter)
         self.assertIn("active_version != version", getter)
-        self.assertIn('root, "overlay"', getter)
-        self.assertIn('root, "ruid"', getter)
-        self.assertIn('root, "version"', getter)
-        self.assertIn("v3_native_library_collection_has_origin", getter)
-        self.assertIn("v3_native_library_collection_load(library_root, candidate, FALSE", getter)
-        self.assertNotIn("library_root, candidate, TRUE", getter)
+        self.assertIn("v3_native_library_paths_complete", getter)
+        self.assertIn("strdup(route->library_source)", getter)
+
+    def test_active_original_route_uses_one_complete_backing_store(self) -> None:
+        loader = self.section(
+            self.source,
+            "error_t v3_native_cache_read_active_manifest(",
+            "bool_t v3_native_cache_active_version(",
+        )
+        self.assertIn("v3_native_route_use_library", loader)
+        self.assertIn("v3_native_cache_files_complete", loader)
+        self.assertIn("(!library_complete && !cache_complete)", loader)
+        self.assertIn("v3_native_compact_cache_files", loader)
+
+        resolver = self.section(
+            self.source,
+            "v3_native_cache_chapter_action_t v3_native_cache_chapter_prepare(",
+            "void v3_native_cache_object_content_type(",
+        )
+        self.assertIn("route->library_paths[index]", resolver)
+        self.assertIn("v3_native_library_paths_complete", resolver)
+        self.assertIn("v3_native_cache_files_complete", resolver)
+        self.assertIn("v3_native_route_clear_library_backing", resolver)
+
+    def test_library_delete_invalidates_all_linked_cache_generations_first(self) -> None:
+        deletion = self.section(
+            self.source,
+            "error_t v3_native_library_collection_delete(",
+            "static uint32_t v3_native_library_audio_id(",
+        )
+        invalidate = deletion.index("v3_native_cache_invalidate_library_source")
+        remove = deletion.index("v3_native_remove_tree(collection_dir)")
+        self.assertLess(invalidate, remove)
+        self.assertIn("if (error == NO_ERROR)", deletion)
+        recursive = self.section(
+            self.source,
+            "static error_t v3_native_invalidate_library_source_recursive(",
+            "static error_t v3_native_cache_invalidate_library_source(",
+        )
+        self.assertIn("v3_native_descriptor_references_library", recursive)
+        self.assertIn("v3_native_active_marker_path", recursive)
+        self.assertIn("v3_native_route_clear(route)", recursive)
+        self.assertIn("v3_native_remove_tree(directory)", recursive)
 
     def test_normal_mitm_cached_replay_and_manual_download_share_import_hook(self) -> None:
         self.assertGreaterEqual(

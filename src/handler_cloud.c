@@ -82,6 +82,7 @@ static void v3_native_import_library_if_enabled(client_ctx_t *client_ctx,
     bool_t tonieplay = FALSE;
     if (!v3_native_cache_active_info(
         client_ctx->settings->internal.cachedirfull,
+        client_ctx->settings->internal.librarydirfull,
         client_ctx->settings->internal.overlayNumber, ruid, NULL, NULL,
         &tonieplay))
     {
@@ -157,6 +158,7 @@ bool_t v3_original_content_metadata_complete(settings_t *settings,
     bool_t tonieplay = FALSE;
     if (!v3_native_cache_active_info(
             settings->internal.cachedirfull,
+            settings->internal.librarydirfull,
             settings->internal.overlayNumber, canonical_ruid, &version,
             &object_count, &tonieplay) ||
         tonieplay)
@@ -206,6 +208,7 @@ static bool_t v3_native_serve_cached_original(
     uint32_t manifest_version = 0;
     error_t cache_error = v3_native_cache_read_active_manifest(
         client_ctx->settings->internal.cachedirfull,
+        client_ctx->settings->internal.librarydirfull,
         client_ctx->settings->internal.overlayNumber, ruid, &manifest,
         &manifest_length, &manifest_version);
     if (cache_error != NO_ERROR)
@@ -4621,6 +4624,7 @@ static void v3_manual_download_restore_active_route(settings_t *settings,
     size_t manifest_length = 0;
     uint32_t version = 0;
     if (v3_native_cache_read_active_manifest(settings->internal.cachedirfull,
+                                             settings->internal.librarydirfull,
                                              settings->internal.overlayNumber,
                                              ruid, &manifest, &manifest_length,
                                              &version) == NO_ERROR)
@@ -4925,6 +4929,7 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
         char *serve_path = NULL;
         v3_native_cache_chapter_action_t action =
             v3_native_cache_chapter_prepare(settings->internal.cachedirfull,
+                                            settings->internal.librarydirfull,
                                             settings->internal.overlayNumber,
                                             object->name, &capture,
                                             &serve_path);
@@ -5035,6 +5040,7 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
 
     bool_t tonieplay = FALSE;
     if (!v3_native_cache_active_info(settings->internal.cachedirfull,
+                                     settings->internal.librarydirfull,
                                      settings->internal.overlayNumber,
                                      canonical_ruid, NULL, NULL, &tonieplay))
     {
@@ -5716,6 +5722,7 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
         }
         native_action = v3_native_cache_chapter_prepare(
             client_ctx->settings->internal.cachedirfull,
+            client_ctx->settings->internal.librarydirfull,
             client_ctx->settings->internal.overlayNumber, native_name,
             &native_capture, &native_path);
         if (native_action == V3_NATIVE_CHAPTER_SERVE)

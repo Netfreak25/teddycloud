@@ -37,6 +37,9 @@ size and renamed inside staging. The generation directory is published under
 `versions` only after every expected object is complete; the active marker is
 written last. A failed or interrupted new generation therefore cannot replace
 the previous active generation. Complete older version directories are retained.
+After a successful library import, a version may retain only its manifest,
+descriptor and marker while its large objects are served from the immutable
+content-addressed library collection.
 
 For an original Tonie without a configured local source, a complete active
 manifest and its chapters are served locally. A cache miss or an RUID already
@@ -71,17 +74,41 @@ to hidden staging, compares the copy, writes metadata last and then renames the
 complete directory. Existing inconsistent collections are rejected rather
 than overwritten.
 
-After a successful audio import, the active generation descriptor receives an
-optional `librarySource` link to the canonical content-addressed collection.
-The link is version-specific and is used only when the active marker still
-selects that exact overlay/RUID/version and the collection retains matching
-origin metadata. A new generation starts without such a link, and a deleted or
-structurally invalid library entry is therefore never reported as an available
-source. This lookup deliberately does not rehash immutable chapter files.
-Normal automatic cache/library imports may create this link but never assign a
-Tonie source. Existing collections are not scanned or migrated in the
-background: an older complete generation gains the link only on its next
-successful normal import or explicit V3 download.
+After a successful audio or Tonieplay import, the active generation descriptor
+receives an optional `librarySource` link to the canonical content-addressed
+collection. The link is version-specific and is used only when the active
+marker still selects that exact overlay/RUID/version, the collection retains
+matching origin metadata, and every object matches the manifest position and
+size. Full hashes are checked during import; normal reads validate structure
+and size without rehashing immutable files.
+
+Once the descriptor link is stored atomically and the runtime route has loaded
+the complete library collection, duplicate files under `versions/.../chapters`
+are removed. A failed removal merely leaves a duplicate copy. A crash before
+the descriptor update leaves the cache copy authoritative; a crash after the
+update causes the next route load to validate the library and finish the same
+best-effort compaction. One generation always uses one complete backing store:
+it never combines individual cache and library files.
+
+The box still receives the byte-identical original manifest and requests the
+original TONIES object names. Those names are mapped by manifest position to
+the immutable library files, so content shared by overlays or RUIDs remains
+deduplicated even when the original object names differ. `teddycloud_` names
+remain reserved for explicitly assigned custom/library sources.
+
+A new generation starts without a link. An invalid or missing library entry
+falls back to a complete retained cache copy; if neither backing is complete,
+the generation is a cache miss. Existing collections are not scanned in the
+background: an older generation gains and compacts its link on its next
+successful normal import, explicit V3 download, or load of an already linked
+descriptor. Disabling a library-import setting prevents future imports but
+does not invalidate already compacted generations.
+
+Deleting a native library collection first invalidates every linked cache
+generation across all overlays and RUIDs, including matching active markers
+and runtime routes. Only after all linked generations were removed is the
+collection deleted. If invalidation fails, the collection remains available;
+the next request after a successful deletion observes a normal cache miss.
 
 `library-entry.json` and Tonieplay `content-meta.json` are protected metadata,
 not normal Tonie content sidecars. The generic content-JSON loader rejects

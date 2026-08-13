@@ -92,6 +92,8 @@ typedef struct
     size_t manifest_length;
     v3_tonieplay_library_object_t *objects;
     size_t object_count;
+    v3_native_library_origin_t *origins;
+    size_t origin_count;
 } v3_tonieplay_library_collection_t;
 
 /** Streaming capture state for one TONIES content-meta response. */
@@ -141,8 +143,9 @@ typedef struct
 /** Accept only one portable, unambiguous filename segment. */
 bool_t v3_native_cache_chapter_name_is_safe(const char *name);
 
-/** Load a complete active original TONIES manifest byte-for-byte. */
+/** Load an active original manifest backed completely by cache or library. */
 error_t v3_native_cache_read_active_manifest(const char *cache_root,
+                                             const char *library_root,
                                              uint8_t overlay_id,
                                              const char *ruid,
                                              uint8_t **data,
@@ -157,11 +160,13 @@ bool_t v3_native_cache_active_version(const char *cache_root,
 
 /** Return whether the complete active generation contains Tonieplay objects. */
 bool_t v3_native_cache_active_is_tonieplay(const char *cache_root,
+                                           const char *library_root,
                                            uint8_t overlay_id,
                                            const char *ruid);
 
 /** Return validated metadata for one complete active original generation. */
 bool_t v3_native_cache_active_info(const char *cache_root,
+                                   const char *library_root,
                                    uint8_t overlay_id,
                                    const char *ruid,
                                    uint32_t *version,
@@ -169,10 +174,12 @@ bool_t v3_native_cache_active_info(const char *cache_root,
                                    bool_t *tonieplay);
 
 /**
- * Copy one complete active TONIES generation into the native TB2 library.
+ * Import one complete active TONIES generation into the native TB2 library.
  *
  * The content-addressed import is staged below the library root and becomes
  * visible only after metadata and every chapter have been copied and checked.
+ * A successful import links the generation and removes duplicate cache objects
+ * only after the immutable library paths have been validated.
  */
 error_t v3_native_cache_import_active_library(const char *cache_root,
                                                const char *library_root,
@@ -292,11 +299,13 @@ void v3_native_cache_download_plan_free(v3_native_cache_download_plan_t *plan);
  * Resolve a chapter against the current content-meta route for an overlay.
  *
  * CAPTURE returns an initialized capture. SERVE returns an allocated immutable
- * path. BYPASS performs no local file access. REJECT denotes an ambiguous or
+ * cache or library path while preserving the requested original TONIES name.
+ * BYPASS performs no local file access. REJECT denotes an ambiguous or
  * internally inconsistent cache mapping and must not be served locally.
  */
 v3_native_cache_chapter_action_t v3_native_cache_chapter_prepare(
     const char *cache_root,
+    const char *library_root,
     uint8_t overlay_id,
     const char *name,
     v3_native_cache_chapter_capture_t *capture,

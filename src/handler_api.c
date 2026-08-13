@@ -6214,6 +6214,7 @@ error_t getTagInfoJson(char ruid[17],
         bool_t v3_cache_tonieplay = FALSE;
         bool_t v3_cache_complete = v3_native_cache_active_info(
             client_ctx->settings->internal.cachedirfull,
+            client_ctx->settings->internal.librarydirfull,
             client_ctx->settings->internal.overlayNumber, ruid,
             &v3_cache_version, &v3_object_count, &v3_cache_tonieplay);
         char *v3_library_source = NULL;

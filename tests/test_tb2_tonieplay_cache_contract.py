@@ -103,8 +103,8 @@ class Tb2TonieplayCacheContractTests(unittest.TestCase):
         self.assertIn("FS_FILE_MODE_TRUNC", prepare)
         complete = self.section(
             self.cache,
-            "static bool_t v3_native_files_complete(",
-            "static error_t v3_native_read_active_marker(",
+            "static bool_t v3_native_cache_files_complete(",
+            "static bool_t v3_native_origin_list_has(",
         )
         self.assertIn("route->chapter_count", complete)
         self.assertIn("route->chapters[i].file_size", complete)
@@ -142,6 +142,15 @@ class Tb2TonieplayCacheContractTests(unittest.TestCase):
         self.assertIn('"objects"', self.cache)
         self.assertIn('"tonieplay-v3"', self.cache)
         self.assertIn("sha256Update(&context, manifest, manifest_length)", importer)
+        self.assertIn("v3_native_library_add_origin", importer)
+        self.assertIn("v3_native_cache_link_library_source", importer)
+        loader = self.section(
+            self.cache,
+            "error_t v3_tonieplay_library_collection_load(",
+            "bool_t v3_tonieplay_library_source_version(",
+        )
+        self.assertIn('cJSON_GetObjectItemCaseSensitive(root, "origins")', loader)
+        self.assertIn("collection->origin_count", loader)
 
     def test_assignment_is_tb2_only_nocloud_and_never_falls_back(self) -> None:
         self.assertIn("CT_SOURCE_TONIEPLAY_COLLECTION", self.content_header)
