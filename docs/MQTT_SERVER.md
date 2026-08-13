@@ -401,7 +401,7 @@ All currently handled box topics use the `toniebox/<box_cn>/...` namespace.
 | `toniebox/<box_cn>/metrics/battery` | `handle_mqtt_publish_metrics_battery()` | Stores battery percent/raw/current/status when present and emits the matching box events. |
 | `toniebox/<box_cn>/metrics/headphones` | `handle_mqtt_publish_metrics_headphones()` | Stores speaker output plus connected-headphone diagnostics and emits the matching box events. |
 | `toniebox/<box_cn>/playback/state` | `handle_mqtt_publish_playback_state()` | Parses the observed TB2 playback state, stores the latest semantic playback fields and updates playback box events. |
-| `toniebox/<box_cn>/volume/state` | `handle_mqtt_publish_volume_state()` | Validates and stores the observed volume level in the confirmed range from 0 through 10. |
+| `toniebox/<box_cn>/volume/state` | `handle_mqtt_publish_volume_state()` | Validates and stores the observed integer volume level in the confirmed range from 1 through 12. |
 | `toniebox/<box_cn>/setup/status` | `handle_mqtt_publish_setup_status()` | Validates JSON and stores a bounded diagnostic snapshot without assigning unconfirmed setup semantics. |
 | `toniebox/<box_cn>/metrics/events` | `handle_mqtt_publish_metrics_events()` | Validates JSON and stores a bounded diagnostic snapshot. |
 | `toniebox/<box_cn>/metrics/fleet` | `handle_mqtt_publish_metrics_fleet()` | Validates JSON and stores a bounded diagnostic snapshot. |
@@ -565,7 +565,7 @@ Currently implemented direct publish APIs:
 |----------|-------|------------------|
 | `mqtt_server_publish_playback_for_overlay()` | `toniebox/<box_cn>/app-control/playback` | Builds one of the confirmed `start`, `pause`, `next`, `prev` or `restart` action payloads. |
 | `mqtt_server_publish_playback_position_for_overlay()` | `toniebox/<box_cn>/app-control/playback` | Builds a validated `setPosition` payload with a zero-based chapter and millisecond offset. |
-| `mqtt_server_publish_volume_for_overlay()` | `toniebox/<box_cn>/app-control/volume` | Builds a level payload in the confirmed range from 0 through 10. |
+| `mqtt_server_publish_volume_for_overlay()` | `toniebox/<box_cn>/app-control/volume` | Builds a level payload in the confirmed integer range from 1 through 12 without conversion or clamping. |
 | `mqtt_server_publish_ping_for_overlay()` | `toniebox/<box_cn>/app-control/ping` | Generates a bounded server request ID and builds the ping payload. |
 | `mqtt_server_publish_app_control_stl_for_overlay()` | `toniebox/<box_cn>/app-control/stl` | Sends the caller-provided JSON payload after syntax validation and records a local correlation marker. |
 | `mqtt_server_publish_app_control_sleep_for_overlay()` | `toniebox/<box_cn>/app-control/sleep` | Sends the empty JSON object required to put a box with active bedtime mode to sleep. |
@@ -609,7 +609,7 @@ The validated command endpoints are:
 | Endpoint | Accepted body |
 |----------|---------------|
 | `POST /api/box/playback?overlay=<id>` | A confirmed action, or `setPosition` with `chapter` and `ms`. |
-| `POST /api/box/volume?overlay=<id>` | `{"level":0..10}`. |
+| `POST /api/box/volume?overlay=<id>` | `{"level":1..12}` with an integer level. |
 | `POST /api/box/ping?overlay=<id>` | No caller-provided MQTT payload; the response includes the generated request ID. |
 | `POST /api/box/bedtime?overlay=<id>` | Starts bedtime with `{"state":"on","duration":300..86400}` or stops it with `{"state":"off"}`. |
 | `POST /api/box/sleep?overlay=<id>` | Accepts `{}` and sends the separate sleep command while bedtime mode is active. |
@@ -643,6 +643,33 @@ box into its sleep state.
 
 Invalid input returns `400`, an unknown overlay returns `404`, and a non-TB2,
 offline or not-subscribed box returns `409`.
+
+TB2 volume control uses twelve discrete levels and has no mute level. The
+server preserves the reported or requested level unchanged across the HTTP API,
+MQTT command payload, runtime state, `/api/getBoxes` and external TeddyCloud
+MQTT state. The observed hardware percentages are informational only:
+
+| Level | Hardware percentage |
+|------:|--------------------:|
+| 1 | 5 |
+| 2 | 8 |
+| 3 | 14 |
+| 4 | 22 |
+| 5 | 30 |
+| 6 | 40 |
+| 7 | 50 |
+| 8 | 60 |
+| 9 | 70 |
+| 10 | 80 |
+| 11 | 90 |
+| 12 | 100 |
+
+These percentages are not control values and are independent of percentage
+settings such as `toniebox2.max_volume`. Absolute API values outside 1 through
+12 are rejected rather than clamped. Invalid `volume/state` values are logged
+and do not overwrite the last valid runtime state. The direct local MQTT path
+and the packet-aware MQTT upstream use the same validation and state handler;
+transparent packets and raw capture bytes are not rewritten.
 
 The WebUI polls the bundled box response every two seconds while the browser
 tab is visible and refreshes immediately after a command. It resolves Tonie

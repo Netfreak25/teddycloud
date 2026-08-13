@@ -17,6 +17,10 @@ class MqttLocalControlContractTests(unittest.TestCase):
         cls.settings = (ROOT / "src/settings.c").read_text(encoding="utf-8")
         cls.handler_cloud = (ROOT / "src/handler_cloud.c").read_text(encoding="utf-8")
         cls.handler_api = (ROOT / "src/handler_api.c").read_text(encoding="utf-8")
+        cls.state = (ROOT / "src/toniebox_state.c").read_text(encoding="utf-8")
+        cls.state_types = (ROOT / "include/toniebox_state_type.h").read_text(
+            encoding="utf-8"
+        )
         cls.routes = (ROOT / "src/server.c").read_text(encoding="utf-8")
         cls.web_api = (
             ROOT / "teddycloud_web/src/api/apis/TeddyCloudApi.ts"
@@ -220,6 +224,45 @@ class MqttLocalControlContractTests(unittest.TestCase):
             'cJSON_AddBoolToObject(controls, "sleep", mqtt_server_has_sleep_control(overlay_id))',
             self.handler_api,
         )
+
+    def test_tb2_volume_uses_the_confirmed_discrete_level_range(self):
+        self.assertIn("#define TBS_TB2_VOLUME_LEVEL_MIN 1", self.state_types)
+        self.assertIn("#define TBS_TB2_VOLUME_LEVEL_MAX 12", self.state_types)
+
+        api = self.handler_api[
+            self.handler_api.index("error_t handleApiBoxVolume") :
+            self.handler_api.index("error_t handleApiBoxPing")
+        ]
+        self.assertIn("level >= TBS_TB2_VOLUME_LEVEL_MIN", api)
+        self.assertIn("level <= TBS_TB2_VOLUME_LEVEL_MAX", api)
+        self.assertIn("integer between 1 and 12", api)
+
+        incoming = self.server[
+            self.server.index("static error_t handle_mqtt_publish_volume_state") :
+            self.server.index("static bool_t mqtt_match_app_control_ping")
+        ]
+        self.assertIn('mqtt_get_json_uint32_exact(json, "level", &level)', incoming)
+        self.assertIn("level < TBS_TB2_VOLUME_LEVEL_MIN", incoming)
+        self.assertIn("level > TBS_TB2_VOLUME_LEVEL_MAX", incoming)
+
+        publisher = self.server[
+            self.server.index("bool_t mqtt_server_publish_volume_for_overlay") :
+            self.server.index("bool_t mqtt_server_publish_ping_for_overlay")
+        ]
+        self.assertIn("level < TBS_TB2_VOLUME_LEVEL_MIN", publisher)
+        self.assertIn("level > TBS_TB2_VOLUME_LEVEL_MAX", publisher)
+        self.assertIn('"{\\"level\\":%" PRIu32 "}"', publisher)
+
+        runtime = self.state[
+            self.state.index("void tbs_toniebox2_volume_state") :
+            self.state.index("void tbs_toniebox2_pong")
+        ]
+        self.assertIn("level < TBS_TB2_VOLUME_LEVEL_MIN", runtime)
+        self.assertIn("level > TBS_TB2_VOLUME_LEVEL_MAX", runtime)
+        self.assertIn('mqtt_sendBoxEvent("VolumeLevel", value, client_ctx)', runtime)
+
+        self.assertIn("const VOLUME_MIN = 1", self.web_controls)
+        self.assertIn("const VOLUME_MAX = 12", self.web_controls)
 
     def test_bedtime_http_wrapper_validates_confirmed_payload(self):
         bedtime = self.handler_api[

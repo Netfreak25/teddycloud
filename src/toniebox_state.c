@@ -432,7 +432,8 @@ void tbs_toniebox2_headphones_metrics(client_ctx_t *client_ctx,
 
 void tbs_toniebox2_volume_state(client_ctx_t *client_ctx, uint32_t level)
 {
-    if (client_ctx == NULL || client_ctx->state == NULL || level > TBS_TB2_VOLUME_LEVEL_MAX)
+    if (client_ctx == NULL || client_ctx->state == NULL ||
+        level < TBS_TB2_VOLUME_LEVEL_MIN || level > TBS_TB2_VOLUME_LEVEL_MAX)
     {
         return;
     }

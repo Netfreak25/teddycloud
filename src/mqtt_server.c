@@ -1813,6 +1813,18 @@ static bool_t mqtt_get_json_uint32(cJSON *json, const char *name, uint32_t *valu
     return TRUE;
 }
 
+static bool_t mqtt_get_json_uint32_exact(cJSON *json, const char *name,
+                                         uint32_t *value)
+{
+    if (!mqtt_get_json_uint32(json, name, value))
+    {
+        return FALSE;
+    }
+
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(json, name);
+    return (double)*value == item->valuedouble;
+}
+
 static bool_t mqtt_get_json_int32(cJSON *json, const char *name, int32_t *value)
 {
     if (json == NULL || name == NULL || value == NULL)
@@ -2801,7 +2813,8 @@ static error_t handle_mqtt_publish_volume_state(MqttClientConnection *conn, Mqtt
     }
 
     uint32_t level = 0;
-    if (!mqtt_get_json_uint32(json, "level", &level) || level > TBS_TB2_VOLUME_LEVEL_MAX)
+    if (!mqtt_get_json_uint32_exact(json, "level", &level) ||
+        level < TBS_TB2_VOLUME_LEVEL_MIN || level > TBS_TB2_VOLUME_LEVEL_MAX)
     {
         TRACE_WARNING("MQTT volume-state payload has no usable level for %s\r\n", conn->client_ctx.settings->commonName);
         cJSON_Delete(json);
@@ -3920,7 +3933,7 @@ bool_t mqtt_server_publish_playback_position_for_overlay(uint8_t overlay_id, uin
 
 bool_t mqtt_server_publish_volume_for_overlay(uint8_t overlay_id, uint32_t level)
 {
-    if (level > TBS_TB2_VOLUME_LEVEL_MAX)
+    if (level < TBS_TB2_VOLUME_LEVEL_MIN || level > TBS_TB2_VOLUME_LEVEL_MAX)
     {
         return FALSE;
     }

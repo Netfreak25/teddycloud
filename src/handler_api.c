@@ -4506,11 +4506,14 @@ error_t handleApiBoxVolume(HttpConnection *connection, const char_t *uri, const 
     }
 
     uint32_t level = 0;
-    bool_t level_valid = api_get_json_uint32(json, "level", &level) && level <= TBS_TB2_VOLUME_LEVEL_MAX;
+    bool_t level_valid = api_get_json_uint32(json, "level", &level) &&
+                         level >= TBS_TB2_VOLUME_LEVEL_MIN &&
+                         level <= TBS_TB2_VOLUME_LEVEL_MAX;
     cJSON_Delete(json);
     if (!level_valid)
     {
-        return api_write_status_response(connection, 400, false, "Volume level must be between 0 and 10", NULL);
+        return api_write_status_response(connection, 400, false,
+                                         "Volume level must be an integer between 1 and 12", NULL);
     }
     if (!mqtt_server_publish_volume_for_overlay(overlay_id, level))
     {
