@@ -3333,6 +3333,8 @@
             "couldNotSetSource": "Konnte Quelle nicht setzen! ",
             "downloadedFile": "Datei heruntergeladen",
             "downloadedFileDetails": "Datei von \"{{model}}\" [{{ruid}}] heruntergeladen",
+            "downloadedV3CacheOnly": "V3-Inhalt zwischengespeichert",
+            "downloadedV3CacheOnlyDetails": "Nativer V3-Cache von \"{{model}}\" [{{ruid}}] ist vollständig, wurde aber nicht als Quelle gesetzt (Grund: {{reason}}).",
             "downloading": "Herunterladen...",
             "downloadingDetails": "\"{{model}}\" [{{ruid}}] wird heruntergeladen...",
             "errorDuringDownload": "Fehler beim Herunterladen im Hintergrund",
@@ -3368,7 +3370,7 @@
         "navigationTitle": "Tonies",
         "noData": "Keine Tonies/benutzerdefinierten Tags gefunden.",
         "noDataText": "Tonies/benutzerdefinierte Tags erscheinen erst, nachdem eine Toniebox eine erfolgreiche Verbindung hergestellt hat und bereits Tonies/benutzerdefinierte Tags auf ihrer SD-Karte hat. Stelle sicher, dass deine Toniebox korrekt verbunden ist und bereits einige Tonies/benutzerdefinierte Tags darauf hat, oder platziere deinen ersten Tonie/benutzerdefinierten Tag auf deiner Toniebox und aktualisiere diese Seite.",
-        "noPlayableContentHint": "Es ist kein Inhalt zum Abspielen verfügbar. Entweder ist er nicht zugewiesen oder es fehlen Daten von der Tonies/Boxine-Cloud. Stelle die Figur auf die Box, um dies zu beheben.",
+        "noPlayableContentHint": "Kein abspielbarer lokaler Inhalt verfügbar. Lade den Originalinhalt herunter oder weise eine gültige Quelle zu.",
         "selectFileModal": {
             "cancel": "Abbrechen",
             "nativeCollection": "TB2-Ursprung · Ogg/Opus · {{count}} Kapitel · {{hash}}",

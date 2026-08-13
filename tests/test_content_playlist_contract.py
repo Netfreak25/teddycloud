@@ -163,6 +163,10 @@ class ContentPlaylistContractTests(unittest.TestCase):
         ]
         self.assertIn("api_native_collection_source_metadata(&collection)", file_index)
         self.assertIn("api_add_native_collection_tonie_info_json", file_index)
+        self.assertIn(
+            'cJSON_AddStringToObject(tonieInfoJson, "picture", item->picture)',
+            self.api,
+        )
         self.assertIn("item->tracks_count == collection->chapter_count", self.api)
         self.assertIn("metadata?.tracks?.length === collection.chapterCount", self.native_playback)
         self.assertIn("record.tonieInfo?.tracks", self.file_browser)

@@ -6210,6 +6210,17 @@ error_t getTagInfoJson(char ruid[17],
             client_ctx->settings->internal.cachedirfull,
             client_ctx->settings->internal.overlayNumber, ruid,
             &v3_cache_version, &v3_object_count, &v3_cache_tonieplay);
+        char *v3_library_source = NULL;
+        bool_t v3_source_complete = v3_cache_complete && !v3_cache_tonieplay &&
+            v3_native_cache_active_library_source(
+                client_ctx->settings->internal.cachedirfull,
+                client_ctx->settings->internal.librarydirfull,
+                client_ctx->settings->internal.overlayNumber, ruid,
+                v3_cache_version, &v3_library_source) == NO_ERROR;
+        bool_t v3_download_complete =
+            v3_source_complete ||
+            (v3_cache_complete &&
+             !client_ctx->settings->cloud.cacheToLibraryV3);
         if (v3_cache_complete && !v3_cache_tonieplay)
         {
             v3_original_content_metadata_complete(client_ctx->settings,
@@ -6264,6 +6275,13 @@ error_t getTagInfoJson(char ruid[17],
                                   taf_cache_complete);
             cJSON_AddBoolToObject(cache_state, "v3Complete",
                                   v3_cache_complete);
+            cJSON_AddBoolToObject(cache_state, "v3SourceComplete",
+                                  v3_source_complete);
+            if (v3_source_complete)
+            {
+                cJSON_AddStringToObject(cache_state, "v3Source",
+                                       v3_library_source);
+            }
             if (v3_cache_complete)
             {
                 cJSON_AddNumberToObject(cache_state, "v3ContentVersion",
@@ -6283,12 +6301,32 @@ error_t getTagInfoJson(char ruid[17],
                 tafInfo->json.cache_preference != NULL
                     ? tafInfo->json.cache_preference
                     : CONTENT_JSON_CACHE_PREFERENCE_AUTO;
+            const char *preferred_original_kind =
+                !osStrcmp(cache_preference,
+                          CONTENT_JSON_CACHE_PREFERENCE_TAF)
+                    ? "taf"
+                    : (!osStrcmp(cache_preference,
+                                 CONTENT_JSON_CACHE_PREFERENCE_V3)
+                           ? "v3"
+                           : (client_ctx->settings->toniebox.boxGeneration ==
+                                      GENERATION_TB2
+                                  ? "v3"
+                                  : "taf"));
+            cJSON_AddStringToObject(cache_state, "preferredOriginalKind",
+                                   preferred_original_kind);
             bool_t source_configured = tafInfo->json.source != NULL &&
                                        tafInfo->json.source[0] != '\0';
             bool_t preferred_cache_complete = FALSE;
             if (source_configured)
             {
-                preferred_cache_complete = tafInfo->exists;
+                // content.json source classification has already validated
+                // native collection manifests. Do not repeat that O(chapters)
+                // structural scan for every tag-info card.
+                preferred_cache_complete =
+                    tafInfo->json._source_type == CT_SOURCE_NATIVE_COLLECTION ||
+                    tafInfo->json._source_type ==
+                        CT_SOURCE_TONIEPLAY_COLLECTION ||
+                    tafInfo->exists;
             }
             else if (!osStrcmp(cache_preference,
                                CONTENT_JSON_CACHE_PREFERENCE_TAF))
@@ -6298,14 +6336,14 @@ error_t getTagInfoJson(char ruid[17],
             else if (!osStrcmp(cache_preference,
                                CONTENT_JSON_CACHE_PREFERENCE_V3))
             {
-                preferred_cache_complete = v3_cache_complete;
+                preferred_cache_complete = v3_download_complete;
             }
             else
             {
                 preferred_cache_complete =
                     client_ctx->settings->toniebox.boxGeneration ==
                             GENERATION_TB2
-                        ? v3_cache_complete
+                        ? v3_download_complete
                         : taf_cache_complete;
             }
             if (!preferred_cache_complete && !tafInfo->json.nocloud)
@@ -6313,6 +6351,9 @@ error_t getTagInfoJson(char ruid[17],
                 if (contentJson._has_cloud_auth || isSys)
                 {
                     cJSON_AddStringToObject(jsonEntry, "downloadTriggerUrl", downloadUrl);
+                    cJSON_AddStringToObject(
+                        jsonEntry, "downloadTriggerKind",
+                        !osStrcmp(preferred_original_kind, "v3") ? "v3" : "taf");
                 }
                 else
                 {
@@ -6383,6 +6424,7 @@ error_t getTagInfoJson(char ruid[17],
         {
             error = ERROR_NOT_FOUND;
         }
+        osFreeMem(v3_library_source);
         freeTonieInfo(tafInfo);
     }
     else

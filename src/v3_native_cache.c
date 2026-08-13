@@ -1259,9 +1259,9 @@ static bool_t v3_native_library_origin_matches(const cJSON *origin,
 }
 
 static error_t v3_native_library_add_origin(const char *collection_dir,
-                                            uint8_t overlay_id,
-                                            const char *ruid,
-                                            uint32_t version)
+                                             uint8_t overlay_id,
+                                             const char *ruid,
+                                             uint32_t version)
 {
     char *entry_path = v3_native_format("%s%clibrary-entry.json",
                                         collection_dir, PATH_SEPARATOR);
@@ -1324,12 +1324,234 @@ static error_t v3_native_library_add_origin(const char *collection_dir,
     return error;
 }
 
-error_t v3_native_cache_import_active_library(const char *cache_root,
+static bool_t v3_native_library_collection_has_origin(
+    const v3_native_library_collection_t *collection,
+    uint8_t overlay_id,
+    const char *ruid,
+    uint32_t version)
+{
+    if (collection == NULL || ruid == NULL)
+    {
+        return FALSE;
+    }
+    for (size_t i = 0; i < collection->origin_count; i++)
+    {
+        const v3_native_library_origin_t *origin = &collection->origins[i];
+        if (origin->overlay_id == overlay_id &&
+            origin->content_version == version &&
+            !osStrcasecmp(origin->ruid, ruid))
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static error_t v3_native_cache_descriptor_set_library_source_locked(
+    const char *cache_root,
+    uint8_t overlay_id,
+    const char *ruid,
+    uint32_t version,
+    const char *library_source)
+{
+    char *generation_dir = v3_native_generation_dir(
+        cache_root, "versions", overlay_id, ruid, version);
+    char *descriptor_path = generation_dir != NULL
+                                ? v3_native_format("%s%cdescriptor.json",
+                                                   generation_dir,
+                                                   PATH_SEPARATOR)
+                                : NULL;
+    osFreeMem(generation_dir);
+    uint8_t *data = NULL;
+    size_t length = 0;
+    error_t error = descriptor_path == NULL
+                        ? ERROR_OUT_OF_MEMORY
+                        : v3_native_read_file(descriptor_path, &data, &length);
+    if (error != NO_ERROR)
+    {
+        osFreeMem(descriptor_path);
+        return error;
+    }
+
+    const char *end = NULL;
+    cJSON *root = cJSON_ParseWithLengthOpts((const char *)data, length, &end, 0);
+    bool_t parsed_completely = root != NULL &&
+                               end == (const char *)data + length;
+    osFreeMem(data);
+    uint32_t descriptor_overlay = 0;
+    uint32_t descriptor_version = 0;
+    cJSON *descriptor_ruid = root != NULL
+                                 ? cJSON_GetObjectItemCaseSensitive(root, "ruid")
+                                 : NULL;
+    bool_t valid = parsed_completely &&
+                   cJSON_IsString(descriptor_ruid) &&
+                   descriptor_ruid->valuestring != NULL &&
+                   !osStrcasecmp(descriptor_ruid->valuestring, ruid) &&
+                   v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(
+                                          root, "overlay"),
+                                      &descriptor_overlay, TRUE) &&
+                   descriptor_overlay == overlay_id &&
+                   v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(
+                                          root, "version"),
+                                      &descriptor_version, FALSE) &&
+                   descriptor_version == version &&
+                   v3_native_library_source_is_candidate(library_source);
+    if (!valid)
+    {
+        cJSON_Delete(root);
+        osFreeMem(descriptor_path);
+        return ERROR_INVALID_FILE;
+    }
+
+    cJSON *source = cJSON_CreateString(library_source);
+    cJSON *existing = cJSON_GetObjectItemCaseSensitive(root, "librarySource");
+    bool_t stored = source != NULL &&
+                    (existing != NULL
+                         ? cJSON_ReplaceItemInObjectCaseSensitive(
+                               root, "librarySource", source)
+                         : cJSON_AddItemToObject(root, "librarySource", source));
+    if (!stored)
+    {
+        cJSON_Delete(source);
+        cJSON_Delete(root);
+        osFreeMem(descriptor_path);
+        return ERROR_OUT_OF_MEMORY;
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    error = json == NULL
+                ? ERROR_OUT_OF_MEMORY
+                : v3_native_write_atomic(descriptor_path, json, osStrlen(json));
+    cJSON_free(json);
+    osFreeMem(descriptor_path);
+    return error;
+}
+
+static error_t v3_native_cache_descriptor_set_library_source(
+    const char *cache_root,
+    uint8_t overlay_id,
+    const char *ruid,
+    uint32_t version,
+    const char *library_source)
+{
+    mutex_lock(MUTEX_V3_NATIVE_CACHE);
+    error_t error = v3_native_cache_descriptor_set_library_source_locked(
+        cache_root, overlay_id, ruid, version, library_source);
+    mutex_unlock(MUTEX_V3_NATIVE_CACHE);
+    return error;
+}
+
+error_t v3_native_cache_active_library_source(const char *cache_root,
                                               const char *library_root,
                                               uint8_t overlay_id,
-                                              const char *ruid)
+                                              const char *ruid,
+                                              uint32_t version,
+                                              char **library_source)
 {
     char canonical_ruid[TB2_RUID_SIZE];
+    if (cache_root == NULL || library_root == NULL || library_source == NULL ||
+        overlay_id >= MAX_OVERLAYS ||
+        !tb2_ruid_canonicalize(ruid, canonical_ruid))
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+    *library_source = NULL;
+
+    uint32_t active_version = 0;
+    if (!v3_native_cache_active_version(cache_root, overlay_id, canonical_ruid,
+                                        &active_version) ||
+        (version != 0 && active_version != version))
+    {
+        return ERROR_FILE_NOT_FOUND;
+    }
+
+    char *generation_dir = v3_native_generation_dir(
+        cache_root, "versions", overlay_id, canonical_ruid, active_version);
+    char *descriptor_path = generation_dir != NULL
+                                ? v3_native_format("%s%cdescriptor.json",
+                                                   generation_dir,
+                                                   PATH_SEPARATOR)
+                                : NULL;
+    osFreeMem(generation_dir);
+    uint8_t *data = NULL;
+    size_t length = 0;
+    error_t error = descriptor_path == NULL
+                        ? ERROR_OUT_OF_MEMORY
+                        : v3_native_read_file(descriptor_path, &data, &length);
+    osFreeMem(descriptor_path);
+    if (error != NO_ERROR)
+    {
+        return error;
+    }
+
+    const char *end = NULL;
+    cJSON *root = cJSON_ParseWithLengthOpts((const char *)data, length, &end, 0);
+    uint32_t descriptor_overlay = 0;
+    uint32_t descriptor_version = 0;
+    cJSON *descriptor_ruid = root != NULL
+                                 ? cJSON_GetObjectItemCaseSensitive(root, "ruid")
+                                 : NULL;
+    cJSON *source = root != NULL
+                        ? cJSON_GetObjectItemCaseSensitive(root, "librarySource")
+                        : NULL;
+    bool_t valid = root != NULL && end == (const char *)data + length &&
+                   cJSON_IsString(descriptor_ruid) &&
+                   descriptor_ruid->valuestring != NULL &&
+                   !osStrcasecmp(descriptor_ruid->valuestring,
+                                 canonical_ruid) &&
+                   v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(
+                                          root, "overlay"),
+                                      &descriptor_overlay, TRUE) &&
+                   descriptor_overlay == overlay_id &&
+                   v3_native_json_u32(cJSON_GetObjectItemCaseSensitive(
+                                          root, "version"),
+                                      &descriptor_version, FALSE) &&
+                   descriptor_version == active_version &&
+                   cJSON_IsString(source) && source->valuestring != NULL &&
+                   v3_native_library_source_is_candidate(source->valuestring);
+    char *candidate = valid ? strdup(source->valuestring) : NULL;
+    cJSON_Delete(root);
+    osFreeMem(data);
+    if (!valid || candidate == NULL)
+    {
+        osFreeMem(candidate);
+        return valid ? ERROR_OUT_OF_MEMORY : ERROR_FILE_NOT_FOUND;
+    }
+
+    v3_native_library_collection_t collection;
+    osMemset(&collection, 0, sizeof(collection));
+    error = v3_native_library_collection_load(library_root, candidate, FALSE,
+                                               &collection);
+    if (error == NO_ERROR &&
+        !v3_native_library_collection_has_origin(
+            &collection, overlay_id, canonical_ruid, active_version))
+    {
+        error = ERROR_INVALID_FILE;
+    }
+    if (error == NO_ERROR)
+    {
+        *library_source = candidate;
+    }
+    else
+    {
+        osFreeMem(candidate);
+    }
+    v3_native_library_collection_free(&collection);
+    return error;
+}
+
+error_t v3_native_cache_import_active_library(const char *cache_root,
+                                               const char *library_root,
+                                               uint8_t overlay_id,
+                                               const char *ruid,
+                                               char **library_source)
+{
+    char canonical_ruid[TB2_RUID_SIZE];
+    if (library_source != NULL)
+    {
+        *library_source = NULL;
+    }
     if (cache_root == NULL || library_root == NULL || overlay_id >= MAX_OVERLAYS ||
         !tb2_ruid_canonicalize(ruid, canonical_ruid))
     {
@@ -1513,6 +1735,26 @@ cleanup:
     osFreeMem(source_dir);
     osFreeMem(chapters);
     osFreeMem(manifest);
+    if (error == NO_ERROR)
+    {
+        char *source = v3_native_format(
+            "lib://by/contentHash/%s/library-entry.json", content_hash);
+        if (source == NULL)
+        {
+            error = ERROR_OUT_OF_MEMORY;
+        }
+        else
+        {
+            error = v3_native_cache_descriptor_set_library_source(
+                cache_root, overlay_id, canonical_ruid, version, source);
+            if (error == NO_ERROR && library_source != NULL)
+            {
+                *library_source = source;
+                source = NULL;
+            }
+            osFreeMem(source);
+        }
+    }
     return error;
 }
 

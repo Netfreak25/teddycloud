@@ -175,9 +175,25 @@ bool_t v3_native_cache_active_info(const char *cache_root,
  * visible only after metadata and every chapter have been copied and checked.
  */
 error_t v3_native_cache_import_active_library(const char *cache_root,
+                                               const char *library_root,
+                                               uint8_t overlay_id,
+                                               const char *ruid,
+                                               char **library_source);
+
+/**
+ * Return the validated native-library source linked to one active generation.
+ *
+ * The optional descriptor link is accepted only when the active marker still
+ * selects the requested version and the immutable library collection retains
+ * matching overlay/RUID/version provenance. The caller owns the returned
+ * string.
+ */
+error_t v3_native_cache_active_library_source(const char *cache_root,
                                               const char *library_root,
                                               uint8_t overlay_id,
-                                              const char *ruid);
+                                              const char *ruid,
+                                              uint32_t version,
+                                              char **library_source);
 
 /** Import a complete active Tonieplay generation including its raw manifest. */
 error_t v3_native_cache_import_active_tonieplay_library(

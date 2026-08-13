@@ -395,6 +395,11 @@
             "closeButton": "SoQmoH",
             "title": "QaH"
         },
+        "messages": {
+            "downloadedV3CacheOnly": "V3 De' pollu'",
+            "downloadedV3CacheOnlyDetails": "\"{{model}}\" [{{ruid}}] V3 De' polwI' Hoch tu'lu', 'ach mung mojbe' (meq: {{reason}})."
+        },
+        "noPlayableContentHint": "DaH chu'laHbogh local De' tu'lu'be'. mung De' yISuq pagh Qapbogh mung yIwIv.",
         "selectFileModal": {
             "cancel": "qIl",
             "nativeCollection": "TB2 mung · Ogg/Opus · {{count}} 'ay'mey · {{hash}}",

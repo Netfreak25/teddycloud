@@ -71,6 +71,18 @@ to hidden staging, compares the copy, writes metadata last and then renames the
 complete directory. Existing inconsistent collections are rejected rather
 than overwritten.
 
+After a successful audio import, the active generation descriptor receives an
+optional `librarySource` link to the canonical content-addressed collection.
+The link is version-specific and is used only when the active marker still
+selects that exact overlay/RUID/version and the collection retains matching
+origin metadata. A new generation starts without such a link, and a deleted or
+structurally invalid library entry is therefore never reported as an available
+source. This lookup deliberately does not rehash immutable chapter files.
+Normal automatic cache/library imports may create this link but never assign a
+Tonie source. Existing collections are not scanned or migrated in the
+background: an older complete generation gains the link only on its next
+successful normal import or explicit V3 download.
+
 `library-entry.json` and Tonieplay `content-meta.json` are protected metadata,
 not normal Tonie content sidecars. The generic content-JSON loader rejects
 these canonical `by/contentHash/<hash>` paths before parsing or writing them.
@@ -82,9 +94,10 @@ its read-only detail directory.
 
 ## Manual generation-aware download
 
-The existing content-download API keeps the TB1 V1/V2 TAF path unchanged. For
-a selected TB2 overlay it requests V3 content-meta and every referenced chapter
-with that overlay's saved identity and authentication data.
+The existing content-download API keeps the TB1 V1/V2 TAF path unchanged. An
+explicit V3 preference requests V3 content-meta and every referenced object
+with the selected overlay's saved identity and authentication data regardless
+of its configured generation; `auto` selects this path only for a TB2 overlay.
 
 Manual TB2 downloads deliberately reuse the normal cache pipeline:
 
@@ -92,6 +105,19 @@ Manual TB2 downloads deliberately reuse the normal cache pipeline:
 - `v3_native_cache_chapter_prepare` validates each advertised chapter and
   writes it into the same staged generation as live MITM traffic;
 - the route becomes active only after all advertised chapters are complete.
+
+For an explicit V3 download, successful cache activation is followed by model
+completion and, when `toniebox2.cacheToLibraryV3` is enabled, the same atomic
+native-library import. TeddyCloud then reloads `content.json` under its existing
+per-file lock and assigns the validated `lib://by/contentHash/...` source only
+when source, policy, authentication, preference and active generation still
+match the state that started the download. `auto` additionally still requires
+a TB2 overlay; explicit `v3` remains generation-independent. Concurrent user
+edits win. Import or assignment failures keep the complete cache and any
+already published library collection; automatic caching never performs this
+assignment.
+Tonieplay remains cacheable/importable through its dedicated setting but is
+never assigned by this audio-original completion path.
 
 If authentication, manifest transfer, a chapter transfer or activation fails,
 the incomplete staging data is never selected. A previously active complete
@@ -101,10 +127,17 @@ manual action cannot bypass the established content policy.
 
 The response reports `objectsCompleted`, `objectsTotal` and `object` while
 retaining the existing `chaptersCompleted`, `chaptersTotal` and `chapter`
-fields as compatibility aliases. Complete staged objects survive reconnects;
+fields as compatibility aliases. It additionally distinguishes
+`cacheComplete`, `libraryImported` and `sourceAssigned`, includes the canonical
+`source` after import, and gives an optional `assignmentReason` when a safe
+assignment was skipped. Complete staged objects survive reconnects;
 an incomplete `.part` is replaced by the next complete HTTP `200` transfer.
 Only one capture may write a given object at a time. Cache failures are logged
 but never interrupt the live TONIES response.
+
+With native library caching disabled, a complete manual download is reported
+as cache-only and is not offered repeatedly as an incomplete download. It does
+not create a playable library source or a restore action.
 
 ## Manual cache/library doctor
 

@@ -141,6 +141,37 @@ class Tb2V3LibraryCacheContractTests(unittest.TestCase):
         self.assertIn("v3_native_library_add_origin", existing)
         self.assertNotIn("v3_native_remove_tree(final_dir)", existing)
 
+    def test_import_links_only_the_exact_active_generation_to_its_source(self) -> None:
+        import_flow = self.section(
+            self.source,
+            "error_t v3_native_cache_import_active_library(",
+            "void v3_native_cache_invalidate(",
+        )
+        self.assertIn("char **library_source", import_flow)
+        self.assertIn("v3_native_cache_descriptor_set_library_source", import_flow)
+        self.assertIn('"lib://by/contentHash/%s/library-entry.json"', import_flow)
+        setter = self.section(
+            self.source,
+            "static error_t v3_native_cache_descriptor_set_library_source(",
+            "error_t v3_native_cache_active_library_source(",
+        )
+        self.assertIn("mutex_lock(MUTEX_V3_NATIVE_CACHE)", setter)
+        self.assertIn("mutex_unlock(MUTEX_V3_NATIVE_CACHE)", setter)
+
+        getter = self.section(
+            self.source,
+            "error_t v3_native_cache_active_library_source(",
+            "error_t v3_native_cache_import_active_library(",
+        )
+        self.assertIn("v3_native_cache_active_version", getter)
+        self.assertIn("active_version != version", getter)
+        self.assertIn('root, "overlay"', getter)
+        self.assertIn('root, "ruid"', getter)
+        self.assertIn('root, "version"', getter)
+        self.assertIn("v3_native_library_collection_has_origin", getter)
+        self.assertIn("v3_native_library_collection_load(library_root, candidate, FALSE", getter)
+        self.assertNotIn("library_root, candidate, TRUE", getter)
+
     def test_normal_mitm_cached_replay_and_manual_download_share_import_hook(self) -> None:
         self.assertGreaterEqual(
             self.handler.count("v3_native_import_library_if_enabled("), 4

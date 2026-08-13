@@ -3333,6 +3333,8 @@
             "couldNotSetSource": "No se pudo configurar la fuente.",
             "downloadedFile": "Archivo descargado",
             "downloadedFileDetails": "Archivo fuente de \"{{model}}\" [{{ruid}}] descargado",
+            "downloadedV3CacheOnly": "Contenido V3 almacenado en caché",
+            "downloadedV3CacheOnlyDetails": "La caché V3 nativa de \"{{model}}\" [{{ruid}}] está completa, pero no se asignó como fuente (motivo: {{reason}}).",
             "downloading": "Descargando...",
             "downloadingDetails": "Descargando \"{{model}}\" [{{ruid}}]...",
             "errorDuringDownload": "Error durante la descarga en segundo plano",
@@ -3368,7 +3370,7 @@
         "navigationTitle": "Tonies",
         "noData": "No se encontraron Tonies/Tags personalizados.",
         "noDataText": "Los Tonies/Tags personalizados solo aparecerán después de que una Toniebox haya establecido una conexión exitosa y ya tenga Tonies/Tags personalizados en su tarjeta SD. Asegúrate de que tu Toniebox esté correctamente conectada y tenga algunos Tonies/Tags personalizados, o coloca tu primer Tonie/Tag personalizado en tu Toniebox y actualiza este sitio.",
-        "noPlayableContentHint": "No hay contenido disponible para reproducir. O no está asignado o faltan datos de la nube de Tonies/Boxine. Coloca la figurita en la caja para solucionarlo.",
+        "noPlayableContentHint": "No hay contenido local reproducible. Descarga el contenido original o asigna una fuente válida.",
         "selectFileModal": {
             "cancel": "Cancelar",
             "nativeCollection": "Origen TB2 · Ogg/Opus · {{count}} capítulos · {{hash}}",

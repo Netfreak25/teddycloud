@@ -72,15 +72,71 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
         for forbidden in ("fsOpenFile", "fsWriteFile", "fsRenameFile"):
             self.assertNotIn(forbidden, self.manual)
 
-    def test_complete_manual_download_runs_the_idempotent_library_finalizer(self):
+    def test_complete_manual_download_imports_then_assigns_the_library_source(self):
         activation = self.manual.index("if (!activated)")
-        completed = self.manual.index(
-            'TRACE_INFO("Completed TB2 manual content download', activation
+        completion = self.manual[activation:]
+        metadata = completion.index("v3_original_content_metadata_complete")
+        library_import = completion.index("v3_native_cache_import_active_library")
+        assignment = completion.index("v3_manual_download_assign_library_source")
+        freshness = completion.index("freshness_mark_content_mapping_changed")
+        self.assertLess(
+            metadata,
+            library_import,
         )
-        self.assertIn(
-            "v3_native_import_library_if_enabled(client_ctx, canonical_ruid)",
-            self.manual[activation:completed],
+        self.assertLess(library_import, assignment)
+        self.assertLess(assignment, freshness)
+        self.assertIn("cacheToLibraryV3", completion)
+        assigned_guard = completion[completion.rindex("if (assigned)") : freshness]
+        self.assertIn("if (assigned)", assigned_guard)
+
+    def test_assignment_reloads_content_under_lock_and_preserves_user_changes(self):
+        assignment_start = self.cloud.index(
+            "static error_t v3_manual_download_assign_library_source("
         )
+        assignment_end = self.cloud.index(
+            "error_t handleCloudContentDownloadV3(", assignment_start
+        )
+        assignment = self.cloud[assignment_start:assignment_end]
+        self.assertIn("getTonieInfoFromRuid((char *)ruid, true, settings)", assignment)
+        self.assertIn("v3_manual_download_content_unchanged", assignment)
+        self.assertIn('"generation_changed"', assignment)
+        self.assertIn('"content_changed"', assignment)
+        self.assertIn('"preference_changed"', assignment)
+        self.assertIn('"overlay_generation_changed"', assignment)
+        self.assertIn("save_content_json", assignment)
+        self.assertNotIn("nocloud =", assignment)
+        self.assertNotIn("live =", assignment)
+        unchanged_start = self.cloud.index(
+            "static bool_t v3_manual_download_content_unchanged("
+        )
+        unchanged_end = self.cloud.index(
+            "static error_t v3_manual_download_assign_library_source(",
+            unchanged_start,
+        )
+        unchanged = self.cloud[unchanged_start:unchanged_end]
+        self.assertIn("current->live == initial->live", unchanged)
+        self.assertIn("current->nocloud == initial->nocloud", unchanged)
+        self.assertIn("current_cloud_ruid", unchanged)
+        self.assertIn("initial_cloud_ruid", unchanged)
+
+    def test_tonieplay_import_failure_keeps_the_completed_cache_successful(self):
+        completion = self.manual[self.manual.index("if (tonieplay)") :]
+        tonieplay = completion[: completion.index("if (!settings->cloud.cacheToLibraryV3)")]
+        self.assertIn('"tonieplay_library_import_failed"', tonieplay)
+        self.assertIn("V3_MANUAL_DOWNLOAD_COMPLETE", tonieplay)
+        self.assertNotIn("v3_manual_download_assign_library_source", tonieplay)
+        self.assertNotIn("freshness_mark_content_mapping_changed", tonieplay)
+        self.assertNotIn(
+            "V3_MANUAL_DOWNLOAD_LIBRARY", tonieplay
+        )
+
+    def test_automatic_cache_import_never_assigns_a_source_or_freshness(self):
+        start = self.cloud.index("static void v3_native_import_library_if_enabled(")
+        end = self.cloud.index("bool_t v3_original_content_metadata_complete(", start)
+        automatic = self.cloud[start:end]
+        self.assertIn("v3_native_cache_import_active_library", automatic)
+        self.assertNotIn("v3_manual_download_assign_library_source", automatic)
+        self.assertNotIn("freshness_mark_content_mapping_changed", automatic)
 
     def test_download_plan_uses_validated_names_and_opaque_auth(self):
         self.assertIn("V3_NATIVE_CACHE_CHAPTER_AUTH_SIZE", self.cache_header)
@@ -107,6 +163,8 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
             'return "manifest";',
             'return "chapter";',
             'return "activation";',
+            'return "library";',
+            'return "assignment";',
         ):
             self.assertIn(stage, self.cloud)
         for field in (
@@ -118,6 +176,11 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
             '"objectsCompleted"',
             '"objectsTotal"',
             '"object"',
+            '"cacheComplete"',
+            '"libraryImported"',
+            '"sourceAssigned"',
+            '"assignmentReason"',
+            '"source"',
         ):
             self.assertIn(field, self.cloud)
         self.assertIn("TB2 manual content download failed stage=%s", self.cloud)
@@ -126,6 +189,30 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
         self.assertIn("Manual generation-aware download", self.docs)
         self.assertIn("v3_native_cache_meta_capture", self.docs)
         self.assertIn("v3_native_cache_chapter_prepare", self.docs)
+        self.assertIn("sourceAssigned", self.docs)
+
+    def test_tag_info_exposes_only_a_validated_assignable_v3_source(self):
+        tag_info_start = self.api.index("error_t getTagInfoJson(")
+        tag_info_end = self.api.index("error_t handleApiTagInfo(", tag_info_start)
+        tag_info = self.api[tag_info_start:tag_info_end]
+        self.assertIn("v3_native_cache_active_library_source", tag_info)
+        self.assertIn('"v3SourceComplete"', tag_info)
+        self.assertIn('"v3Source"', tag_info)
+        self.assertIn('"preferredOriginalKind"', tag_info)
+        self.assertIn('"downloadTriggerKind"', tag_info)
+        self.assertIn("preferred_cache_complete = v3_download_complete", tag_info)
+        self.assertIn("v3_source_complete ||", tag_info)
+        self.assertIn("!client_ctx->settings->cloud.cacheToLibraryV3", tag_info)
+        self.assertIn(
+            "tafInfo->json._source_type == CT_SOURCE_NATIVE_COLLECTION ||",
+            tag_info,
+        )
+        source_configured = tag_info[tag_info.index("if (source_configured)") :]
+        source_configured = source_configured[
+            : source_configured.index("else if (!osStrcmp(cache_preference")
+        ]
+        self.assertNotIn("v3_native_library_collection_load", source_configured)
+        self.assertNotIn("v3_tonieplay_library_collection_load", source_configured)
 
 
 if __name__ == "__main__":

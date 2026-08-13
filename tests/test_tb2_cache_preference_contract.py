@@ -86,7 +86,14 @@ class Tb2CachePreferenceContractTests(unittest.TestCase):
         self.assertIn('"cacheState"', tag_info)
         self.assertIn('"tafComplete"', tag_info)
         self.assertIn('"v3Complete"', tag_info)
+        self.assertIn('"v3SourceComplete"', tag_info)
+        self.assertIn('"v3Source"', tag_info)
         self.assertIn('"v3ContentVersion"', tag_info)
+        self.assertIn('"preferredOriginalKind"', tag_info)
+        self.assertIn('"downloadTriggerKind"', tag_info)
+        self.assertIn("v3_native_cache_active_library_source", tag_info)
+        self.assertIn("v3_download_complete", tag_info)
+        self.assertIn("!client_ctx->settings->cloud.cacheToLibraryV3", tag_info)
         self.assertIn("preferred_cache_complete", tag_info)
 
         playlist = self.section(
@@ -125,7 +132,7 @@ class Tb2CachePreferenceContractTests(unittest.TestCase):
             ):
                 self.assertTrue(edit_modal[key], f"{locale}: {key}")
 
-    def test_complete_original_caches_can_replace_an_assigned_source(self) -> None:
+    def test_exactly_one_original_cache_source_can_replace_an_assigned_source(self) -> None:
         card = (
             self.web / "src/components/tonies/toniecard/TonieCard.tsx"
         ).read_text(encoding="utf-8")
@@ -136,37 +143,42 @@ class Tb2CachePreferenceContractTests(unittest.TestCase):
             self.web
             / "src/components/tonies/toniecard/hooks/useTonieCardSaveFlow.ts"
         ).read_text(encoding="utf-8")
+        actions = (
+            self.web
+            / "src/components/tonies/toniecard/hooks/useTonieCardActions.ts"
+        ).read_text(encoding="utf-8")
 
         self.assertIn(
-            "originalTafAvailable={tonieCard.cacheState?.tafComplete === true}",
+            "originalV3Source={tonieCard.cacheState?.v3Source}",
             card,
         )
         self.assertIn(
-            "originalV3Available={tonieCard.cacheState?.v3Complete === true}",
+            "preferredOriginalKind={tonieCard.cacheState?.preferredOriginalKind}",
             card,
         )
-        self.assertIn(
-            "originalTafAvailable || originalTafLibrarySource.length > 0",
-            modal,
-        )
-        self.assertIn("originalTafAvailableForRestore && !usingOriginalTaf", modal)
-        self.assertIn(
-            'originalV3Available && (hasAssignedSource || normalizedCachePreference !== "v3")',
-            modal,
-        )
-        self.assertIn("canRestoreOriginalTaf || canRestoreOriginalV3", modal)
+        self.assertNotIn("originalTafAvailable", card)
+        self.assertNotIn("originalV3Available", card)
+        self.assertIn('normalizedCachePreference === "auto"', modal)
+        self.assertIn("preferredOriginalKind", modal)
+        self.assertIn("originalTafLibrarySource", modal)
+        self.assertIn("originalV3LibrarySource", modal)
+        self.assertIn("const restoreOriginalSource =", modal)
+        self.assertIn("onRestoreOriginalSource(restoreOriginalSource)", modal)
+        self.assertEqual(modal.count("<RollbackOutlined />"), 1)
         restore = self.section(
-            modal,
-            'const handleRestoreOriginal = (preference: "taf" | "v3") => {',
-            "return (",
+            modal, "const handleRestoreOriginal = () => {", "return ("
         )
-        self.assertIn(
-            'onSelectedSourceChange(preference === "taf" ? originalTafLibrarySource : "")',
-            restore,
-        )
-        self.assertIn("onSelectedCachePreferenceChange?.(preference)", restore)
-        self.assertIn('handleRestoreOriginal("taf")', modal)
-        self.assertIn('handleRestoreOriginal("v3")', modal)
+        self.assertNotIn("onSelectedCachePreferenceChange", restore)
+        self.assertNotIn('onSelectedSourceChange("")', restore)
+        self.assertIn("restoredOriginalSource", card)
+        self.assertIn("selectedSource === restoredOriginalSource", save_flow)
+        self.assertNotIn("cacheState?.v3Source", save_flow)
+        self.assertNotIn("modelAudioPath) ||", save_flow)
+        self.assertIn('tonieCard.downloadTriggerKind === "v3"', actions)
+        self.assertIn("await response.json()", actions)
+        self.assertIn("sourceAssigned !== true", actions)
+        self.assertIn("await fetchUpdatedTonieCard()", actions)
+        self.assertIn('isNativeCollectionSource(tonieCard.source || "")', card)
         self.assertIn("handleSourceSave(needsCachePreferenceSave)", save_flow)
         self.assertIn("sourcePayload + cachePreferencePayload", save_flow)
         self.assertIn("needsCachePreferenceSave && !cachePreferenceSaved", save_flow)

@@ -126,7 +126,7 @@ static void v3_native_import_library_if_enabled(client_ctx_t *client_ctx,
                               client_ctx->settings->internal.cachedirfull,
                               client_ctx->settings->internal.librarydirfull,
                               client_ctx->settings->internal.overlayNumber,
-                              ruid);
+                              ruid, NULL);
     if (error != NO_ERROR)
     {
         TRACE_WARNING("Could not import complete TB2 V3 %s cache into library overlay=%u rUID=%s: %s\r\n",
@@ -4437,8 +4437,19 @@ typedef enum
     V3_MANUAL_DOWNLOAD_MANIFEST,
     V3_MANUAL_DOWNLOAD_CHAPTER,
     V3_MANUAL_DOWNLOAD_ACTIVATION,
+    V3_MANUAL_DOWNLOAD_LIBRARY,
+    V3_MANUAL_DOWNLOAD_ASSIGNMENT,
     V3_MANUAL_DOWNLOAD_COMPLETE,
 } v3_manual_download_stage_t;
+
+typedef struct
+{
+    bool_t cache_complete;
+    bool_t library_imported;
+    bool_t assigned;
+    const char *source;
+    const char *reason;
+} v3_manual_download_result_t;
 
 static const char *v3_manual_download_stage_name(v3_manual_download_stage_t stage)
 {
@@ -4456,6 +4467,10 @@ static const char *v3_manual_download_stage_name(v3_manual_download_stage_t stag
         return "chapter";
     case V3_MANUAL_DOWNLOAD_ACTIVATION:
         return "activation";
+    case V3_MANUAL_DOWNLOAD_LIBRARY:
+        return "library";
+    case V3_MANUAL_DOWNLOAD_ASSIGNMENT:
+        return "assignment";
     case V3_MANUAL_DOWNLOAD_COMPLETE:
         return "complete";
     default:
@@ -4477,6 +4492,8 @@ static uint_t v3_manual_download_http_status(v3_manual_download_stage_t stage)
     case V3_MANUAL_DOWNLOAD_CHAPTER:
         return 502;
     case V3_MANUAL_DOWNLOAD_ACTIVATION:
+    case V3_MANUAL_DOWNLOAD_LIBRARY:
+    case V3_MANUAL_DOWNLOAD_ASSIGNMENT:
         return 500;
     case V3_MANUAL_DOWNLOAD_COMPLETE:
     default:
@@ -4490,7 +4507,7 @@ static const char *v3_manual_download_message(v3_manual_download_stage_t stage,
 {
     if (stage == V3_MANUAL_DOWNLOAD_GENERATION)
     {
-        return "Selected overlay is not a TB2";
+        return "Invalid content RUID for manual V3 download";
     }
     if (stage == V3_MANUAL_DOWNLOAD_POLICY)
     {
@@ -4524,6 +4541,14 @@ static const char *v3_manual_download_message(v3_manual_download_stage_t stage,
     {
         return "The complete TB2 V3 cache version could not be activated";
     }
+    if (stage == V3_MANUAL_DOWNLOAD_LIBRARY)
+    {
+        return "The complete TB2 V3 cache could not be imported into the native library";
+    }
+    if (stage == V3_MANUAL_DOWNLOAD_ASSIGNMENT)
+    {
+        return "The native TB2 V3 library source could not be assigned";
+    }
     return error2text(error);
 }
 
@@ -4535,8 +4560,12 @@ static error_t v3_manual_download_write_result(HttpConnection *connection,
                                                uint32_t upstream_status,
                                                uint32_t version,
                                                size_t completed,
-                                               size_t total)
+                                               size_t total,
+                                               const v3_manual_download_result_t *result)
 {
+    bool_t cache_complete = result != NULL && result->cache_complete;
+    bool_t library_imported = result != NULL && result->library_imported;
+    bool_t assigned = result != NULL && result->assigned;
     cJSON *response = cJSON_CreateObject();
     if (response == NULL ||
         cJSON_AddBoolToObject(response, "success",
@@ -4552,6 +4581,14 @@ static error_t v3_manual_download_write_result(HttpConnection *connection,
         cJSON_AddNumberToObject(response, "objectsTotal", total) == NULL ||
         cJSON_AddNumberToObject(response, "chaptersCompleted", completed) == NULL ||
         cJSON_AddNumberToObject(response, "chaptersTotal", total) == NULL ||
+        cJSON_AddStringToObject(response, "downloadType", "v3") == NULL ||
+        cJSON_AddBoolToObject(response, "cacheComplete", cache_complete) == NULL ||
+        cJSON_AddBoolToObject(response, "libraryImported", library_imported) == NULL ||
+        cJSON_AddBoolToObject(response, "sourceAssigned", assigned) == NULL ||
+        (result != NULL && result->source != NULL &&
+         cJSON_AddStringToObject(response, "source", result->source) == NULL) ||
+        (result != NULL && result->reason != NULL &&
+         cJSON_AddStringToObject(response, "assignmentReason", result->reason) == NULL) ||
         (chapter != NULL &&
          cJSON_AddStringToObject(response, "object", chapter) == NULL) ||
         (chapter != NULL &&
@@ -4594,17 +4631,19 @@ static void v3_manual_download_restore_active_route(settings_t *settings,
     osFreeMem(manifest);
 }
 
-static error_t v3_manual_download_fail(HttpConnection *connection,
-                                       settings_t *settings,
-                                       v3_manual_download_stage_t stage,
-                                       error_t error,
-                                       const char *ruid,
-                                       const char *chapter,
-                                       uint32_t upstream_status,
-                                       uint32_t version,
-                                       size_t completed,
-                                       size_t total,
-                                       bool_t restore_active)
+static error_t v3_manual_download_fail_with_result(
+    HttpConnection *connection,
+    settings_t *settings,
+    v3_manual_download_stage_t stage,
+    error_t error,
+    const char *ruid,
+    const char *chapter,
+    uint32_t upstream_status,
+    uint32_t version,
+    size_t completed,
+    size_t total,
+    bool_t restore_active,
+    const v3_manual_download_result_t *result)
 {
     if (restore_active)
     {
@@ -4620,7 +4659,132 @@ static error_t v3_manual_download_fail(HttpConnection *connection,
     return v3_manual_download_write_result(
         connection, stage,
         v3_manual_download_message(stage, error, upstream_status), ruid,
-        chapter, upstream_status, version, completed, total);
+        chapter, upstream_status, version, completed, total, result);
+}
+
+static error_t v3_manual_download_fail(HttpConnection *connection,
+                                       settings_t *settings,
+                                       v3_manual_download_stage_t stage,
+                                       error_t error,
+                                       const char *ruid,
+                                       const char *chapter,
+                                       uint32_t upstream_status,
+                                       uint32_t version,
+                                       size_t completed,
+                                       size_t total,
+                                       bool_t restore_active)
+{
+    return v3_manual_download_fail_with_result(
+        connection, settings, stage, error, ruid, chapter, upstream_status,
+        version, completed, total, restore_active, NULL);
+}
+
+static bool_t v3_manual_download_content_unchanged(
+    const contentJson_t *current,
+    const contentJson_t *initial)
+{
+    const char *current_source = current != NULL && current->source != NULL
+                                     ? current->source
+                                     : "";
+    const char *initial_source = initial != NULL && initial->source != NULL
+                                     ? initial->source
+                                     : "";
+    const char *current_preference =
+        current != NULL && current->cache_preference != NULL
+            ? current->cache_preference
+            : CONTENT_JSON_CACHE_PREFERENCE_AUTO;
+    const char *initial_preference =
+        initial != NULL && initial->cache_preference != NULL
+            ? initial->cache_preference
+            : CONTENT_JSON_CACHE_PREFERENCE_AUTO;
+    const char *current_cloud_ruid =
+        current != NULL && current->cloud_ruid != NULL ? current->cloud_ruid : "";
+    const char *initial_cloud_ruid =
+        initial != NULL && initial->cloud_ruid != NULL ? initial->cloud_ruid : "";
+    return current != NULL && initial != NULL && current->_valid &&
+           current->live == initial->live &&
+           current->nocloud == initial->nocloud && !current->nocloud &&
+           !osStrcmp(current_source, initial_source) &&
+           !osStrcmp(current_preference, initial_preference) &&
+           current->_has_cloud_auth == initial->_has_cloud_auth &&
+           current->cloud_override == initial->cloud_override &&
+           (!current->cloud_override ||
+            !osStrcmp(current_cloud_ruid, initial_cloud_ruid)) &&
+           current->cloud_auth_len == initial->cloud_auth_len &&
+           (current->cloud_auth_len == 0 ||
+            !osMemcmp(current->cloud_auth, initial->cloud_auth,
+                      current->cloud_auth_len));
+}
+
+static error_t v3_manual_download_assign_library_source(
+    settings_t *settings,
+    const char *ruid,
+    const contentJson_t *initial_content,
+    uint32_t downloaded_version,
+    const char *library_source,
+    bool_t *assigned,
+    const char **reason)
+{
+    *assigned = FALSE;
+    *reason = NULL;
+    tonie_info_t *current = getTonieInfoFromRuid((char *)ruid, true, settings);
+    if (current == NULL)
+    {
+        return ERROR_OUT_OF_MEMORY;
+    }
+
+    uint32_t active_version = 0;
+    bool_t version_matches = v3_native_cache_active_version(
+                                 settings->internal.cachedirfull,
+                                 settings->internal.overlayNumber, ruid,
+                                 &active_version) &&
+                             active_version == downloaded_version;
+    if (!version_matches)
+    {
+        *reason = "generation_changed";
+        freeTonieInfo(current);
+        return NO_ERROR;
+    }
+    if (!v3_manual_download_content_unchanged(&current->json,
+                                              initial_content) ||
+        (current->json.source != NULL && current->json.source[0] != '\0'))
+    {
+        *reason = "content_changed";
+        freeTonieInfo(current);
+        return NO_ERROR;
+    }
+    const char *preference = current->json.cache_preference != NULL
+                                 ? current->json.cache_preference
+                                 : CONTENT_JSON_CACHE_PREFERENCE_AUTO;
+    if (osStrcmp(preference, CONTENT_JSON_CACHE_PREFERENCE_V3) &&
+        osStrcmp(preference, CONTENT_JSON_CACHE_PREFERENCE_AUTO))
+    {
+        *reason = "preference_changed";
+        freeTonieInfo(current);
+        return NO_ERROR;
+    }
+    if (!osStrcmp(preference, CONTENT_JSON_CACHE_PREFERENCE_AUTO) &&
+        settings->toniebox.boxGeneration != GENERATION_TB2)
+    {
+        *reason = "overlay_generation_changed";
+        freeTonieInfo(current);
+        return NO_ERROR;
+    }
+
+    char *json_path = strdup(current->jsonPath);
+    osFreeMem(current->json.source);
+    current->json.source = strdup(library_source);
+    error_t error = current->json.source == NULL || json_path == NULL
+                        ? ERROR_OUT_OF_MEMORY
+                        : save_content_json(json_path, &current->json);
+    osFreeMem(json_path);
+    current->json._updated = FALSE;
+    freeTonieInfo(current);
+    if (error == NO_ERROR)
+    {
+        *assigned = TRUE;
+    }
+    return error;
 }
 
 error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *ruid,
@@ -4869,19 +5033,137 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
                                        TRUE);
     }
 
-    // The objects may already have been complete before this request. In that
-    // case no chapter callback runs, so finalize metadata/library state here as
-    // well. The helper is idempotent for an existing collection.
-    v3_native_import_library_if_enabled(client_ctx, canonical_ruid);
+    bool_t tonieplay = FALSE;
+    if (!v3_native_cache_active_info(settings->internal.cachedirfull,
+                                     settings->internal.overlayNumber,
+                                     canonical_ruid, NULL, NULL, &tonieplay))
+    {
+        return v3_manual_download_fail(connection, settings,
+                                       V3_MANUAL_DOWNLOAD_LIBRARY,
+                                       ERROR_INVALID_FILE, canonical_ruid,
+                                       NULL, 0, version, completed, total,
+                                       TRUE);
+    }
 
-    TRACE_INFO("Completed TB2 manual content download overlay=%u rUID=%s version=%" PRIu32 " objects=%" PRIuSIZE "\r\n",
+    if (tonieplay)
+    {
+        bool_t library_imported = FALSE;
+        error_t library_error = NO_ERROR;
+        if (settings->cloud.cacheTonieplayToLibraryV3)
+        {
+            library_error = v3_native_cache_import_active_tonieplay_library(
+                settings->internal.cachedirfull,
+                settings->internal.librarydirfull,
+                settings->internal.overlayNumber, canonical_ruid);
+            library_imported = library_error == NO_ERROR;
+            if (!library_imported)
+            {
+                TRACE_WARNING("Could not import complete TB2 V3 Tonieplay cache into library after manual download overlay=%u rUID=%s: %s\r\n",
+                              (unsigned)settings->internal.overlayNumber,
+                              canonical_ruid, error2text(library_error));
+            }
+        }
+        const char *reason = library_imported
+                                 ? "tonieplay_not_assignable"
+                                 : (settings->cloud.cacheTonieplayToLibraryV3
+                                        ? "tonieplay_library_import_failed"
+                                        : "tonieplay_library_disabled");
+        v3_manual_download_result_t result = {
+            .cache_complete = TRUE,
+            .library_imported = library_imported,
+            .reason = reason,
+        };
+        return v3_manual_download_write_result(
+            connection, V3_MANUAL_DOWNLOAD_COMPLETE,
+            library_imported
+                ? "TB2 Tonieplay cache imported; automatic source assignment is not supported"
+                : "TB2 Tonieplay cache version activated",
+            canonical_ruid, NULL, 200, version, completed, total, &result);
+    }
+
+    tonie_info_t *metadata = getTonieInfoFromRuid(canonical_ruid, true,
+                                                  settings);
+    if (metadata != NULL)
+    {
+        v3_original_content_metadata_complete(settings, metadata,
+                                              canonical_ruid);
+        freeTonieInfo(metadata);
+    }
+
+    if (!settings->cloud.cacheToLibraryV3)
+    {
+        v3_manual_download_result_t result = {
+            .cache_complete = TRUE,
+            .reason = "library_disabled",
+        };
+        TRACE_INFO("Completed TB2 manual content download without library assignment overlay=%u rUID=%s version=%" PRIu32 " objects=%" PRIuSIZE " reason=library_disabled\r\n",
+                   (unsigned)settings->internal.overlayNumber, canonical_ruid,
+                   version, total);
+        return v3_manual_download_write_result(
+            connection, V3_MANUAL_DOWNLOAD_COMPLETE,
+            "TB2 V3 cache version activated; native library import is disabled",
+            canonical_ruid, NULL, 200, version, completed, total, &result);
+    }
+
+    char *library_source = NULL;
+    error_t library_error = v3_native_cache_import_active_library(
+        settings->internal.cachedirfull, settings->internal.librarydirfull,
+        settings->internal.overlayNumber, canonical_ruid, &library_source);
+    if (library_error != NO_ERROR || library_source == NULL)
+    {
+        v3_manual_download_result_t result = {
+            .cache_complete = TRUE,
+        };
+        osFreeMem(library_source);
+        return v3_manual_download_fail_with_result(
+            connection, settings, V3_MANUAL_DOWNLOAD_LIBRARY,
+            library_error != NO_ERROR ? library_error : ERROR_INVALID_FILE,
+            canonical_ruid, NULL, 0, version, completed, total, TRUE, &result);
+    }
+
+    bool_t assigned = FALSE;
+    const char *assignment_reason = NULL;
+    error_t assignment_error = v3_manual_download_assign_library_source(
+        settings, canonical_ruid, content, version, library_source, &assigned,
+        &assignment_reason);
+    if (assignment_error != NO_ERROR)
+    {
+        v3_manual_download_result_t result = {
+            .cache_complete = TRUE,
+            .library_imported = TRUE,
+            .source = library_source,
+        };
+        error_t response_error = v3_manual_download_fail_with_result(
+            connection, settings, V3_MANUAL_DOWNLOAD_ASSIGNMENT,
+            assignment_error, canonical_ruid, NULL, 0, version, completed,
+            total, TRUE, &result);
+        osFreeMem(library_source);
+        return response_error;
+    }
+    if (assigned)
+    {
+        freshness_mark_content_mapping_changed(settings, canonical_ruid, TRUE);
+    }
+
+    v3_manual_download_result_t result = {
+        .cache_complete = TRUE,
+        .library_imported = TRUE,
+        .assigned = assigned,
+        .source = library_source,
+        .reason = assignment_reason,
+    };
+
+    TRACE_INFO("Completed TB2 manual content download overlay=%u rUID=%s version=%" PRIu32 " objects=%" PRIuSIZE " assigned=%s reason=%s\r\n",
                (unsigned)settings->internal.overlayNumber, canonical_ruid,
-               version, total);
-    return v3_manual_download_write_result(connection,
-                                           V3_MANUAL_DOWNLOAD_COMPLETE,
-                                           "TB2 V3 cache version activated",
-                                           canonical_ruid, NULL, 200, version,
-                                           completed, total);
+               version, total, assigned ? "true" : "false",
+               assignment_reason != NULL ? assignment_reason : "none");
+    error_t response_error = v3_manual_download_write_result(
+        connection, V3_MANUAL_DOWNLOAD_COMPLETE,
+        assigned ? "TB2 V3 cache imported and assigned"
+                 : "TB2 V3 cache imported; source assignment skipped",
+        canonical_ruid, NULL, 200, version, completed, total, &result);
+    osFreeMem(library_source);
+    return response_error;
 }
 
 error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
