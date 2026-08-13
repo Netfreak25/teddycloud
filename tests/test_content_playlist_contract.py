@@ -174,6 +174,16 @@ class ContentPlaylistContractTests(unittest.TestCase):
         self.assertIn("tonieCard.playlist?.tracks", self.tonie_card)
         self.assertIn("record.tonieInfo?.tracks?.some", self.file_browser_columns)
 
+    def test_tonieplay_name_uses_manifest_metadata_in_file_browser(self):
+        self.assertIn("tonieplayCollectionDisplayName", self.native_playback)
+        self.assertIn('collection.metadata?.title', self.native_playback)
+        self.assertIn('collection.metadata?.name', self.native_playback)
+        self.assertIn("tonieplayName || record.tonieplayCollection.contentHash", self.file_browser_columns)
+        self.assertIn(
+            "tonieplayCollectionDisplayName(record.tonieplayCollection)",
+            self.file_browser_columns,
+        )
+
     def test_all_languages_contain_playlist_editor_labels(self):
         required = {
             "cancelPlaylistEdit",
