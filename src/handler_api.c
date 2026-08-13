@@ -39,6 +39,9 @@
 #define CERTIFICATE_DOCTOR_COMMAND                                                                    \
     "bash /usr/local/bin/verify-tc-certificates.sh --base-path /teddycloud --json --no-color"
 
+static toniesJson_item_t *api_native_collection_source_metadata(
+    const v3_native_library_collection_t *collection);
+
 static error_t api_write_certificate_doctor_error(HttpConnection *connection,
                                                    uint_t status_code,
                                                    const char *code,
@@ -1015,6 +1018,28 @@ static bool_t api_is_native_collection_detail_path(
            hash[V3_NATIVE_LIBRARY_HASH_HEX_LENGTH] == '/';
 }
 
+static void api_add_native_collection_tonie_info_json(
+    const v3_native_library_collection_t *collection,
+    toniesJson_item_t *item,
+    cJSON *parent)
+{
+    addToniesJsonInfoJson(item, NULL, parent);
+    if (item == NULL || item->tracks == NULL ||
+        (size_t)item->tracks_count == collection->chapter_count)
+    {
+        return;
+    }
+
+    cJSON *tonie_info = cJSON_GetObjectItemCaseSensitive(parent, "tonieInfo");
+    cJSON *tracks = cJSON_CreateArray();
+    if (tonie_info != NULL && tracks != NULL &&
+        cJSON_ReplaceItemInObjectCaseSensitive(tonie_info, "tracks", tracks))
+    {
+        return;
+    }
+    cJSON_Delete(tracks);
+}
+
 error_t handleApiFileIndexV2(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
 {
     char overlay[16];
@@ -1176,6 +1201,10 @@ error_t handleApiFileIndexV2(HttpConnection *connection, const char_t *uri, cons
                 }
                 cJSON_AddNumberToObject(native, "totalSize",
                                        (double)total_size);
+                toniesJson_item_t *metadata =
+                    api_native_collection_source_metadata(&collection);
+                api_add_native_collection_tonie_info_json(
+                    &collection, metadata, jsonEntry);
                 v3_native_library_collection_free(&collection);
                 osFreeMem(source);
                 osFreeMem(filePathAbsolute);

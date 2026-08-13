@@ -32,6 +32,21 @@ class ContentPlaylistContractTests(unittest.TestCase):
             WEB
             / "src/components/tonies/filebrowser/modals/TeddyAudioPlaylistEditorModal.tsx"
         ).read_text(encoding="utf-8")
+        cls.native_playback = (
+            WEB / "src/utils/audio/nativeCollection.ts"
+        ).read_text(encoding="utf-8")
+        cls.audio_player_page = (
+            WEB / "src/pages/tonies/TeddyAudioPlayerPage.tsx"
+        ).read_text(encoding="utf-8")
+        cls.tonie_card = (
+            WEB / "src/components/tonies/toniecard/TonieCard.tsx"
+        ).read_text(encoding="utf-8")
+        cls.file_browser = (
+            WEB / "src/components/tonies/filebrowser/FileBrowser.tsx"
+        ).read_text(encoding="utf-8")
+        cls.file_browser_columns = (
+            WEB / "src/components/tonies/filebrowser/helper/Columns.tsx"
+        ).read_text(encoding="utf-8")
 
     def test_metadata_identity_uses_taf_audio_id_and_sha1(self):
         self.assertIn('"%s%c%08" PRIX32 "-%s.json"', self.playlist)
@@ -132,14 +147,28 @@ class ContentPlaylistContractTests(unittest.TestCase):
 
     def test_native_collection_exposes_its_own_playlist_metadata(self):
         native_api = self.api[
-            self.api.index("static toniesJson_item_t *api_native_collection_source_metadata") :
+            self.api.rindex("static toniesJson_item_t *api_native_collection_source_metadata") :
             self.api.index("static void api_add_tap_playlist")
         ]
         self.assertIn("collection->origins", native_api)
         self.assertIn("item->tracks_count == collection->chapter_count", native_api)
         self.assertIn('cJSON_AddStringToObject(playlist, "kind", "native_collection")', native_api)
-        self.assertIn("collection.chapters[i].original_name", native_api)
+        self.assertIn('custom_asprintf("Chapter %u"', native_api)
         self.assertIn('tonie?.playlist?.kind === "native_collection"', self.controls)
+
+    def test_native_collection_metadata_reaches_file_browser_and_player(self):
+        file_index = self.api[
+            self.api.index("if (isNativeCollectionsRoot && isDir)") :
+            self.api.index("v3_tonieplay_library_collection_t tonieplay")
+        ]
+        self.assertIn("api_native_collection_source_metadata(&collection)", file_index)
+        self.assertIn("api_add_native_collection_tonie_info_json", file_index)
+        self.assertIn("item->tracks_count == collection->chapter_count", self.api)
+        self.assertIn("metadata?.tracks?.length === collection.chapterCount", self.native_playback)
+        self.assertIn("record.tonieInfo?.tracks", self.file_browser)
+        self.assertIn("record.tonieInfo?.tracks", self.audio_player_page)
+        self.assertIn("tonieCard.playlist?.tracks", self.tonie_card)
+        self.assertIn("record.tonieInfo?.tracks?.some", self.file_browser_columns)
 
     def test_all_languages_contain_playlist_editor_labels(self):
         required = {
