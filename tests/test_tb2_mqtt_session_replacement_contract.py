@@ -58,6 +58,21 @@ class Tb2MqttSessionReplacementContractTests(unittest.TestCase):
         self.assertIn("if (!was_box_connection)", update)
         self.assertIn("mqtt_connection_replace_existing_box_sessions(conn)", update)
 
+    def test_accepted_socket_has_io_timeout_before_tls_handshake(self):
+        task = self.mqtt[
+            self.mqtt.index("void mqtt_server_task()") :
+            self.mqtt.index("void mqtt_server_deinit()")
+        ]
+        self.assertTrue(
+            "#define MQTT_CONNECTION_IO_TIMEOUT_MS 300U" in self.mqtt,
+            "Accepted MQTT sockets must use the 300 ms I/O timeout",
+        )
+        timeout = "socketSetTimeout(conn->socket, MQTT_CONNECTION_IO_TIMEOUT_MS)"
+        self.assertIn(timeout, task)
+        self.assertLess(task.index(timeout), task.index("conn->tlsContext = tlsInit()"))
+        self.assertNotIn("socketSetTimeout(conn->socket, 0)", task)
+        self.assertIn("error != ERROR_TIMEOUT", task)
+
 
 if __name__ == "__main__":
     unittest.main()

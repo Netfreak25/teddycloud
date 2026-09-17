@@ -209,9 +209,17 @@ for the same canonical box ID and overlay. Failed or incomplete reconnects do
 not displace the working session. Pending freshness remains stored in the
 overlay and is retried on the replacement connection.
 
-An accepted TCP connection must complete TLS and MQTT setup within 15 seconds.
-Incomplete handshakes are closed with `establishment timeout`, allowing the box
-to retry instead of leaving a half-open connection pending until server restart.
+Accepted TCP connections receive a 300 ms socket I/O timeout before TLS setup.
+On Linux, a zero socket timeout would allow a later read inside `tlsRead()` to
+block the main loop indefinitely even after a successful readiness check.
+An I/O timeout preserves partial TLS records and lets the next loop iteration
+continue; it does not itself close the connection.
+
+The main loop closes incomplete TLS/MQTT setups with `establishment timeout`
+once it observes 15 seconds since acceptance. This is a loop-checked setup
+deadline, not a hard wall-clock limit for an entire TLS call: each socket I/O
+has its own timeout. Once ICI forwarding is established, the existing proxy
+I/O timeout of 500 ms continues to apply.
 
 The capture is packet-based and records `packet_type`, optional `topic`,
 `forwarded`, optional `filter_id`, `generated`, and `packet_complete`.
@@ -273,8 +281,9 @@ connections without restarting TeddyCloud. See `TB2_SERVER_CERTIFICATES.md`.
 `mqtt_server_init()` exits immediately when `mqtt_server.enabled` is false. When
 enabled, it resolves the configured certificate paths relative to the
 TeddyCloud base directory, loads the PEM certificate/key into memory, opens a
-non-blocking TCP socket, binds to `IP_ADDR_ANY:mqtt_server.port` and listens
-with a backlog of 5.
+TCP socket, binds to `IP_ADDR_ANY:mqtt_server.port` and listens with a backlog
+of 5. Readiness is polled without waiting; accepted sockets use the finite
+I/O timeout described above.
 
 The implementation currently has these fixed limits:
 

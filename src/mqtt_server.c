@@ -40,6 +40,7 @@ uint_t tcpWaitForEvents(Socket *socket, uint_t eventMask, systime_t timeout);
 #define MQTT_FRESH_TONIES_MAX_ATTEMPTS 3
 #define MQTT_FRESH_TONIES_REASON_MAX 32
 #define MQTT_CONNECTION_ESTABLISH_TIMEOUT_MS 15000U
+#define MQTT_CONNECTION_IO_TIMEOUT_MS 300U
 #define MQTT_CONNECT_FLAG_USERNAME 0x80U
 #define MQTT_CONNECT_FLAG_PASSWORD 0x40U
 #define MQTT_CONNECT_FLAG_WILL_RETAIN 0x20U
@@ -3591,7 +3592,8 @@ void mqtt_server_task()
                 conn->next_packet_id = UINT16_MAX;
                 conn->buffer_len = 0;
                 conn->subscription_count = 0;
-                socketSetTimeout(conn->socket, 0);
+                // Linux timeout 0 blocks indefinitely, including inside the TLS handshake.
+                socketSetTimeout(conn->socket, MQTT_CONNECTION_IO_TIMEOUT_MS);
 
                 conn->client_ctx.settings = get_settings();
                 conn->client_ctx.settingsNoOverlay = conn->client_ctx.settings;
