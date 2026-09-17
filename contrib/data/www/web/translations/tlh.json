@@ -376,6 +376,7 @@
             "save": "pol"
         },
         "cancel": "qIl",
+        "commentTooltip": "QIn 'ang",
         "content": {
             "navigationTitle": "De'",
             "title": "De'"
@@ -385,10 +386,22 @@
             "cachePreferenceAuto": "TeddyCloud wIv",
             "cachePreferenceTaf": "TAF maS",
             "cachePreferenceV3": "V3 mung maS",
+            "comment": "QIn",
+            "commentPlaceholder": "NFC Deghvam QIn ghItlh",
+            "customImage": "nagh le' lo'",
+            "customImageDeleteWarning": "polDI' nagh le' teqlu'.",
+            "customImageDisabled": "Doch Segh nagh lo'",
+            "customImageDrop": "naDev nagh lan pagh wIvmeH yI'uy",
+            "customImageEnabled": "nagh le' lo'",
+            "customImageHint": "PNG, JPEG, WebP pagh GIF; 5 MiB 'oH 'aqroS'e'",
+            "customImageInvalidFormat": "PNG, JPEG, WebP pagh GIF nagh yIwIv.",
+            "customImageRequired": "nagh yIwIv.",
+            "customImageTooLarge": "5 MiB 'oH nagh 'aqroS'e'.",
             "restoreOriginalHint": "wavlu'bogh De' teq; polta'bogh mung De' Hoch lo'.",
             "restoreOriginalTaf": "mung TAF lo'",
             "restoreOriginalV3": "mung V3 lo'",
             "modelInfoLanguage": "Hol",
+            "personalization": "De' le'",
             "save": "pol"
         },
         "help": {
@@ -397,7 +410,11 @@
         },
         "messages": {
             "downloadedV3CacheOnly": "V3 De' pollu'",
-            "downloadedV3CacheOnlyDetails": "\"{{model}}\" [{{ruid}}] V3 De' polwI' Hoch tu'lu', 'ach mung mojbe' (meq: {{reason}})."
+            "downloadedV3CacheOnlyDetails": "\"{{model}}\" [{{ruid}}] V3 De' polwI' Hoch tu'lu', 'ach mung mojbe' (meq: {{reason}}).",
+            "userDataSaveFailed": "De' le' pollaHbe'!",
+            "userDataSaveFailedDetails": "[{{ruid}}] QIn pagh nagh le' pollaHbe': ",
+            "userDataSaved": "De' le' pollu'!",
+            "userDataSavedDetails": "[{{ruid}}] QIn nagh le' je chu'lu'."
         },
         "noPlayableContentHint": "DaH chu'laHbogh local De' tu'lu'be'. mung De' yISuq pagh Qapbogh mung yIwIv.",
         "selectFileModal": {

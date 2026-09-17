@@ -31,9 +31,11 @@
 #include "cache.h"
 #include "content_playlist.h"
 #include "mqtt_server.h"
+#include "mutex_manager.h"
 #include "toniebox_state.h"
 #include "v3_local_content.h"
 #include "v3_native_cache.h"
+#include "tonie_user_metadata.h"
 
 #define CERTIFICATE_DOCTOR_OUTPUT_LIMIT (1024U * 1024U)
 #define CERTIFICATE_DOCTOR_COMMAND                                                                    \
@@ -3406,6 +3408,376 @@ static error_t writeApiStatusText(HttpConnection *connection, uint_t statusCode,
     return httpWriteResponseString(connection, (char_t *)message, false);
 }
 
+static error_t api_tonie_user_ruid_from_uri(
+    const char *uri, const char *prefix,
+    char canonical_ruid[TONIE_USER_RUID_LENGTH + 1U])
+{
+    if (uri == NULL || prefix == NULL)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    size_t prefix_length = osStrlen(prefix);
+    if (osStrncmp(uri, prefix, prefix_length) ||
+        osStrlen(uri) != prefix_length + TONIE_USER_RUID_LENGTH)
+    {
+        return ERROR_INVALID_REQUEST;
+    }
+    return tonie_user_canonicalize_ruid(uri + prefix_length, canonical_ruid);
+}
+
+error_t handleApiTonieMetadata(HttpConnection *connection, const char_t *uri,
+                               const char_t *queryString,
+                               client_ctx_t *client_ctx)
+{
+    (void)queryString;
+    (void)client_ctx;
+
+    char ruid[TONIE_USER_RUID_LENGTH + 1U];
+    if (api_tonie_user_ruid_from_uri(uri, "/api/tonie/metadata/", ruid) !=
+        NO_ERROR)
+    {
+        return writeApiStatusText(connection, 400, "Invalid RUID");
+    }
+
+    char body[POST_BUFFER_SIZE];
+    error_t error = parsePostData(connection, body, sizeof(body));
+    if (error != NO_ERROR)
+    {
+        return writeApiStatusText(connection, 400, "Invalid request body");
+    }
+
+    cJSON *json = cJSON_Parse(body);
+    cJSON *comment = json != NULL
+                         ? cJSON_GetObjectItemCaseSensitive(json, "comment")
+                         : NULL;
+    if (!cJSON_IsObject(json) || !cJSON_IsString(comment) ||
+        comment->valuestring == NULL)
+    {
+        cJSON_Delete(json);
+        return writeApiStatusText(connection, 400,
+                                  "Invalid comment payload");
+    }
+
+    error = tonie_user_comment_save(get_settings()->internal.configdirfull,
+                                    ruid, comment->valuestring);
+    cJSON_Delete(json);
+    if (error == ERROR_INVALID_REQUEST)
+    {
+        return writeApiStatusText(
+            connection, 400,
+            "Comment must be one line with at most 255 characters");
+    }
+    if (error != NO_ERROR)
+    {
+        TRACE_ERROR("Failed to save user comment for rUID %s: %s\r\n",
+                    ruid, error2text(error));
+        return writeApiStatusText(connection, 500,
+                                  "Failed to save comment");
+    }
+
+    TRACE_INFO("Updated user comment for rUID %s\r\n", ruid);
+    return writeApiStatusText(connection, 200, "OK");
+}
+
+typedef struct
+{
+    char *final_path;
+    char *temporary_path;
+    FsFile *file;
+    size_t bytes_written;
+    bool_t file_seen;
+    bool_t completed;
+    bool_t too_large;
+    bool_t invalid_file;
+    error_t finish_error;
+} tonie_user_image_upload_ctx_t;
+
+static error_t api_tonie_image_upload_start(void *context, const char *name,
+                                            const char *filename)
+{
+    tonie_user_image_upload_ctx_t *upload = context;
+    if (upload == NULL || name == NULL || filename == NULL ||
+        osStrcmp(name, "file") || filename[0] == '\0' || upload->file_seen)
+    {
+        if (upload != NULL)
+        {
+            upload->invalid_file = TRUE;
+        }
+        return ERROR_INVALID_REQUEST;
+    }
+
+    upload->file_seen = TRUE;
+    fsDeleteFile(upload->temporary_path);
+    upload->file = fsOpenFile(upload->temporary_path,
+                              FS_FILE_MODE_WRITE | FS_FILE_MODE_CREATE |
+                                  FS_FILE_MODE_TRUNC);
+    return upload->file != NULL ? NO_ERROR : ERROR_FILE_OPENING_FAILED;
+}
+
+static error_t api_tonie_image_upload_add(void *context, void *data,
+                                          size_t length)
+{
+    tonie_user_image_upload_ctx_t *upload = context;
+    if (upload == NULL || upload->file == NULL)
+    {
+        return ERROR_FAILURE;
+    }
+    if (length > TONIE_USER_IMAGE_MAX_SIZE - upload->bytes_written)
+    {
+        upload->too_large = TRUE;
+        return ERROR_RESPONSE_TOO_LARGE;
+    }
+
+    error_t error = fsWriteFile(upload->file, data, length);
+    if (error == NO_ERROR)
+    {
+        upload->bytes_written += length;
+    }
+    return error;
+}
+
+static error_t api_tonie_image_upload_end(void *context)
+{
+    tonie_user_image_upload_ctx_t *upload = context;
+    if (upload == NULL || upload->file == NULL)
+    {
+        return ERROR_FAILURE;
+    }
+    fsCloseFile(upload->file);
+    upload->file = NULL;
+
+    if (upload->bytes_written == 0 ||
+        !tonie_user_image_is_valid(upload->temporary_path))
+    {
+        upload->invalid_file = TRUE;
+        upload->finish_error = ERROR_INVALID_FILE;
+        return upload->finish_error;
+    }
+    upload->completed = TRUE;
+    upload->finish_error = NO_ERROR;
+    return NO_ERROR;
+}
+
+error_t handleApiTonieImageUpload(HttpConnection *connection,
+                                  const char_t *uri,
+                                  const char_t *queryString,
+                                  client_ctx_t *client_ctx)
+{
+    (void)queryString;
+    (void)client_ctx;
+
+    char ruid[TONIE_USER_RUID_LENGTH + 1U];
+    if (api_tonie_user_ruid_from_uri(uri, "/api/tonie/image/upload/", ruid) !=
+        NO_ERROR)
+    {
+        return writeApiStatusText(connection, 400, "Invalid RUID");
+    }
+
+    tonie_user_image_upload_ctx_t upload = {0};
+    upload.final_path = tonie_user_image_path(
+        get_settings()->internal.wwwdirfull, ruid, FALSE);
+    upload.temporary_path = tonie_user_image_path(
+        get_settings()->internal.wwwdirfull, ruid, TRUE);
+    if (upload.final_path == NULL || upload.temporary_path == NULL)
+    {
+        osFreeMem(upload.final_path);
+        osFreeMem(upload.temporary_path);
+        return writeApiStatusText(connection, 500, "Out of memory");
+    }
+
+    char *directory = strdup(upload.final_path);
+    if (directory == NULL)
+    {
+        osFreeMem(upload.final_path);
+        osFreeMem(upload.temporary_path);
+        return writeApiStatusText(connection, 500, "Out of memory");
+    }
+    error_t error = fsRemoveFilename(directory);
+    if (error == NO_ERROR && !fsDirExists(directory))
+    {
+        error = fsCreateDirEx(directory, true);
+    }
+    osFreeMem(directory);
+    if (error != NO_ERROR)
+    {
+        osFreeMem(upload.final_path);
+        osFreeMem(upload.temporary_path);
+        return writeApiStatusText(connection, 500,
+                                  "Failed to prepare image directory");
+    }
+
+    multipart_cbr_t callbacks = {
+        .multipart_start = api_tonie_image_upload_start,
+        .multipart_add = api_tonie_image_upload_add,
+        .multipart_end = api_tonie_image_upload_end};
+
+    mutex_lock_id(upload.final_path);
+    error = multipart_handle(connection, &callbacks, &upload);
+    if (error == NO_ERROR && upload.finish_error != NO_ERROR)
+    {
+        error = upload.finish_error;
+    }
+    if (upload.file != NULL)
+    {
+        fsCloseFile(upload.file);
+        upload.file = NULL;
+    }
+    if (error == NO_ERROR && (!upload.file_seen || !upload.completed))
+    {
+        error = ERROR_INVALID_REQUEST;
+        upload.invalid_file = TRUE;
+    }
+    if (error == NO_ERROR)
+    {
+        error =
+            fsMoveFile(upload.temporary_path, upload.final_path, true);
+    }
+    if (error != NO_ERROR)
+    {
+        fsDeleteFile(upload.temporary_path);
+    }
+    mutex_unlock_id(upload.final_path);
+
+    if (error == NO_ERROR)
+    {
+        TRACE_INFO("Updated user image for rUID %s\r\n", ruid);
+    }
+
+    osFreeMem(upload.final_path);
+    osFreeMem(upload.temporary_path);
+    if (upload.too_large)
+    {
+        return writeApiStatusText(connection, 413,
+                                  "Image exceeds the 5 MiB limit");
+    }
+    if (upload.invalid_file)
+    {
+        return writeApiStatusText(
+            connection, 400,
+            "Image must be a valid PNG, JPEG, WebP or GIF file");
+    }
+    if (error != NO_ERROR)
+    {
+        TRACE_ERROR("Failed to upload user image for rUID %s: %s\r\n",
+                    ruid, error2text(error));
+        return writeApiStatusText(connection, 500,
+                                  "Failed to save image");
+    }
+    return writeApiStatusText(connection, 200, "OK");
+}
+
+error_t handleApiTonieImageRemove(HttpConnection *connection,
+                                  const char_t *uri,
+                                  const char_t *queryString,
+                                  client_ctx_t *client_ctx)
+{
+    (void)queryString;
+    (void)client_ctx;
+
+    char ruid[TONIE_USER_RUID_LENGTH + 1U];
+    if (api_tonie_user_ruid_from_uri(uri, "/api/tonie/image/remove/", ruid) !=
+        NO_ERROR)
+    {
+        return writeApiStatusText(connection, 400, "Invalid RUID");
+    }
+
+    char *path = tonie_user_image_path(get_settings()->internal.wwwdirfull,
+                                       ruid, FALSE);
+    char *temporary_path = tonie_user_image_path(
+        get_settings()->internal.wwwdirfull, ruid, TRUE);
+    if (path == NULL || temporary_path == NULL)
+    {
+        osFreeMem(path);
+        osFreeMem(temporary_path);
+        return writeApiStatusText(connection, 500, "Out of memory");
+    }
+
+    error_t error = NO_ERROR;
+    mutex_lock_id(path);
+    if (fsFileExists(path))
+    {
+        error = fsDeleteFile(path);
+    }
+    fsDeleteFile(temporary_path);
+    mutex_unlock_id(path);
+    osFreeMem(path);
+    osFreeMem(temporary_path);
+
+    if (error != NO_ERROR)
+    {
+        TRACE_ERROR("Failed to remove user image for rUID %s: %s\r\n",
+                    ruid, error2text(error));
+        return writeApiStatusText(connection, 500,
+                                  "Failed to remove image");
+    }
+    TRACE_INFO("Removed user image for rUID %s\r\n", ruid);
+    return writeApiStatusText(connection, 200, "OK");
+}
+
+error_t handleApiTonieImage(HttpConnection *connection, const char_t *uri,
+                            const char_t *queryString,
+                            client_ctx_t *client_ctx)
+{
+    (void)queryString;
+    (void)client_ctx;
+
+    char ruid[TONIE_USER_RUID_LENGTH + 1U];
+    if (api_tonie_user_ruid_from_uri(uri, "/api/tonie/image/", ruid) !=
+        NO_ERROR)
+    {
+        return writeApiStatusText(connection, 400, "Invalid RUID");
+    }
+
+    char *path = tonie_user_image_path(get_settings()->internal.wwwdirfull,
+                                       ruid, FALSE);
+    const char *mime = tonie_user_image_detect_mime(path);
+    uint32_t file_size = 0;
+    if (path == NULL || mime == NULL ||
+        fsGetFileSize(path, &file_size) != NO_ERROR || file_size == 0 ||
+        file_size > TONIE_USER_IMAGE_MAX_SIZE)
+    {
+        osFreeMem(path);
+        return writeApiStatusText(connection, 404, "Image not found");
+    }
+
+    FsFile *file = fsOpenFile(path, FS_FILE_MODE_READ);
+    osFreeMem(path);
+    if (file == NULL)
+    {
+        return writeApiStatusText(connection, 404, "Image not found");
+    }
+
+    httpPrepareHeader(connection, mime, file_size);
+    connection->response.statusCode = 200;
+    connection->response.noCache = TRUE;
+    error_t error = httpWriteHeader(connection);
+    size_t remaining = file_size;
+    while (error == NO_ERROR && remaining > 0)
+    {
+        size_t chunk_size = MIN(remaining, HTTP_SERVER_BUFFER_SIZE);
+        size_t bytes_read = 0;
+        error = fsReadFile(file, connection->buffer, chunk_size, &bytes_read);
+        if (error == NO_ERROR && bytes_read > 0)
+        {
+            error = httpWriteStream(connection, connection->buffer,
+                                    bytes_read);
+            remaining -= bytes_read;
+        }
+        else if (error == NO_ERROR)
+        {
+            error = ERROR_UNEXPECTED_END_OF_FILE;
+        }
+    }
+    fsCloseFile(file);
+
+    if (error == NO_ERROR && remaining == 0)
+    {
+        error = httpFlushStream(connection);
+    }
+    return error;
+}
+
 static bool jsonIsNonEmptyString(const cJSON *value)
 {
     return cJSON_IsString(value) && value->valuestring != NULL && osStrlen(value->valuestring) > 0;
@@ -6242,6 +6614,42 @@ error_t getTagInfoJson(char ruid[17],
             /* only process one TAF/json per directory */
             cJSON *jsonEntry = cJSON_CreateObject();
             cJSON_AddStringToObject(jsonEntry, "ruid", ruid);
+
+            char canonical_ruid[TONIE_USER_RUID_LENGTH + 1U];
+            if (tonie_user_canonicalize_ruid(ruid, canonical_ruid) != NO_ERROR)
+            {
+                osStrcpy(canonical_ruid, ruid);
+            }
+            char *user_comment = NULL;
+            error_t user_comment_error = tonie_user_comment_load(
+                get_settings()->internal.configdirfull, canonical_ruid,
+                &user_comment);
+            if (user_comment_error != NO_ERROR)
+            {
+                TRACE_WARNING("Ignoring invalid user metadata for rUID %s: %s\r\n",
+                              canonical_ruid,
+                              error2text(user_comment_error));
+            }
+            cJSON_AddStringToObject(jsonEntry, "comment",
+                                    user_comment != NULL ? user_comment : "");
+            osFreeMem(user_comment);
+
+            char *user_image_path = tonie_user_image_path(
+                get_settings()->internal.wwwdirfull, canonical_ruid, FALSE);
+            if (tonie_user_image_is_valid(user_image_path))
+            {
+                char *user_image_url = custom_asprintf(
+                    "/api/tonie/image/%s", canonical_ruid);
+                cJSON_AddStringToObject(
+                    jsonEntry, "customImage",
+                    user_image_url != NULL ? user_image_url : "");
+                osFreeMem(user_image_url);
+            }
+            else
+            {
+                cJSON_AddStringToObject(jsonEntry, "customImage", "");
+            }
+            osFreeMem(user_image_path);
 
             char huid[24];
             for (size_t i = 0; i < 8; i++)
