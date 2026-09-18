@@ -210,6 +210,12 @@ bool_t mqtt_forward_filter_should_block(settings_t *box_settings, const char *to
     {
         *filter_id = NULL;
     }
+    // Global bypass for manual rules only. Automatic content protection runs
+    // independently in the proxy before this function is called.
+    if (!settings_get_bool("mqtt_client_upstream.filters_enabled"))
+    {
+        return FALSE;
+    }
     const char *path = mqtt_topic_path(topic);
     if (path == NULL)
     {

@@ -246,6 +246,7 @@ typedef struct
     bool enabled;
     bool passthrough_enabled;
     bool local_control_enabled;
+    bool filters_enabled;
     uint32_t port;
     char *hostname;
     char *capture_dir;

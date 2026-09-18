@@ -1169,7 +1169,7 @@
             "unclassified": "Nicht zugeordnet"
         },
         "mqttForwarding": {
-            "useOverride": "Box-Override",
+            "disabledGlobally": "Manuelle MQTT-Filter sind global ausgeschaltet. Einzelwerte bleiben gespeichert und bearbeitbar. NoCloud- und lokale Inhaltsschutzregeln bleiben aktiv.",
             "overrideHint": "Aus: globalen Wert übernehmen. An: eigenen Filterwert für diese Box verwenden.",
             "resetToGlobal": "Alle Filter auf globale Werte zurücksetzen",
             "resetToGlobalHint": "Entfernt alle Box-Overrides dieser MQTT-Filter, auch ausgeblendete. Mit Speichern übernehmen; Verwerfen macht die Änderung rückgängig.",
@@ -1843,6 +1843,10 @@
             "mqtt_client_upstream__enabled": {
                 "label": "ICI-MQTT-Upstream aktivieren",
                 "description": "Paketbewusste ICI-Weiterleitung, Observer, Filter und Capture gemeinsam aktivieren"
+            },
+            "mqtt_client_upstream__filters_enabled": {
+                "label": "Manuelle MQTT-Filter aktivieren",
+                "description": "Globaler Hauptschalter für alle manuellen Weiterleitungsregeln, auch für Box-Überschreibungen. Ausschalten behält die Einzelwerte; NoCloud- und lokale Inhaltsschutzregeln bleiben immer aktiv. Änderungen mit Speichern übernehmen."
             },
             "mqtt_client_upstream__local_control_enabled": {
                 "label": "TeddyCloud-Steuerung während ICI-Upstream erlauben",

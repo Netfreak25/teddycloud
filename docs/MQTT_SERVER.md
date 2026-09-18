@@ -103,6 +103,16 @@ Both individual changes and this section reset take effect only after `Save`;
 settings-reset API removes the saved box overrides, so future global changes
 continue to apply. Automatic NoCloud protection is unaffected.
 
+The global `mqtt_client_upstream.filters_enabled` master switch (default `true`)
+enables or bypasses all manual forwarding rules, including box overrides. It
+cannot itself be overridden per box. Disabling it does not modify the saved
+rules; re-enabling restores their effect. Existing sessions read this global
+setting for every packet, so no reconnect is necessary after saving. The WebUI
+shows the switch in the global MQTT filter section and an inactive notice in
+both global and box filter views. Individual rules remain editable while the
+master is off. This switch does not bypass automatic NoCloud/`teddycloud_`
+protection, local status processing or local response correlation.
+
 After local observation and response correlation, the proxy applies an
 automatic selective NoCloud policy before the manual forwarding switches. It
 therefore cannot be bypassed by a forwarding option. No additional setting is

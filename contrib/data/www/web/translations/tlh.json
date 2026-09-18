@@ -200,7 +200,7 @@
             "unclassified": "Segh Hutlh"
         },
         "mqttForwarding": {
-            "useOverride": "Box DuH",
+            "disabledGlobally": "MQTT chutmey chu'Ha'lu'. DuHmey poltaH. NoCloud QaptaH.",
             "overrideHint": "chu'Ha': Hoch DuH lo'. chu': box DuH lo'.",
             "resetToGlobal": "Hoch DuHmey yIlo'qa'",
             "resetToGlobalHint": "Hoch MQTT box DuHmey teq. pol yIwIv; qIl yIwIvchugh, choH qIl.",
@@ -279,6 +279,10 @@
             },
             "mqtt_client_upstream__enabled": {
                 "label": "ICI MQTT He QotlhHa'"
+            },
+            "mqtt_client_upstream__filters_enabled": {
+                "label": "MQTT chutmey chu'",
+                "description": "Hoch MQTT chutmey SeH. chu'Ha'lu'chugh, DuHmey poltaH. NoCloud QaptaH. pol yIwIv."
             },
             "mqtt_client_upstream__local_control_enabled": {
                 "label": "ICI labtaHvIS TeddyCloud SeH chaw'",

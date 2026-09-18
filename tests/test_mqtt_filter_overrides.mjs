@@ -95,6 +95,16 @@ await handler.saveAll();
 assert.deepEqual(writes.splice(0), [[id, false, undefined, false]]);
 assert.equal(pending.length, 0);
 
+// Toggling the master must never overwrite the saved individual rules.
+const masterId = 'mqtt_client_upstream.filters_enabled';
+handler.initializeSettings([setting(masterId, true, undefined), setting(id, false, undefined)], undefined);
+for (const enabled of [false, true]) {
+    handler.changeSetting(masterId, enabled, undefined);
+    assert.equal(handler.getSetting(id).value, false);
+    await handler.saveAll();
+    assert.deepEqual(writes.splice(0), [[masterId, enabled, undefined, false]]);
+}
+
 // Keep the new controls scoped to the entire filter section, not search results.
 const component = fs.readFileSync(new URL('src/components/common/form/MqttForwardingFilters.tsx', web), 'utf8');
 const reset = component.slice(component.indexOf('const resetOverrides ='), component.indexOf('const changeGlobal ='));
@@ -103,11 +113,19 @@ assert.match(reset, /!setting.readOnly/);
 assert.match(reset, /handler.changeSettingOverlayed\(setting.iD, false\)/);
 assert.doesNotMatch(reset, /saveAll|changeSetting\(|visibleGroups/);
 assert.match(component, /checked=\{setting.overlayed === true\}/);
+assert.match(component, /t\("settings.overlayed"\)/);
+assert.doesNotMatch(component, /settings.mqttForwarding.useOverride/);
+assert.match(component, /<SettingsOptionItem iD=\{MQTT_FILTERS_ENABLED\} noOverlay/);
+assert.match(component, /handler.getSetting\(MQTT_FILTERS_ENABLED\)\?\.value !== false/);
 assert.match(component, /onChange=\{\(checked\) =>\s*handler.changeSettingOverlayed\(setting.iD, checked\)\s*\}/);
 assert.match(component, /overlayId !== undefined && \(\s*<Tooltip title=\{t\("settings.mqttForwarding.resetToGlobalHint"\)/);
 for (const language of ['de', 'en', 'fr', 'es', 'tlh']) {
     const translations = JSON.parse(fs.readFileSync(new URL(`public/translations/${language}.json`, web), 'utf8'));
-    for (const key of ['useOverride', 'overrideHint', 'resetToGlobal', 'resetToGlobalHint']) {
+    // Klingon uses the same existing English fallback as ordinary settings.
+    const english = JSON.parse(fs.readFileSync(new URL('public/translations/en.json', web), 'utf8'));
+    assert.ok(translations.settings.overlayed || english.settings.overlayed, `${language}: standard override label`);
+    assert.ok(translations.settings.optionText.mqtt_client_upstream__filters_enabled.label);
+    for (const key of ['overrideHint', 'resetToGlobal', 'resetToGlobalHint', 'disabledGlobally']) {
         assert.ok(translations.settings.mqttForwarding[key], `${language}: ${key}`);
     }
 }

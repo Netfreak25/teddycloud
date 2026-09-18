@@ -449,6 +449,7 @@ static void option_map_init(uint8_t settingsId)
     OPTION_BOOL("mqtt_client_upstream.enabled", &settings->mqtt_client_upstream.enabled, FALSE, "Enable ICI MQTT upstream", "Enable packet-aware ICI forwarding, observation, filtering and capture", LEVEL_DETAIL)
     OPTION_INTERNAL_BOOL(MQTT_UPSTREAM_LEGACY_PASSTHROUGH_SETTING, &settings->mqtt_client_upstream.passthrough_enabled, FALSE, "Legacy MQTT upstream passthrough switch", LEVEL_NONE)
     OPTION_BOOL("mqtt_client_upstream.local_control_enabled", &settings->mqtt_client_upstream.local_control_enabled, FALSE, "Allow TeddyCloud settings and controls during ICI upstream", "Allow TeddyCloud to send local settings and app controls while the Tonies ICI upstream proxy is active", LEVEL_DETAIL)
+    OPTION_BOOL("mqtt_client_upstream.filters_enabled", &settings->mqtt_client_upstream.filters_enabled, TRUE, "Enable manual MQTT filters", "Apply manual MQTT forwarding rules globally; disabling preserves individual rules and does not disable automatic NoCloud protection", LEVEL_DETAIL)
     OPTION_UNSIGNED("mqtt_client_upstream.port", &settings->mqtt_client_upstream.port, 8883, 1, 65535, "MQTT Server port", "Port of the Tonies ICI upstream MQTT server", LEVEL_DETAIL)
     OPTION_STRING("mqtt_client_upstream.hostname", &settings->mqtt_client_upstream.hostname, "ici.tonie.cloud", "MQTT Server hostname", "Hostname of the Tonies ICI upstream MQTT server", LEVEL_DETAIL)
     OPTION_STRING("mqtt_client_upstream.capture_dir", &settings->mqtt_client_upstream.capture_dir, "data/diagnostics/tb2-mqtt-passthrough", "Capture directory", "Directory for full packet-aware ICI upstream captures", LEVEL_EXPERT)
@@ -2635,6 +2636,7 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
     }
 
     if (settingsId > 0 && (!osStrcmp(item, "mqtt_client_upstream.enabled") ||
+                           !osStrcmp(item, "mqtt_client_upstream.filters_enabled") ||
                            !osStrcmp(item, CORE_SERVER_SNI_CERT_SELECTION_SETTING)))
     {
         TRACE_WARNING("Setting '%s' is global and cannot be overridden\r\n", item);

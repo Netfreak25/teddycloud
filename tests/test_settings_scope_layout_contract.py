@@ -93,6 +93,12 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
         }
         self.assertEqual({}, failures)
 
+    def test_mqtt_filter_master_is_global_only_in_tb2_section(self) -> None:
+        option_id = "mqtt_client_upstream.filters_enabled"
+        self.assertIn(option_id, self.public_setting_ids)
+        self.assertEqual(self.scope_of(option_id), "tb2")
+        self.assertFalse(self.overlay_eligible(option_id))
+
     def test_expected_generation_assignments(self) -> None:
         expectations = {
             "mqtt.enabled": "global",

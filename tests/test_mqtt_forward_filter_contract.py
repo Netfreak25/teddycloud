@@ -100,6 +100,25 @@ class MqttForwardFilterContractTests(unittest.TestCase):
         self.assertEqual(self.registered_forward_options(), expected)
         self.assertNotIn("mqtt_client_upstream.block.", self.registration)
 
+    def test_global_master_preserves_manual_rules_and_automatic_protection(self):
+        self.assertRegex(
+            self.registration,
+            r'OPTION_BOOL\("mqtt_client_upstream.filters_enabled",[^\n]+, TRUE,',
+        )
+        self.assertIn(
+            '!osStrcmp(item, "mqtt_client_upstream.filters_enabled")',
+            self.registration,
+        )
+        decision = self.matcher[self.matcher.index("bool_t mqtt_forward_filter_should_block"):]
+        bypass = decision[decision.index('if (!settings_get_bool("mqtt_client_upstream.filters_enabled"))'):]
+        self.assertLess(bypass.index("return FALSE;"), bypass.index("mqtt_topic_path(topic)"))
+        self.assertNotIn("settings_set_", decision)
+        self.assertNotIn("settings_reset_", decision)
+        processor = self.proxy[self.proxy.index("static error_t tb2_mqtt_process_packet"):]
+        self.assertLess(processor.index("mqtt_nocloud_filter_publish"),
+                        processor.index("mqtt_forward_filter_should_block"))
+        self.assertNotIn("mqtt_client_upstream.filters_enabled", processor)
+
     def test_all_log_sources_are_matched_exactly(self):
         mappings = set(
             re.findall(
