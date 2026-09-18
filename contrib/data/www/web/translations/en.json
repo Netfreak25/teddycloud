@@ -1169,6 +1169,10 @@
             "unclassified": "Unclassified"
         },
         "mqttForwarding": {
+            "useOverride": "Box override",
+            "overrideHint": "Off: inherit the global value. On: use a filter value specific to this box.",
+            "resetToGlobal": "Reset all filters to global values",
+            "resetToGlobalHint": "Removes all box overrides for these MQTT filters, including hidden rules. Apply with Save; Discard undoes the change.",
             "suppress": "Suppress",
             "suppressed": "Suppressed",
             "description": "Rules apply in both directions. Inherited rules show their effective global state.",

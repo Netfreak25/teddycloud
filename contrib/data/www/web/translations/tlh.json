@@ -200,6 +200,10 @@
             "unclassified": "Segh Hutlh"
         },
         "mqttForwarding": {
+            "useOverride": "Box DuH",
+            "overrideHint": "chu'Ha': Hoch DuH lo'. chu': box DuH lo'.",
+            "resetToGlobal": "Hoch DuHmey yIlo'qa'",
+            "resetToGlobalHint": "Hoch MQTT box DuHmey teq. pol yIwIv; qIl yIwIvchugh, choH qIl.",
             "suppress": "bot",
             "suppressed": "botlu'",
             "description": "cha' lurghmeyDaq Qap Hoch chut. Hoch chut Dotlh potlh 'ang Hoch DuH.",

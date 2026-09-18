@@ -1169,6 +1169,10 @@
             "unclassified": "Non classé"
         },
         "mqttForwarding": {
+            "useOverride": "Valeur propre à la box",
+            "overrideHint": "Désactivé : hériter de la valeur globale. Activé : utiliser une valeur propre à cette box.",
+            "resetToGlobal": "Réinitialiser tous les filtres aux valeurs globales",
+            "resetToGlobalHint": "Supprime toutes les valeurs propres à la box pour ces filtres MQTT, y compris les règles masquées. Appliquer avec Enregistrer ; Annuler rétablit les valeurs précédentes.",
             "suppress": "Supprimer",
             "suppressed": "Supprimé",
             "description": "Les règles s’appliquent dans les deux sens. Les règles héritées affichent leur état global effectif.",

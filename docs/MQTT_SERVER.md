@@ -90,8 +90,18 @@ have no dedicated option.
 
 All forwarding options are overlay-capable. An explicit box value wins;
 otherwise the current global value is read for every packet, so a global change
-also affects existing sessions immediately. The WebUI presents global options
-as forwarding switches and box options as `Global | Forward | Suppress`.
+also affects existing sessions immediately. In the WebUI, each box filter has
+an explicit override switch. With the switch off, its forwarding state is
+inherited from the global setting and cannot be edited locally. With it on,
+the box can select `Forward` or `Suppress`.
+
+`Reset all filters to global values` clears the overrides for the entire MQTT
+filter section, including rules hidden by search or collapsed groups. It does
+not reset global settings to factory defaults or change other box settings.
+Both individual changes and this section reset take effect only after `Save`;
+`Discard` restores the previous values and override flags. The existing
+settings-reset API removes the saved box overrides, so future global changes
+continue to apply. Automatic NoCloud protection is unaffected.
 
 After local observation and response correlation, the proxy applies an
 automatic selective NoCloud policy before the manual forwarding switches. It

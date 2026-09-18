@@ -1169,6 +1169,10 @@
             "unclassified": "Nicht zugeordnet"
         },
         "mqttForwarding": {
+            "useOverride": "Box-Override",
+            "overrideHint": "Aus: globalen Wert übernehmen. An: eigenen Filterwert für diese Box verwenden.",
+            "resetToGlobal": "Alle Filter auf globale Werte zurücksetzen",
+            "resetToGlobalHint": "Entfernt alle Box-Overrides dieser MQTT-Filter, auch ausgeblendete. Mit Speichern übernehmen; Verwerfen macht die Änderung rückgängig.",
             "suppress": "Unterdrücken",
             "suppressed": "Unterdrückt",
             "description": "Regeln gelten in beide Richtungen. Geerbte Regeln zeigen ihren effektiven globalen Zustand.",
