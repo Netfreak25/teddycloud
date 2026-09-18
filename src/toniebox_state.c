@@ -7,6 +7,9 @@
 #include "mutex_manager.h"
 #include "settings.h"
 #include "server_helpers.h"
+#include "tonie_picture.h"
+#include "tonie_user_metadata.h"
+#include "tb2_ruid.h"
 #include <ctype.h>
 #include <time.h>
 
@@ -408,6 +411,74 @@ toniebox_state_t *get_toniebox_state_id(uint8_t id)
     return &Box_State_Overlay[id];
 }
 
+/* Unlike playback_state.ruid, tonie belongs to this actual playback report;
+ * never attach artwork using a RUID carried over from an earlier figure. */
+static bool_t tbs_picture_ruid(client_ctx_t *client_ctx, char ruid[TONIE_USER_RUID_LENGTH + 1])
+{
+    if (client_ctx->settings->toniebox.boxGeneration == GENERATION_TB2)
+        return client_ctx->state->playback_state.valid &&
+               tonie_user_canonicalize_ruid(client_ctx->state->playback_state.tonie, ruid) == NO_ERROR;
+    if (!client_ctx->state->tag.valid || client_ctx->state->tag.uid == 0) return FALSE;
+    tb2_ruid_from_uid(client_ctx->state->tag.uid, ruid);
+    return TRUE;
+}
+
+void tbs_publish_content_picture(client_ctx_t *client_ctx)
+{
+    if (client_ctx == NULL || client_ctx->settings == NULL || client_ctx->state == NULL ||
+        !settings_get_bool("mqtt.enabled")) return;
+    char ruid[TONIE_USER_RUID_LENGTH + 1] = {0};
+    tbs_picture_ruid(client_ctx, ruid);
+    uint32_t audio_id = client_ctx->state->tag.audio_id;
+    if (client_ctx->settings->toniebox.boxGeneration == GENERATION_TB2)
+    {
+        const toniebox_state_playback_state_t *playback = &client_ctx->state->playback_state;
+        audio_id = ruid[0] && playback->content_version_valid && playback->contentVersion <= UINT32_MAX
+                       ? (uint32_t)playback->contentVersion : 0;
+    }
+    char *picture = tonie_picture_resolve(client_ctx->settings, ruid, audio_id);
+    if (picture == NULL) return;
+    if (client_ctx->settings->toniebox.boxGeneration != GENERATION_TB2 &&
+        tonie_picture_is_unknown(picture) && audio_id < TEDDY_BENCH_AUDIO_ID_DEDUCT)
+    {
+        osFreeMem(picture);
+        picture = strdup("/img_custom.png");
+    }
+    if (picture != NULL)
+    {
+        const char *host = settings_get_string("core.host_url");
+        size_t host_length = osStrlen(host);
+        while (host_length > 0 && host[host_length - 1] == '/') host_length--;
+        const char *path = picture;
+        while (*path == '/') path++;
+        char *url = !osStrncasecmp(picture, "http://", 7) || !osStrncasecmp(picture, "https://", 8)
+                        ? strdup(picture) : custom_asprintf("%.*s/%s", (int)host_length, host, path);
+        if (url != NULL) mqtt_sendBoxEvent("ContentPicture", url, client_ctx);
+        osFreeMem(url);
+        osFreeMem(picture);
+    }
+}
+
+void tbs_refresh_content_picture(const char *ruid)
+{
+    char canonical[TONIE_USER_RUID_LENGTH + 1];
+    if (tonie_user_canonicalize_ruid(ruid, canonical) != NO_ERROR ||
+        !settings_get_bool("mqtt.enabled")) return;
+    for (uint8_t overlay = 0; overlay < MAX_OVERLAYS; overlay++)
+    {
+        settings_t *settings = get_settings_id(overlay);
+        if (settings == NULL || !settings->internal.config_used) continue;
+        client_ctx_t context = {0};
+        context.settings = settings;
+        context.settingsNoOverlay = settings;
+        context.state = get_toniebox_state_id(overlay);
+        char active[TONIE_USER_RUID_LENGTH + 1];
+        if ((context.state->tag.audio_id != 0 || context.state->playback_state.valid) &&
+            tbs_picture_ruid(&context, active) && osStrcmp(active, canonical) == 0)
+            tbs_publish_content_picture(&context);
+    }
+}
+
 void tbs_tag_placed(client_ctx_t *client_ctx, uint64_t uid, bool valid)
 {
     client_ctx->state->tag.uid = uid;
@@ -528,6 +599,10 @@ void tbs_toniebox2_playback_state(client_ctx_t *client_ctx, const char *tonie,
 
     toniebox_state_playback_state_t *playback_state = &client_ctx->state->playback_state;
     bool was_playing = playback_state->valid || client_ctx->state->box.playback;
+    bool picture_changed = !playback_state->valid || tonie == NULL ||
+        osStrcmp(playback_state->tonie, tonie) != 0 ||
+        playback_state->content_version_valid != content_version_valid ||
+        (content_version_valid && playback_state->contentVersion != content_version);
     bool previous_ruid_valid = playback_state->ruid_valid;
     char previous_ruid[TBS_TB2_CLAIM_RUID_MAX];
     osStrncpy(previous_ruid, playback_state->ruid, sizeof(previous_ruid) - 1);
@@ -584,6 +659,7 @@ void tbs_toniebox2_playback_state(client_ctx_t *client_ctx, const char *tonie,
         tbs_playback(client_ctx, TBS_PLAYBACK_STARTED);
     }
     tbs_send_toniebox2_playback_state_events(client_ctx, playback_state);
+    if (picture_changed) tbs_publish_content_picture(client_ctx);
 }
 
 void tbs_toniebox2_playback_command_state(client_ctx_t *client_ctx,

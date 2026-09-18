@@ -100,10 +100,32 @@ class TonieUserMetadataContractTests(unittest.TestCase):
         self.assertIn("customImageEnabled", self.editor)
         self.assertIn("CommentOutlined", self.card)
         self.assertIn("resolveTonieDisplayPicture", self.card)
-        self.assertLess(
-            self.image_utils.index("customImage?.trim()"),
-            self.image_utils.index("modelPicture?.trim()"),
-        )
+        self.assertIn("[customImage, modelPicture]", self.image_utils)
+        self.assertIn("resolveContentDisplayPicture", self.image_utils)
+        self.assertIn("prepareTonieImage(file)", self.editor)
+        self.assertIn("imageProcessing", self.editor)
+        self.assertIn("imageProcessingError", self.editor)
+
+    def test_artwork_lookup_is_read_only_and_refreshes_local_mqtt_only(self) -> None:
+        picture = (ROOT / "src/tonie_picture.c").read_text(encoding="utf-8")
+        state = (ROOT / "src/toniebox_state.c").read_text(encoding="utf-8")
+        for forbidden in ("getTonieInfo(", "load_content_json(", "save_content_json(",
+                          "freshness_", "mqtt_server_", "nocloud"):
+            self.assertNotIn(forbidden, picture)
+        self.assertIn("sha256Update", picture)
+        self.assertIn('image/%s?v=%s', picture)
+        self.assertIn('mqtt_sendBoxEvent("ContentPicture", url, client_ctx)', state)
+        self.assertIn("if (picture_changed) tbs_publish_content_picture(client_ctx)", state)
+        self.assertIn("playback_state.tonie, ruid", state)
+        self.assertEqual(self.api.count("tbs_refresh_content_picture(ruid);"), 2)
+
+    def test_native_artwork_requires_explicit_tag_context(self) -> None:
+        page = (WEB / "src/pages/tonies/TeddyAudioPlayerPage.tsx").read_text(encoding="utf-8")
+        self.assertIn("const imageTag = tonieRuid", page)
+        self.assertIn("imageTag?.customImage", page)
+        self.assertNotIn("assigned?.customImage", page)
+        self.assertIn('params.set("ruid", currentItem.tonieRuid)', page)
+        self.assertIn("tonieRuid: tonieCard.ruid", self.card)
 
     def test_all_supported_languages_contain_the_new_copy(self) -> None:
         required = {
@@ -129,6 +151,8 @@ class TonieUserMetadataContractTests(unittest.TestCase):
                 ),
             }
             self.assertEqual(required, {key for key, value in present.items() if value}, language)
+            self.assertIn("512", translations["editModal"]["customImageHint"])
+            self.assertTrue(translations["editModal"]["customImageProcessingFailed"])
 
 
 if __name__ == "__main__":

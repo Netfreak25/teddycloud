@@ -3642,6 +3642,7 @@ error_t handleApiTonieImageUpload(HttpConnection *connection,
     if (error == NO_ERROR)
     {
         TRACE_INFO("Updated user image for rUID %s\r\n", ruid);
+        tbs_refresh_content_picture(ruid);
     }
 
     osFreeMem(upload.final_path);
@@ -3712,6 +3713,7 @@ error_t handleApiTonieImageRemove(HttpConnection *connection,
                                   "Failed to remove image");
     }
     TRACE_INFO("Removed user image for rUID %s\r\n", ruid);
+    tbs_refresh_content_picture(ruid);
     return writeApiStatusText(connection, 200, "OK");
 }
 
@@ -6464,6 +6466,16 @@ static void api_add_native_collection_playlist(cJSON *json_entry,
 
     toniesJson_item_t *source_item =
         api_native_collection_source_metadata(&collection);
+    // Reuse the established content metadata field; never substitute a tag image
+    // for a collection cover or write anything to the collection descriptor.
+    if (source_item != NULL)
+    {
+        cJSON *source_json = cJSON_CreateObject();
+        addToniesJsonInfoJson(source_item, source_item->model, source_json);
+        cJSON_AddItemToObject(json_entry, "sourceInfo",
+            cJSON_DetachItemFromObject(source_json, "tonieInfo"));
+        cJSON_Delete(source_json);
+    }
     if (source_item == NULL && taf_info->json._source_model != NULL)
     {
         source_item = tonies_byModel(taf_info->json._source_model);
@@ -6818,7 +6830,8 @@ error_t getTagInfoJson(char ruid[17],
                 contentJson._source_model != NULL &&
                 contentJson._source_model[0] != '\0' &&
                 item2 != NULL;
-            if (tafInfo->exists && item != item2 && source_info_available)
+            if (tafInfo->exists && item != item2 && source_info_available &&
+                !cJSON_HasObjectItem(jsonEntry, "sourceInfo"))
             {
                 cJSON *jsonSourceInfo = cJSON_CreateObject();
                 addToniesJsonInfoJson(item2, contentJson._source_model, jsonSourceInfo);

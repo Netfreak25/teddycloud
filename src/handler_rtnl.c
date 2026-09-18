@@ -167,39 +167,6 @@ int64_t read_big_endian64(const uint8_t *buf)
     return ((int64_t)read_big_endian32(buf)) | (((uint64_t)read_big_endian32(&buf[4])) << 32);
 }
 
-static char *absolute_url(const char *url_or_path)
-{
-    char *url = strdup(url_or_path);
-
-    /* modify relative URLs to be absolute using host_url */
-    if (osStrncmp(url, "http", 4))
-    {
-        char *host_url = strdup(settings_get_string("core.host_url"));
-
-        /* Remove trailing slashes */
-        char *end = host_url + strlen(host_url) - 1;
-        while (end > host_url && *end == '/')
-        {
-            *end-- = '\0';
-        }
-
-        /* Remove leading slashes */
-        char *path = url;
-        while (*path == '/')
-        {
-            path++;
-        }
-        char *absolute_url = custom_asprintf("%s/%s", host_url, path);
-
-        osFreeMem(url);
-        osFreeMem(host_url);
-
-        url = absolute_url;
-    }
-
-    return url;
-}
-
 void rtnlEvent(HttpConnection *connection, TonieRtnlRPC *rpc, client_ctx_t *client_ctx)
 {
     char_t buffer[4096];
@@ -371,32 +338,14 @@ void rtnlEvent(HttpConnection *connection, TonieRtnlRPC *rpc, client_ctx_t *clie
             {
                 sse_sendEvent("ContentTitle", "Unknown", true);
                 mqtt_sendBoxEvent("ContentTitle", "Unknown", client_ctx);
-                if (audioId < TEDDY_BENCH_AUDIO_ID_DEDUCT)
-                {
-                    /* custom tonie */
-                    char *url = custom_asprintf("%s/img_custom.png", settings_get_string("core.host_url"));
-                    mqtt_sendBoxEvent("ContentPicture", url, client_ctx);
-                    osFreeMem(url);
-                }
-                else
-                {
-                    /* no image in the json file */
-                    char *url = custom_asprintf("%s/img_unknown.png", settings_get_string("core.host_url"));
-                    mqtt_sendBoxEvent("ContentPicture", url, client_ctx);
-                    osFreeMem(url);
-                }
             }
             else
             {
-                char *url = absolute_url(item->picture);
-
                 sse_sendEvent("ContentTitle", item->title, true);
                 mqtt_sendBoxEvent("ContentTitle", item->title, client_ctx);
                 sse_sendEvent("ContentPicture", item->picture, true);
-                mqtt_sendBoxEvent("ContentPicture", url, client_ctx);
-
-                osFreeMem(url);
             }
+            tbs_publish_content_picture(client_ctx);
         }
         else if (rpc->log2->function_group == RTNL2_FUGR_TILT)
         {

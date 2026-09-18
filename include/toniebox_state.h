@@ -18,6 +18,9 @@ void tbs_toniebox2_volume_snapshot(uint8_t overlay_id, toniebox_state_volume_t *
 
 void tbs_tag_placed(client_ctx_t *client_ctx, uint64_t uid, bool valid);
 void tbs_tag_removed(client_ctx_t *client_ctx, uint64_t uid, bool valid);
+/** Publish artwork only to the local integration broker; never to the ICI relay. */
+void tbs_publish_content_picture(client_ctx_t *client_ctx);
+void tbs_refresh_content_picture(const char *ruid);
 void tbs_knock(client_ctx_t *client_ctx, bool forward);
 void tbs_tilt(client_ctx_t *client_ctx, bool forward);
 void tbs_playback(client_ctx_t *client_ctx, toniebox_state_playback_t playback);
