@@ -36,6 +36,11 @@ The v3 endpoint switches are subordinate to `cloud.tb2_v3_enabled`:
 - `cloud.enableV3ContentMeta`
 - `cloud.enableV3Chapter`
 
+`cloud.enableV3Ota` controls both the `/v3/check-ota` request and the
+subsequent TB2 firmware download from TONIES. Caching and local delivery use
+the independent TB2 settings `cloud.cacheOtaV3` and `cloud.localOtaV3`; see
+[Firmware updates (OTA)](OTA_UPDATES.md) for the complete policy matrix.
+
 Global settings provide the default. A TB2 box overlay may explicitly select a
 different mode; an explicit overlay value wins over the global value. TB1 box
 overlays do not expose TB2 settings, and TB2 overlays do not expose TB1
@@ -125,9 +130,11 @@ sessions, byte counters, timestamps and error code.
 The WebUI uses the shared `TON`/`TONIES` navbar status for whichever TB2 HTTPS
 mode is active. Its tooltip shows both the selected mode and current state. The
 settings view uses the shared `Global`, `TB1` and `TB2` scope layout for all
-public settings. The v3 endpoint switches are shown beneath the v3 master only
-while its effective value is enabled; hiding them never changes their stored
-values. The transparent switch follows them, then capture directory, capture
+public settings. Request-specific v3 endpoint switches are shown only while the
+effective v3 master is enabled; hiding them never changes their stored values.
+The TB2 OTA section keeps cache and local-delivery controls visible because a
+previously stored firmware file can be served without cloud access. The
+transparent switch follows the v3 settings, then capture directory, capture
 limit and the shared TONIES hostname and port. Those four configuration values
 remain visible and editable before either transport is activated. Box overlays
 show only `Global` plus their detected generation, so TB1 and TB2 options cannot

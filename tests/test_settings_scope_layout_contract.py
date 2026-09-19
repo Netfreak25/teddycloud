@@ -126,8 +126,6 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
             "toniebox2.max_volume": "tb2",
             "toniebox.api_access": "global",
             "toniebox.boxGeneration": "global",
-            "cloud.cacheOta": "global",
-            "cloud.localOta": "global",
             "cloud.markCustomTagByPass": "global",
             "cloud.markCustomTagByUid": "global",
             "cloud.dumpRuidAuthContentJson": "global",
@@ -135,6 +133,12 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
             "cloud.cacheToLibrary": "tb1",
             "cloud.prioCustomContent": "tb1",
             "cloud.updateOnLowerAudioId": "tb1",
+            "cloud.enableV1Ota": "tb1",
+            "cloud.cacheOtaV1": "tb1",
+            "cloud.localOtaV1": "tb1",
+            "cloud.enableV3Ota": "tb2",
+            "cloud.cacheOtaV3": "tb2",
+            "cloud.localOtaV3": "tb2",
         }
         self.assertEqual(
             expectations,
@@ -158,6 +162,10 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
         self.assertFalse(
             self.visible_in_overlay("mqtt_client_upstream.local_control_enabled", "tb1")
         )
+        self.assertTrue(self.visible_in_overlay("cloud.cacheOtaV1", "tb1"))
+        self.assertFalse(self.visible_in_overlay("cloud.cacheOtaV1", "tb2"))
+        self.assertTrue(self.visible_in_overlay("cloud.cacheOtaV3", "tb2"))
+        self.assertFalse(self.visible_in_overlay("cloud.cacheOtaV3", "tb1"))
 
     def test_all_ici_forward_filters_are_tb2_overlay_settings(self) -> None:
         filter_ids = {
@@ -178,7 +186,6 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
         self.assertEqual(
             {
                 "cloud.enableV3FreshnessCheck",
-                "cloud.enableV3Ota",
                 "cloud.enableV3SetupStatus",
                 "cloud.enableV3ContentMeta",
                 "cloud.enableV3Chapter",
@@ -193,7 +200,6 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
             [
                 "cloud.tb2_v3_enabled",
                 "cloud.enableV3FreshnessCheck",
-                "cloud.enableV3Ota",
                 "cloud.enableV3SetupStatus",
                 "cloud.enableV3ContentMeta",
                 "cloud.enableV3Chapter",
@@ -207,6 +213,39 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
         )
         self.assertNotIn("cloud.tb2_capture_enabled", self.public_setting_ids)
         self.assertNotIn("cloud.tb2_capture_enabled", section["ids"])
+
+    def test_ota_settings_have_separate_generation_sections_and_help(self) -> None:
+        tb1 = next(item for item in self.layout["sections"] if item["id"] == "tb1.ota")
+        tb2 = next(item for item in self.layout["sections"] if item["id"] == "tb2.ota")
+
+        self.assertEqual(
+            ["cloud.enableV1Ota", "cloud.cacheOtaV1", "cloud.localOtaV1"],
+            tb1["order"],
+        )
+        self.assertEqual(
+            ["cloud.enableV3Ota", "cloud.cacheOtaV3", "cloud.localOtaV3"],
+            tb2["order"],
+        )
+        self.assertEqual("tb1", tb1["otaHelpGeneration"])
+        self.assertEqual("tb2", tb2["otaHelpGeneration"])
+        self.assertEqual("settings.scopeSections.firmwareUpdates", tb1["labelKey"])
+        self.assertEqual("settings.scopeSections.firmwareUpdates", tb2["labelKey"])
+
+        global_cloud = next(
+            item for item in self.layout["sections"] if item["id"] == "global.cloud"
+        )
+        self.assertNotIn("cloud.cacheOta", global_cloud["ids"])
+        self.assertNotIn("cloud.localOta", global_cloud["ids"])
+
+        help_component = (FORM_COMPONENTS_PATH / "OtaSettingsHelp.tsx").read_text(
+            encoding="utf-8"
+        )
+        scope_tabs = (FORM_COMPONENTS_PATH / "SettingsScopeTabs.tsx").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("scroll={{ x: 720 }}", help_component)
+        self.assertIn('pagination={false}', help_component)
+        self.assertIn("section?.otaHelpGeneration", scope_tabs)
 
     def test_dependency_controls_and_listener_cleanup_are_wired(self) -> None:
         scope_tabs = (FORM_COMPONENTS_PATH / "SettingsScopeTabs.tsx").read_text(

@@ -26,7 +26,7 @@
 #define TONIEBOX_CUSTOM_JSON_FILE "tonieboxes.custom.json"
 #define CONFIG_FILE "config.ini"
 #define CONFIG_OVERLAY_FILE "config.overlay.ini"
-#define CONFIG_VERSION 24
+#define CONFIG_VERSION 25
 #define MAX_OVERLAYS 16 + 1
 
 typedef enum
@@ -101,8 +101,13 @@ typedef struct
     bool cacheContentV3;
     bool cacheToLibraryV3;
     bool cacheTonieplayToLibraryV3;
-    bool cacheOta;
-    bool localOta;
+    /* Load-only compatibility values for the v24 -> v25 migration. */
+    bool cacheOtaLegacy;
+    bool localOtaLegacy;
+    bool cacheOtaV1;
+    bool localOtaV1;
+    bool cacheOtaV3;
+    bool localOtaV3;
     bool cacheContent;
     bool cacheToLibrary;
     bool markCustomTagByPass;

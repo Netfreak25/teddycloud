@@ -1159,6 +1159,7 @@
             "boxGeneral": "Configuración general de las cajas",
             "certificates": "Certificados",
             "cloud": "Nube",
+            "firmwareUpdates": "Actualizaciones de firmware (OTA)",
             "boxBehavior": "Comportamiento de la caja",
             "rtnl": "RTNL",
             "tools": "Herramientas",
@@ -1167,6 +1168,44 @@
             "iciServer": "Servidor MQTT ICI",
             "v3Endpoints": "Reenvío de endpoints TB2 v3",
             "unclassified": "Sin clasificar"
+        },
+        "otaHelp": {
+            "title": "¿Cómo funcionan estos ajustes?",
+            "providers": {
+                "tb1": "Boxine",
+                "tb2": "TONIES"
+            },
+            "columns": {
+                "cloud": "Origen en la nube",
+                "cache": "Almacenar",
+                "local": "Servir localmente",
+                "behaviour": "Comportamiento"
+            },
+            "states": {
+                "on": "Activado",
+                "off": "Desactivado",
+                "either": "Cualquiera"
+            },
+            "rows": {
+                "direct": "El firmware se transmite directamente de {{provider}} a la caja y no se almacena.",
+                "cacheOnly": "El firmware se descarga y se almacena por completo, pero no se entrega a la caja.",
+                "cacheAndServe": "El firmware se almacena por completo y después se entrega a la caja desde la caché local.",
+                "offlineLocal": "No se descarga nada nuevo; una OTA compatible ya existente puede entregarse localmente cuando se solicite.",
+                "disabled": "No se descarga ninguna OTA nueva ni se entrega una OTA local."
+            },
+            "notes": {
+                "cacheOnly": "Almacenar una OTA no instala por sí solo la actualización en la caja.",
+                "generation": "La entrega local solo usa archivos de la generación correspondiente; TB1 nunca recibe firmware TB2 y viceversa.",
+                "discovery": {
+                    "tb1": "Sin acceso a la nube, TeddyCloud no puede descubrir actualizaciones TB1 desconocidas de Boxine.",
+                    "tb2": "Sin acceso a la nube, TeddyCloud no puede descubrir actualizaciones TB2 desconocidas; una consulta desactivada no obtiene una nueva descripción OTA de TONIES."
+                },
+                "master": {
+                    "tb1": "El interruptor superior de nube TB1 también puede bloquear este acceso; la entrega local de archivos existentes sigue siendo independiente.",
+                    "tb2": "El interruptor superior de nube TB2 v3 también puede bloquear este acceso; la entrega local de archivos existentes sigue siendo independiente."
+                },
+                "files": "Cambiar estos interruptores no elimina archivos almacenados anteriormente."
+            }
         },
         "cloudAuthority": {
             "locked": "Estos ajustes se toman de TONIES. Desactiva el reenvío de settings/desired para editarlos localmente. Los valores globales siguen siendo editables.",
@@ -1576,12 +1615,12 @@
                 "description": "Reenviar las solicitudes 'time' a la nube de Tonies"
             },
             "cloud__enableV1Ota": {
-                "label": "Reenviar 'ota'",
-                "description": "Reenviar consultas 'ota' a la nube de Tonies"
+                "label": "Obtener actualizaciones TB1 de Boxine",
+                "description": "Reenviar las solicitudes OTA y las descargas de firmware a Boxine. Si se desactiva, solo se pueden servir OTA TB1 locales ya existentes."
             },
             "cloud__enableV3Ota": {
-                "label": "Reenviar 'check-ota' v3",
-                "description": "Reenviar consultas de 'check-ota' v3 a la nube de tonies"
+                "label": "Obtener actualizaciones TB2 de TONIES",
+                "description": "Reenviar /v3/check-ota y la descarga posterior de firmware a TONIES. Si se desactiva, solo se pueden servir OTA TB2 locales ya existentes."
             },
             "cloud__enableV2Content": {
                 "label": "Reenviar 'content'",
@@ -1599,13 +1638,21 @@
                 "label": "Reenviar 'chapter' v3",
                 "description": "Reenviar consultas de 'chapter' v3 a la nube de tonies"
             },
-            "cloud__cacheOta": {
-                "label": "Almacenar OTA",
-                "description": "Almacenar en caché archivos OTA en el directorio de firmware del servidor local (esto aún bloquea OTA si la entrega OTA local está deshabilitada)"
+            "cloud__cacheOtaV1": {
+                "label": "Almacenar OTA TB1",
+                "description": "Guardar por completo el firmware TB1 descargado de Boxine en el directorio local de firmware"
             },
-            "cloud__localOta": {
-                "label": "Entrega OTA local",
-                "description": "Enviar archivos OTA locales en el directorio de firmware"
+            "cloud__localOtaV1": {
+                "label": "Servir OTA TB1 localmente",
+                "description": "Servir a las cajas TB1 firmware TB1 ya almacenado desde el directorio local de firmware"
+            },
+            "cloud__cacheOtaV3": {
+                "label": "Almacenar OTA TB2",
+                "description": "Guardar por completo el firmware TB2 descargado de TONIES en el directorio local de firmware"
+            },
+            "cloud__localOtaV3": {
+                "label": "Servir OTA TB2 localmente",
+                "description": "Servir a las cajas TB2 firmware TB2 ya almacenado desde el directorio local de firmware"
             },
             "cloud__cacheContent": {
                 "label": "Almacenar contenido",

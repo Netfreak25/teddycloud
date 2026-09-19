@@ -1159,6 +1159,7 @@
             "boxGeneral": "General box settings",
             "certificates": "Certificates",
             "cloud": "Cloud",
+            "firmwareUpdates": "Firmware updates (OTA)",
             "boxBehavior": "Box behavior",
             "rtnl": "RTNL",
             "tools": "Tools",
@@ -1167,6 +1168,44 @@
             "iciServer": "ICI MQTT server",
             "v3Endpoints": "TB2 v3 endpoint forwarding",
             "unclassified": "Unclassified"
+        },
+        "otaHelp": {
+            "title": "How do these settings work?",
+            "providers": {
+                "tb1": "Boxine",
+                "tb2": "TONIES"
+            },
+            "columns": {
+                "cloud": "Cloud source",
+                "cache": "Cache",
+                "local": "Serve locally",
+                "behaviour": "Behaviour"
+            },
+            "states": {
+                "on": "On",
+                "off": "Off",
+                "either": "Either"
+            },
+            "rows": {
+                "direct": "Firmware is streamed directly from {{provider}} to the box and is not stored.",
+                "cacheOnly": "Firmware is downloaded and stored completely, but is not delivered to the box.",
+                "cacheAndServe": "Firmware is stored completely and then delivered to the box from the local cache.",
+                "offlineLocal": "No new cloud download occurs; an already available matching OTA can be delivered for a concrete request.",
+                "disabled": "No new OTA is downloaded and no local OTA is delivered."
+            },
+            "notes": {
+                "cacheOnly": "Caching alone does not install an update on the box.",
+                "generation": "Local delivery uses files for the matching generation only; TB1 never receives TB2 firmware and vice versa.",
+                "discovery": {
+                    "tb1": "Without cloud access, TeddyCloud cannot discover unknown TB1 updates from Boxine.",
+                    "tb2": "Without cloud access, TeddyCloud cannot discover unknown TB2 updates; a disabled update check cannot obtain a new TONIES OTA description."
+                },
+                "master": {
+                    "tb1": "The parent TB1 cloud switch can additionally block this cloud source; local delivery of existing files remains independent.",
+                    "tb2": "The parent TB2 v3 cloud switch can additionally block this cloud source; local delivery of existing files remains independent."
+                },
+                "files": "Changing these switches does not delete previously stored files."
+            }
         },
         "cloudAuthority": {
             "locked": "These settings are taken from TONIES. Disable settings/desired forwarding to edit them locally. Global defaults remain editable.",
@@ -1576,12 +1615,12 @@
                 "description": "Forward 'time' queries to tonies cloud"
             },
             "cloud__enableV1Ota": {
-                "label": "Forward 'ota'",
-                "description": "Forward 'ota' queries to tonies cloud"
+                "label": "Get TB1 firmware updates from Boxine",
+                "description": "Forward OTA requests and firmware downloads to Boxine. When disabled, only existing local TB1 OTAs can be served."
             },
             "cloud__enableV3Ota": {
-                "label": "Forward 'check-ota' v3",
-                "description": "Forward 'check-ota' v3 queries to tonies cloud"
+                "label": "Get TB2 firmware updates from TONIES",
+                "description": "Forward /v3/check-ota and the subsequent firmware download to TONIES. When disabled, only existing local TB2 OTAs can be served."
             },
             "cloud__enableV2Content": {
                 "label": "Forward 'content'",
@@ -1599,13 +1638,21 @@
                 "label": "Forward 'chapter' v3",
                 "description": "Forward 'chapter' v3 queries to tonies cloud"
             },
-            "cloud__cacheOta": {
-                "label": "Cache OTA",
-                "description": "Cache OTA files in firmware dir of local server (this still blocks OTA if local OTA delivery is disabled)"
+            "cloud__cacheOtaV1": {
+                "label": "Cache TB1 OTAs",
+                "description": "Store TB1 firmware downloaded from Boxine completely in the local firmware directory"
             },
-            "cloud__localOta": {
-                "label": "Local OTA delivery",
-                "description": "Send local OTA files in firmware dir"
+            "cloud__localOtaV1": {
+                "label": "Serve TB1 OTAs locally",
+                "description": "Serve previously stored TB1 firmware from the local firmware directory to TB1 boxes"
+            },
+            "cloud__cacheOtaV3": {
+                "label": "Cache TB2 OTAs",
+                "description": "Store TB2 firmware downloaded from TONIES completely in the local firmware directory"
+            },
+            "cloud__localOtaV3": {
+                "label": "Serve TB2 OTAs locally",
+                "description": "Serve previously stored TB2 firmware from the local firmware directory to TB2 boxes"
             },
             "cloud__cacheContent": {
                 "label": "Cache content",

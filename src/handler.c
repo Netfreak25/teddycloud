@@ -39,12 +39,48 @@ req_cbr_t getCloudOtaCbr(HttpConnection *connection, const char_t *uri, const ch
     return cbr;
 }
 
+bool_t otaCacheEnabled(const settings_t *settings, cloudapi_t api)
+{
+    if (settings == NULL)
+    {
+        return FALSE;
+    }
+
+    if (api == V1_OTA)
+    {
+        return settings->cloud.cacheOtaV1;
+    }
+    if (api == V3_OTA)
+    {
+        return settings->cloud.cacheOtaV3;
+    }
+    return FALSE;
+}
+
+bool_t otaLocalDeliveryEnabled(const settings_t *settings, cloudapi_t api)
+{
+    if (settings == NULL)
+    {
+        return FALSE;
+    }
+
+    if (api == V1_OTA)
+    {
+        return settings->cloud.localOtaV1;
+    }
+    if (api == V3_OTA)
+    {
+        return settings->cloud.localOtaV3;
+    }
+    return FALSE;
+}
+
 void cbrCloudOtaHeader(void *src_ctx, HttpClientContext *cloud_ctx, const char *header, const char *value)
 {
     cbr_ctx_t *ctx = (cbr_ctx_t *)src_ctx;
     HttpClientContext *httpClientContext = (HttpClientContext *)cloud_ctx;
 
-    if (ctx->client_ctx->settings->cloud.cacheOta)
+    if (otaCacheEnabled(ctx->client_ctx->settings, ctx->api))
     {
         if (httpClientContext->statusCode == 200)
         {

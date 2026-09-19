@@ -664,7 +664,7 @@ error_t handleCloudOTA(HttpConnection *connection, const char_t *uri, const char
     mqtt_sendBoxEvent("LastCloudOtaTime", current_time, client_ctx);
     char *queryStringNew = NULL;
 
-    if (client_ctx->settings->cloud.cacheOta) // && timestamp < biggest_timestamp)
+    if (otaCacheEnabled(client_ctx->settings, V1_OTA)) // && timestamp < biggest_timestamp)
     {
         // TODO replace uri timestamp with biggest_timestamp
         queryStringNew = custom_asprintf("cv=%" PRIuTIME, biggest_timestamp);
@@ -679,7 +679,7 @@ error_t handleCloudOTA(HttpConnection *connection, const char_t *uri, const char
         ota_ctx_t ota_ctx;
         cbr_ctx_t ctx;
         req_cbr_t cbr;
-        if (client_ctx->settings->cloud.cacheOta)
+        if (otaCacheEnabled(client_ctx->settings, V1_OTA))
         {
             cbr = getCloudOtaCbr(NULL, uri, queryStringNew, V1_OTA, &ctx, client_ctx);
         }
@@ -691,7 +691,7 @@ error_t handleCloudOTA(HttpConnection *connection, const char_t *uri, const char
         ctx.customData = &ota_ctx;
         cloud_request_get(NULL, 0, uri, queryStringNew, NULL, &cbr);
 
-        if (!client_ctx->settings->cloud.cacheOta)
+        if (!otaCacheEnabled(client_ctx->settings, V1_OTA))
         {
             osFreeMem(queryStringNew);
             osFreeMem(biggest_filename);
@@ -706,7 +706,7 @@ error_t handleCloudOTA(HttpConnection *connection, const char_t *uri, const char
     bool new_ota = false;
     if (biggest_timestamp > 0 && fsFileExists(local_file) && timestamp < biggest_timestamp)
     {
-        if (client_ctx->settings->cloud.localOta)
+        if (otaLocalDeliveryEnabled(client_ctx->settings, V1_OTA))
         {
             TRACE_INFO(" >> Found OTA %" PRIu8 " with timestamp %" PRIuTIME " (%s)\r\n", fileId, biggest_timestamp, biggest_filename);
             new_ota = true;
@@ -5888,7 +5888,7 @@ error_t handleCloudOtaV3(HttpConnection *connection, const char_t *uri, const ch
         cbr_ctx_t ctx;
         req_cbr_t cbr;
         
-        if (client_ctx->settings->cloud.cacheOta)
+        if (otaCacheEnabled(client_ctx->settings, V3_OTA))
         {
             cbr = getCloudOtaCbr(NULL, uri, queryString, V3_OTA, &ctx, client_ctx);
         }
@@ -5900,7 +5900,7 @@ error_t handleCloudOtaV3(HttpConnection *connection, const char_t *uri, const ch
         ctx.customData = &ota_ctx;
         cloud_request_tb2_get(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, NULL, &cbr);
 
-        if (!client_ctx->settings->cloud.cacheOta)
+        if (!otaCacheEnabled(client_ctx->settings, V3_OTA))
         {
             osFreeMem(local_dir);
             osFreeMem(query);
@@ -5914,7 +5914,7 @@ error_t handleCloudOtaV3(HttpConnection *connection, const char_t *uri, const ch
     
     if (fsFileExists(local_file))
     {
-        if (client_ctx->settings->cloud.localOta)
+        if (otaLocalDeliveryEnabled(client_ctx->settings, V3_OTA))
         {
             TRACE_INFO(" >> Found OTA %" PRIu8 " with hash %s\r\n", fileId, hash);
             new_ota = true;

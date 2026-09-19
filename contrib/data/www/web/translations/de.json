@@ -1159,6 +1159,7 @@
             "boxGeneral": "Allgemeine Box-Einstellungen",
             "certificates": "Zertifikate",
             "cloud": "Cloud",
+            "firmwareUpdates": "Firmwareupdates (OTA)",
             "boxBehavior": "Box-Verhalten",
             "rtnl": "RTNL",
             "tools": "Werkzeuge",
@@ -1167,6 +1168,44 @@
             "iciServer": "ICI-MQTT-Server",
             "v3Endpoints": "Weiterleitung der TB2-v3-Endpunkte",
             "unclassified": "Nicht zugeordnet"
+        },
+        "otaHelp": {
+            "title": "Wie funktionieren diese Einstellungen?",
+            "providers": {
+                "tb1": "Boxine",
+                "tb2": "TONIES"
+            },
+            "columns": {
+                "cloud": "Cloud-Bezug",
+                "cache": "Zwischenspeichern",
+                "local": "Lokal bereitstellen",
+                "behaviour": "Verhalten"
+            },
+            "states": {
+                "on": "An",
+                "off": "Aus",
+                "either": "Beliebig"
+            },
+            "rows": {
+                "direct": "Firmware wird direkt von {{provider}} an die Box durchgereicht und nicht gespeichert.",
+                "cacheOnly": "Firmware wird vollständig heruntergeladen und gespeichert, aber nicht an die Box ausgeliefert.",
+                "cacheAndServe": "Firmware wird vollständig gespeichert und anschließend aus dem lokalen Cache an die Box geliefert.",
+                "offlineLocal": "Kein neuer Cloud-Download; eine bereits vorhandene passende OTA kann bei einer konkreten Anfrage lokal geliefert werden.",
+                "disabled": "Es wird weder eine neue OTA bezogen noch eine lokale OTA ausgeliefert."
+            },
+            "notes": {
+                "cacheOnly": "Zwischenspeichern allein installiert kein Update auf der Box.",
+                "generation": "Lokal bereitstellen verwendet ausschließlich Dateien der passenden Generation; TB1 erhält niemals eine TB2-Firmware und umgekehrt.",
+                "discovery": {
+                    "tb1": "Ohne Cloud-Bezug kann TeddyCloud keine unbekannten TB1-Updates von Boxine entdecken.",
+                    "tb2": "Ohne Cloud-Bezug kann TeddyCloud keine unbekannten TB2-Updates entdecken; eine deaktivierte Updateabfrage liefert keine neue TONIES-OTA-Beschreibung."
+                },
+                "master": {
+                    "tb1": "Der übergeordnete TB1-Cloud-Schalter kann den Cloud-Bezug zusätzlich sperren; die lokale Bereitstellung vorhandener Dateien bleibt davon getrennt.",
+                    "tb2": "Der übergeordnete TB2-v3-Cloud-Schalter kann den Cloud-Bezug zusätzlich sperren; die lokale Bereitstellung vorhandener Dateien bleibt davon getrennt."
+                },
+                "files": "Bereits gespeicherte Dateien werden beim Ändern der Schalter nicht gelöscht."
+            }
         },
         "cloudAuthority": {
             "locked": "Diese Einstellungen werden von TONIES übernommen. Zum lokalen Bearbeiten die Weiterleitung von settings/desired deaktivieren. Globale Vorgaben bleiben bearbeitbar.",
@@ -1576,12 +1615,12 @@
                 "description": "'time'-Anfragen an die Tonies-Cloud weiterleiten"
             },
             "cloud__enableV1Ota": {
-                "label": "'ota' weiterleiten",
-                "description": "'ota'-Anfragen an die Tonies-Cloud weiterleiten"
+                "label": "TB1-Firmwareupdates über Boxine beziehen",
+                "description": "OTA-Anfragen und Firmwaredownloads an Boxine weiterleiten. Ist die Option aus, können nur bereits vorhandene lokale TB1-OTAs bereitgestellt werden."
             },
             "cloud__enableV3Ota": {
-                "label": "'check-ota' v3 weiterleiten",
-                "description": "'check-ota'-v3-Anfragen an die Tonies-Cloud weiterleiten"
+                "label": "TB2-Firmwareupdates über TONIES beziehen",
+                "description": "Die Anfrage /v3/check-ota und den anschließenden Firmwaredownload an TONIES weiterleiten. Ist die Option aus, können nur bereits vorhandene lokale TB2-OTAs bereitgestellt werden."
             },
             "cloud__enableV2Content": {
                 "label": "'content' weiterleiten",
@@ -1599,13 +1638,21 @@
                 "label": "'chapter' v3 weiterleiten",
                 "description": "'chapter'-v3-Anfragen an die Tonies-Cloud weiterleiten"
             },
-            "cloud__cacheOta": {
-                "label": "OTA zwischenspeichern",
-                "description": "OTA-Dateien im Firmware-Verzeichnis des lokalen Servers zwischenspeichern (OTA bleibt blockiert, wenn die lokale OTA-Auslieferung deaktiviert ist)"
+            "cloud__cacheOtaV1": {
+                "label": "TB1-OTAs zwischenspeichern",
+                "description": "Von Boxine geladene TB1-Firmware vollständig im lokalen Firmware-Verzeichnis speichern"
             },
-            "cloud__localOta": {
-                "label": "Lokale OTA-Bereitstellung",
-                "description": "Lokale OTA-Dateien im Firmware-Verzeichnis senden"
+            "cloud__localOtaV1": {
+                "label": "TB1-OTAs lokal bereitstellen",
+                "description": "Bereits gespeicherte TB1-Firmware aus dem lokalen Firmware-Verzeichnis an TB1-Boxen ausliefern"
+            },
+            "cloud__cacheOtaV3": {
+                "label": "TB2-OTAs zwischenspeichern",
+                "description": "Von TONIES geladene TB2-Firmware vollständig im lokalen Firmware-Verzeichnis speichern"
+            },
+            "cloud__localOtaV3": {
+                "label": "TB2-OTAs lokal bereitstellen",
+                "description": "Bereits gespeicherte TB2-Firmware aus dem lokalen Firmware-Verzeichnis an TB2-Boxen ausliefern"
             },
             "cloud__cacheContent": {
                 "label": "Inhalte zwischenspeichern",

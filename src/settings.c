@@ -37,6 +37,12 @@ static char *settings_resolve_mqtt_server_path(settings_t *settings, const char 
 #define CLOUD_TB2_V3_SETTING "cloud.tb2_v3_enabled"
 #define CLOUD_TB2_CAPTURE_SETTING "cloud.tb2_capture_enabled"
 #define CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING "cloud.tb2_passthrough_enabled"
+#define CLOUD_LEGACY_CACHE_OTA_SETTING "cloud.cacheOta"
+#define CLOUD_LEGACY_LOCAL_OTA_SETTING "cloud.localOta"
+#define CLOUD_V1_CACHE_OTA_SETTING "cloud.cacheOtaV1"
+#define CLOUD_V1_LOCAL_OTA_SETTING "cloud.localOtaV1"
+#define CLOUD_V3_CACHE_OTA_SETTING "cloud.cacheOtaV3"
+#define CLOUD_V3_LOCAL_OTA_SETTING "cloud.localOtaV3"
 #define MQTT_UPSTREAM_LEGACY_PASSTHROUGH_SETTING "mqtt_client_upstream.passthrough_enabled"
 #define MQTT_SERVER_LEGACY_CERT_PATH "certs/server/ici.pem"
 #define MQTT_SERVER_LEGACY_KEY_PATH "certs/server/ici.key"
@@ -361,8 +367,8 @@ static void option_map_init(uint8_t settingsId)
     OPTION_BOOL("cloud.enableV3FreshnessCheck", &settings->cloud.enableV3FreshnessCheck, TRUE, "Forward 'freshnessCheck' v3", "Forward 'freshnessCheck' v3 queries to mark new content as updated to tonies cloud", LEVEL_DETAIL)
     OPTION_BOOL("cloud.enableV1Log", &settings->cloud.enableV1Log, FALSE, "Forward 'log'", "Forward 'log' queries to tonies cloud", LEVEL_EXPERT)
     OPTION_BOOL("cloud.enableV1Time", &settings->cloud.enableV1Time, FALSE, "Forward 'time'", "Forward 'time' queries to tonies cloud", LEVEL_EXPERT)
-    OPTION_BOOL("cloud.enableV1Ota", &settings->cloud.enableV1Ota, FALSE, "Forward 'ota'", "Forward 'ota' queries to tonies cloud", LEVEL_EXPERT)
-    OPTION_BOOL("cloud.enableV3Ota", &settings->cloud.enableV3Ota, TRUE, "Forward 'check-ota' v3", "Forward 'check-ota' v3 queries to tonies cloud", LEVEL_EXPERT)
+    OPTION_BOOL("cloud.enableV1Ota", &settings->cloud.enableV1Ota, FALSE, "Get TB1 firmware updates from Boxine", "Forward TB1 OTA requests and firmware downloads to Boxine", LEVEL_EXPERT)
+    OPTION_BOOL("cloud.enableV3Ota", &settings->cloud.enableV3Ota, TRUE, "Get TB2 firmware updates from TONIES", "Forward TB2 /v3/check-ota requests and subsequent firmware downloads to TONIES", LEVEL_EXPERT)
     OPTION_BOOL("cloud.enableV2Content", &settings->cloud.enableV2Content, TRUE, "Forward 'content'", "Forward 'content' queries to download content from the tonies cloud", LEVEL_BASIC)
     OPTION_BOOL("cloud.enableV3SetupStatus", &settings->cloud.enableV3SetupStatus, TRUE, "Forward 'setup-status' v3", "Forward 'setup-status' v3 queries to tonies cloud", LEVEL_DETAIL)
     OPTION_BOOL("cloud.enableV3ContentMeta", &settings->cloud.enableV3ContentMeta, TRUE, "Forward 'content-meta' v3", "Forward 'content-meta' v3 queries to tonies cloud", LEVEL_DETAIL)
@@ -370,8 +376,13 @@ static void option_map_init(uint8_t settingsId)
     OPTION_BOOL("toniebox2.cacheContentV3", &settings->cloud.cacheContentV3, FALSE, "Cache TB2 V3 content", "Cache complete TONIES V3 manifests and Ogg/Opus chapters atomically", LEVEL_DETAIL)
     OPTION_BOOL("toniebox2.cacheToLibraryV3", &settings->cloud.cacheToLibraryV3, FALSE, "Cache TB2 V3 content to library", "Import complete active TONIES V3 versions into the native TB2 library (requires TB2 V3 content caching)", LEVEL_DETAIL)
     OPTION_BOOL("toniebox2.cacheTonieplayToLibraryV3", &settings->cloud.cacheTonieplayToLibraryV3, FALSE, "Cache Tonieplay to library", "Import complete Tonieplay manifests and every referenced object into the TB2 library (requires TB2 V3 content caching)", LEVEL_DETAIL)
-    OPTION_BOOL("cloud.cacheOta", &settings->cloud.cacheOta, TRUE, "Cache OTA", "Cache OTA files in firmware dir of local server (this still blocks OTA if local OTA delivery is disabled)", LEVEL_EXPERT)
-    OPTION_BOOL("cloud.localOta", &settings->cloud.localOta, FALSE, "Local OTA delivery", "Send local OTA files in firmware dir", LEVEL_EXPERT)
+    /* Legacy shared IDs are load-only inputs for the v24 -> v25 migration. */
+    OPTION_INTERNAL_BOOL("cloud.cacheOta", &settings->cloud.cacheOtaLegacy, TRUE, "Legacy shared OTA cache switch", LEVEL_NONE)
+    OPTION_INTERNAL_BOOL("cloud.localOta", &settings->cloud.localOtaLegacy, FALSE, "Legacy shared local OTA delivery switch", LEVEL_NONE)
+    OPTION_BOOL("cloud.cacheOtaV1", &settings->cloud.cacheOtaV1, TRUE, "Cache TB1 OTA", "Cache Boxine OTA files for TB1 locally", LEVEL_EXPERT)
+    OPTION_BOOL("cloud.localOtaV1", &settings->cloud.localOtaV1, FALSE, "Local TB1 OTA delivery", "Serve locally stored TB1 OTA files to TB1 boxes", LEVEL_EXPERT)
+    OPTION_BOOL("cloud.cacheOtaV3", &settings->cloud.cacheOtaV3, TRUE, "Cache TB2 OTA", "Cache TONIES OTA files for TB2 locally", LEVEL_EXPERT)
+    OPTION_BOOL("cloud.localOtaV3", &settings->cloud.localOtaV3, FALSE, "Local TB2 OTA delivery", "Serve locally stored TB2 OTA files to TB2 boxes", LEVEL_EXPERT)
     OPTION_BOOL("cloud.cacheContent", &settings->cloud.cacheContent, TRUE, "Cache content", "Cache cloud content on local server", LEVEL_DETAIL)
     OPTION_BOOL("cloud.cacheToLibrary", &settings->cloud.cacheToLibrary, TRUE, "Cache to library", "Cache cloud content to library", LEVEL_DETAIL)
     OPTION_BOOL("cloud.markCustomTagByPass", &settings->cloud.markCustomTagByPass, TRUE, "Autodetect custom tags (password)", "Automatically mark custom tags by password", LEVEL_EXPERT)
@@ -1123,6 +1134,46 @@ static bool settings_migrate_certificate_paths(uint8_t settingsId)
     return migrated;
 }
 
+static void settings_migrate_ota_generation_settings(uint8_t settingsId)
+{
+    settings_t *settings = &Settings_Overlay[settingsId];
+    setting_item_t *legacyCache = settings_get_by_name_id(
+        CLOUD_LEGACY_CACHE_OTA_SETTING, settingsId);
+    setting_item_t *legacyLocal = settings_get_by_name_id(
+        CLOUD_LEGACY_LOCAL_OTA_SETTING, settingsId);
+
+    if (settingsId == 0 || (legacyCache != NULL && legacyCache->overlayed))
+    {
+        settings->cloud.cacheOtaV1 = settings->cloud.cacheOtaLegacy;
+        settings->cloud.cacheOtaV3 = settings->cloud.cacheOtaLegacy;
+        if (settingsId > 0)
+        {
+            settings_get_by_name_id(CLOUD_V1_CACHE_OTA_SETTING, settingsId)->overlayed = true;
+            settings_get_by_name_id(CLOUD_V3_CACHE_OTA_SETTING, settingsId)->overlayed = true;
+        }
+    }
+
+    if (settingsId == 0 || (legacyLocal != NULL && legacyLocal->overlayed))
+    {
+        settings->cloud.localOtaV1 = settings->cloud.localOtaLegacy;
+        settings->cloud.localOtaV3 = settings->cloud.localOtaLegacy;
+        if (settingsId > 0)
+        {
+            settings_get_by_name_id(CLOUD_V1_LOCAL_OTA_SETTING, settingsId)->overlayed = true;
+            settings_get_by_name_id(CLOUD_V3_LOCAL_OTA_SETTING, settingsId)->overlayed = true;
+        }
+    }
+
+    if (legacyCache != NULL)
+    {
+        legacyCache->overlayed = false;
+    }
+    if (legacyLocal != NULL)
+    {
+        legacyLocal->overlayed = false;
+    }
+}
+
 static bool settings_migrate_id(uint8_t settingsId)
 {
     settings_t *settings = &Settings_Overlay[settingsId];
@@ -1182,6 +1233,10 @@ static bool settings_migrate_id(uint8_t settingsId)
             return false;
         }
         settings_migrate_certificate_paths(settingsId);
+    }
+    if (settings->configVersion < 25)
+    {
+        settings_migrate_ota_generation_settings(settingsId);
     }
 
     return true;
@@ -2512,7 +2567,7 @@ static error_t settings_load_ovl(bool overlay)
             error_t saveError = settings_save_ovl(true);
             if (saveError != NO_ERROR)
             {
-                TRACE_ERROR("Failed to persist migrated overlay certificate paths; legacy directories remain active\r\n");
+                TRACE_ERROR("Failed to persist migrated overlay settings; migration will retry\r\n");
                 return saveError;
             }
         }
@@ -2531,7 +2586,7 @@ static error_t settings_load_ovl(bool overlay)
             error_t saveError = settings_save_ovl(false);
             if (saveError != NO_ERROR)
             {
-                TRACE_ERROR("Failed to persist migrated global certificate paths; legacy directories remain active\r\n");
+                TRACE_ERROR("Failed to persist migrated global settings; migration will retry\r\n");
                 return saveError;
             }
         }

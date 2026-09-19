@@ -190,6 +190,7 @@
             "boxGeneral": "Toniebox DuHmey",
             "certificates": "Certificates",
             "cloud": "Cloud",
+            "firmwareUpdates": "Firmware chu'moH (OTA)",
             "boxBehavior": "Toniebox vang",
             "rtnl": "RTNL",
             "tools": "janmey",
@@ -198,6 +199,44 @@
             "iciServer": "ICI MQTT De'wI'",
             "v3Endpoints": "TB2 v3 HeHmey",
             "unclassified": "Segh Hutlh"
+        },
+        "otaHelp": {
+            "title": "DuHmeyvam QapmeH mIw",
+            "providers": {
+                "tb1": "Boxine",
+                "tb2": "TONIES"
+            },
+            "columns": {
+                "cloud": "Cloud mung",
+                "cache": "pol",
+                "local": "naDev jab",
+                "behaviour": "QapmeH mIw"
+            },
+            "states": {
+                "on": "chu'",
+                "off": "Qotlh",
+                "either": "Hoch"
+            },
+            "rows": {
+                "direct": "{{provider}}vo' firmware boxDaq ngeHlu'; pollu'be'.",
+                "cacheOnly": "Firmware naQ Suqlu' 'ej pollu', 'ach boxDaq jabbe'lu'.",
+                "cacheAndServe": "Firmware naQ pollu'; ghIq naDev cachevo' boxDaq jablu'.",
+                "offlineLocal": "Cloudvo' chu' Suqbe'lu'; OTA polta'bogh lugh neH naDev jablaH TeddyCloud.",
+                "disabled": "OTA chu' Suqbe'lu' 'ej OTA naDev jabbe'lu'."
+            },
+            "notes": {
+                "cacheOnly": "OTA pol neH boxDaq chu'moHbe'.",
+                "generation": "Box Segh lugh firmware neH naDev jablu'; TB1Daq TB2 firmware jabbe'lu' 'ej rapHa'.",
+                "discovery": {
+                    "tb1": "Cloud rarbe'chugh, Boxine TB1 firmware chu' tu'laHbe' TeddyCloud.",
+                    "tb2": "Cloud rarbe'chugh, TB2 firmware chu' tu'laHbe' TeddyCloud; TONIES OTA De' chu' Suqbe'lu'."
+                },
+                "master": {
+                    "tb1": "TB1 Cloud DuH'a' Cloud mung botlaH; ta'mey polta'bogh naDev jablaHtaH.",
+                    "tb2": "TB2 v3 Cloud DuH'a' Cloud mung botlaH; ta'mey polta'bogh naDev jablaHtaH."
+                },
+                "files": "DuHmeyvam choHDI', ta'mey polta'bogh Qaw'lu'be'."
+            }
         },
         "cloudAuthority": {
             "locked": "DuHmey SeH TONIES. naDev bIchoHmeH, settings/desired yIbot. Hoch DuHmey DachoHlaH.",
@@ -287,6 +326,30 @@
             },
             "cloud__tb2_v3_enabled": {
                 "label": "TB2 v3 He QotlhHa'"
+            },
+            "cloud__enableV1Ota": {
+                "label": "Boxinevo' TB1 firmware chu' Suq",
+                "description": "TB1 OTA requests firmware downloads je BoxineDaq ngeH. Qotlhchugh, OTA polta'bogh neH naDev jablaH TeddyCloud."
+            },
+            "cloud__enableV3Ota": {
+                "label": "TONIESvo' TB2 firmware chu' Suq",
+                "description": "/v3/check-ota request firmware download je TONIESDaq ngeH. Qotlhchugh, OTA polta'bogh neH naDev jablaH TeddyCloud."
+            },
+            "cloud__cacheOtaV1": {
+                "label": "TB1 OTA pol",
+                "description": "Boxinevo' TB1 firmware naQ naDev pol"
+            },
+            "cloud__localOtaV1": {
+                "label": "TB1 OTA naDev jab",
+                "description": "TB1 firmware polta'bogh TB1 boxDaq naDev jab"
+            },
+            "cloud__cacheOtaV3": {
+                "label": "TB2 OTA pol",
+                "description": "TONIESvo' TB2 firmware naQ naDev pol"
+            },
+            "cloud__localOtaV3": {
+                "label": "TB2 OTA naDev jab",
+                "description": "TB2 firmware polta'bogh TB2 boxDaq naDev jab"
             },
             "mqtt_client_upstream__enabled": {
                 "label": "ICI MQTT He QotlhHa'"

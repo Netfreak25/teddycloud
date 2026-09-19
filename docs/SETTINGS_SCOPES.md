@@ -26,6 +26,9 @@ therefore appear only under `TB2`. The specialized bidirectional MQTT filter
 editor is rendered once in that section rather than duplicating its raw boolean
 settings.
 
-The five TB2 v3 endpoint switches remain visible below
-`cloud.tb2_v3_enabled`. They are disabled while the effective master value is
-false, including in box overlays, but their stored values are not changed.
+Request-specific TB2 v3 endpoint switches are hidden while the effective
+`cloud.tb2_v3_enabled` master is false, including in box overlays, but their
+stored values are not changed. OTA cache and local-delivery controls remain in
+the TB2 firmware-update section because local delivery is intentionally
+independent of cloud access. TB1 has its own firmware-update section and policy;
+the two generations do not share OTA cache or delivery settings.
