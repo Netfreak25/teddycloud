@@ -76,7 +76,7 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
             "static error_t tb2_mqtt_process_stream",
         )
         observer = processor.index("session->observer(")
-        decision = processor.index("mqtt_forward_filter_should_block")
+        decision = processor.index("mqtt_forward_filter_evaluate")
         record = processor.index("tb2_mqtt_record_packet", decision)
         self.assertLess(observer, decision)
         self.assertLess(decision, record)
@@ -142,6 +142,9 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
             '"wire_packet_id"',
             '"action"',
             '"removed_count"',
+            '"publish_route"',
+            '"manual_filter_id"',
+            '"manual_filter_decision"',
             '"messages_forwarded_box_to_upstream"',
             '"messages_forwarded_upstream_to_box"',
             '"messages_blocked_box_to_upstream"',
@@ -154,13 +157,28 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
             self.assertIn(field, self.passthrough)
         self.assertIn('"incomplete_packet"', self.passthrough)
 
+    def test_new_rules_use_the_existing_dynamic_filter_ui(self):
+        component = (
+            ROOT / "teddycloud_web/src/components/common/form/MqttForwardingFilters.tsx"
+        ).read_text(encoding="utf-8")
+        for setting in ("setup", "other"):
+            self.assertIn(
+                f'OPTION_BOOL("mqtt_client_upstream.forward.{setting}"',
+                self.settings,
+            )
+        self.assertIn('const FILTER_PREFIX = "mqtt_client_upstream.forward."', component)
+        self.assertIn("id.startsWith(FILTER_PREFIX)", component)
+        self.assertIn("!groupedIds.has(setting.iD)", component)
+        self.assertIn("defaultValue: setting.label", component)
+        self.assertIn("handler.changeSettingOverlayed(setting.iD", component)
+
     def test_automatic_filter_runs_after_observer_and_before_manual_filter(self):
         processor = self.function(
             "static error_t tb2_mqtt_process_packet",
             "static error_t tb2_mqtt_process_stream",
         )
         observer = processor.index("session->observer(")
-        manual = processor.index("mqtt_forward_filter_should_block")
+        manual = processor.index("mqtt_forward_filter_evaluate")
         automatic = processor.index("mqtt_nocloud_filter_publish")
         record = processor.index("tb2_mqtt_record_packet_ex", automatic)
         self.assertLess(observer, automatic)
@@ -168,6 +186,43 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
         self.assertLess(automatic, record)
         self.assertIn("topic, effective_payload", processor[automatic:manual])
         self.assertNotIn("!local_rewrite", processor[observer:automatic])
+
+    def test_publish_route_comes_from_ingress_not_generated_capture_flag(self):
+        processor = self.function(
+            "static error_t tb2_mqtt_process_packet",
+            "static error_t tb2_mqtt_process_stream",
+        )
+        self.assertIn("box_to_upstream ? MQTT_FORWARD_ROUTE_BOX_TO_TONIES", processor)
+        self.assertIn("MQTT_FORWARD_ROUTE_TONIES_TO_BOX", processor)
+        self.assertIn("MQTT_FORWARD_REASON_NOT_EVALUATED_LOCAL_CONSUME", processor)
+        self.assertIn("MQTT_FORWARD_REASON_NOT_EVALUATED_AUTOMATIC_BLOCK", processor)
+        capture = self.function(
+            "static error_t tb2_mqtt_capture_packet_ex",
+            "static error_t tb2_mqtt_capture_packet(",
+        )
+        self.assertIn("mqtt_forward_route_name(manual_decision->route)", capture)
+        self.assertIn("mqtt_forward_reason_name(manual_decision->reason)", capture)
+        self.assertIn("packet_type == TB2_MQTT_PACKET_PUBLISH", capture)
+        self.assertNotIn("generated ?", capture)
+
+    def test_final_privacy_payload_is_used_for_rebuild_and_replay(self):
+        processor = self.function(
+            "static error_t tb2_mqtt_process_packet",
+            "static error_t tb2_mqtt_process_stream",
+        )
+        storage_start = processor.index("error = tb2_mqtt_local_response_store(")
+        storage_end = processor.index("if (error)", storage_start)
+        storage = processor[storage_start:storage_end]
+        self.assertIn("filtered_payload", storage)
+        self.assertIn("filtered_payload_len", storage)
+        self.assertNotIn("observer_result.payload", storage)
+        rebuild_start = processor.index("tb2_mqtt_rebuild_publish(", storage_end)
+        rebuild_end = processor.index(")", rebuild_start)
+        rebuild = processor[rebuild_start:rebuild_end]
+        self.assertIn("filtered_payload", rebuild)
+        self.assertIn("filtered_payload_len", rebuild)
+        self.assertNotIn("observer_result.payload", rebuild)
+        self.assertEqual(1, processor.count("tb2_mqtt_rebuild_publish("))
 
     def test_capture_marks_local_processing_before_security_decision(self):
         processor = self.function(

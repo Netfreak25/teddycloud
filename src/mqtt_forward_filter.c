@@ -117,25 +117,11 @@ static const char *mqtt_group_child(const char *path, const char *group,
     return child;
 }
 
-static bool_t mqtt_match_setting(settings_t *settings, const char *setting,
-                                 const char **filter_id)
-{
-    if (mqtt_filter_effective(settings, setting))
-    {
-        return FALSE;
-    }
-    if (filter_id != NULL)
-    {
-        *filter_id = setting;
-    }
-    return TRUE;
-}
-
-static bool_t mqtt_match_logs(settings_t *settings, const uint8_t *payload,
-                              size_t payload_len, const char **filter_id)
+static const char *mqtt_classify_logs(const uint8_t *payload, size_t payload_len)
 {
     const char *setting = "mqtt_client_upstream.forward.logs.other";
-    cJSON *json = cJSON_ParseWithLength((const char *)payload, payload_len);
+    cJSON *json = payload != NULL ?
+                      cJSON_ParseWithLength((const char *)payload, payload_len) : NULL;
     cJSON *source = json != NULL ? cJSON_GetObjectItemCaseSensitive(json, "source") : NULL;
     if (cJSON_IsString(source) && source->valuestring != NULL)
     {
@@ -148,34 +134,32 @@ static bool_t mqtt_match_logs(settings_t *settings, const uint8_t *payload,
             }
         }
     }
-    bool_t blocked = mqtt_match_setting(settings, setting, filter_id);
     cJSON_Delete(json);
-    return blocked;
+    return setting;
 }
 
-static bool_t mqtt_match_group(settings_t *settings, const char *path,
-                               const char *group, const char *const *children,
-                               const char *const *settings_by_child, size_t count,
-                               const char *other_setting, const char **filter_id)
+static const char *mqtt_classify_group(const char *path, const char *group,
+                                       const char *const *children,
+                                       const char *const *settings_by_child,
+                                       size_t count, const char *other_setting)
 {
     char child[64];
     if (mqtt_group_child(path, group, child, sizeof(child)) == NULL)
     {
-        return FALSE;
+        return NULL;
     }
     for (size_t i = 0; i < count; i++)
     {
         if (strcmp(child, children[i]) == 0)
         {
-            return mqtt_match_setting(settings, settings_by_child[i], filter_id);
+            return settings_by_child[i];
         }
     }
-    return mqtt_match_setting(settings, other_setting, filter_id);
+    return other_setting;
 }
 
-bool_t mqtt_forward_filter_should_block(settings_t *box_settings, const char *topic,
-                                        const uint8_t *payload, size_t payload_len,
-                                        const char **filter_id)
+static const char *mqtt_classify_publish(const char *topic,
+                                          const uint8_t *payload, size_t payload_len)
 {
     static const char *metrics_children[] = {"fleet", "events", "headphones", "battery"};
     static const char *metrics_settings[] = {
@@ -206,44 +190,105 @@ bool_t mqtt_forward_filter_should_block(settings_t *box_settings, const char *to
         "mqtt_client_upstream.forward.app_control.sleep",
     };
 
-    if (filter_id != NULL)
-    {
-        *filter_id = NULL;
-    }
-    // Global bypass for manual rules only. Automatic content protection runs
-    // independently in the proxy before this function is called.
-    if (!settings_get_bool("mqtt_client_upstream.filters_enabled"))
-    {
-        return FALSE;
-    }
     const char *path = mqtt_topic_path(topic);
     if (path == NULL)
     {
-        return FALSE;
+        return "mqtt_client_upstream.forward.other";
     }
     if (mqtt_path_is_tree(path, "claim"))
-        return mqtt_match_setting(box_settings, "mqtt_client_upstream.forward.claim", filter_id);
+        return "mqtt_client_upstream.forward.claim";
     if (mqtt_path_is_tree(path, "volume"))
-        return mqtt_match_setting(box_settings, "mqtt_client_upstream.forward.volume", filter_id);
+        return "mqtt_client_upstream.forward.volume";
     if (mqtt_path_is_tree(path, "bi-events"))
-        return mqtt_match_setting(box_settings, "mqtt_client_upstream.forward.bi_events", filter_id);
+        return "mqtt_client_upstream.forward.bi_events";
     if (mqtt_path_is_tree(path, "fresh-tonies"))
-        return mqtt_match_setting(box_settings, "mqtt_client_upstream.forward.fresh_tonies", filter_id);
+        return "mqtt_client_upstream.forward.fresh_tonies";
     if (mqtt_path_is_tree(path, "logs"))
-        return mqtt_match_logs(box_settings, payload, payload_len, filter_id);
-    if (mqtt_match_group(box_settings, path, "metrics", metrics_children, metrics_settings, 4,
-                         "mqtt_client_upstream.forward.metrics.other", filter_id))
-        return TRUE;
-    if (mqtt_match_group(box_settings, path, "app-reply", app_reply_children, app_reply_settings, 1,
-                         "mqtt_client_upstream.forward.app_reply.other", filter_id))
-        return TRUE;
-    if (mqtt_match_group(box_settings, path, "settings", settings_children, settings_settings, 3,
-                         "mqtt_client_upstream.forward.settings.other", filter_id))
-        return TRUE;
-    if (mqtt_match_group(box_settings, path, "playback", playback_children, playback_settings, 1,
-                         "mqtt_client_upstream.forward.playback.other", filter_id))
-        return TRUE;
-    return mqtt_match_group(box_settings, path, "app-control", app_control_children,
-                            app_control_settings, 6,
-                            "mqtt_client_upstream.forward.app_control.other", filter_id);
+        return mqtt_classify_logs(payload, payload_len);
+    if (mqtt_path_is_tree(path, "setup"))
+        return "mqtt_client_upstream.forward.setup";
+
+    const char *setting = mqtt_classify_group(path, "metrics", metrics_children, metrics_settings, 4,
+                                               "mqtt_client_upstream.forward.metrics.other");
+    if (setting != NULL)
+        return setting;
+    setting = mqtt_classify_group(path, "app-reply", app_reply_children, app_reply_settings, 1,
+                                   "mqtt_client_upstream.forward.app_reply.other");
+    if (setting != NULL)
+        return setting;
+    setting = mqtt_classify_group(path, "settings", settings_children, settings_settings, 3,
+                                   "mqtt_client_upstream.forward.settings.other");
+    if (setting != NULL)
+        return setting;
+    setting = mqtt_classify_group(path, "playback", playback_children, playback_settings, 1,
+                                   "mqtt_client_upstream.forward.playback.other");
+    if (setting != NULL)
+        return setting;
+    setting = mqtt_classify_group(path, "app-control", app_control_children, app_control_settings, 6,
+                                   "mqtt_client_upstream.forward.app_control.other");
+    return setting != NULL ? setting : "mqtt_client_upstream.forward.other";
+}
+
+mqtt_forward_filter_result_t mqtt_forward_filter_evaluate(
+    settings_t *box_settings, mqtt_forward_route_t route, const char *topic,
+    const uint8_t *payload, size_t payload_len)
+{
+    mqtt_forward_filter_result_t result = {
+        .route = route,
+        .action = MQTT_FORWARD_ACTION_LOCAL,
+        .setting_id = NULL,
+        .reason = MQTT_FORWARD_REASON_LOCAL,
+    };
+    if (route == MQTT_FORWARD_ROUTE_LOCAL_TO_BOX)
+        return result;
+
+    // Keep the matched rule visible even when the global manual master bypasses it.
+    result.setting_id = mqtt_classify_publish(topic, payload, payload_len);
+    if (!settings_get_bool("mqtt_client_upstream.filters_enabled"))
+    {
+        result.action = MQTT_FORWARD_ACTION_FORWARD;
+        result.reason = MQTT_FORWARD_REASON_MASTER_BYPASS;
+        return result;
+    }
+
+    bool_t allowed = mqtt_filter_effective(box_settings, result.setting_id);
+    result.action = allowed ? MQTT_FORWARD_ACTION_FORWARD : MQTT_FORWARD_ACTION_BLOCK;
+    result.reason = allowed ? MQTT_FORWARD_REASON_RULE_ALLOWED : MQTT_FORWARD_REASON_RULE_BLOCKED;
+    return result;
+}
+
+const char *mqtt_forward_route_name(mqtt_forward_route_t route)
+{
+    switch (route)
+    {
+    case MQTT_FORWARD_ROUTE_BOX_TO_TONIES:
+        return "box_to_tonies";
+    case MQTT_FORWARD_ROUTE_TONIES_TO_BOX:
+        return "tonies_to_box";
+    case MQTT_FORWARD_ROUTE_LOCAL_TO_BOX:
+        return "local_to_box";
+    default:
+        return "unknown";
+    }
+}
+
+const char *mqtt_forward_reason_name(mqtt_forward_reason_t reason)
+{
+    switch (reason)
+    {
+    case MQTT_FORWARD_REASON_RULE_ALLOWED:
+        return "rule_allowed";
+    case MQTT_FORWARD_REASON_RULE_BLOCKED:
+        return "rule_blocked";
+    case MQTT_FORWARD_REASON_MASTER_BYPASS:
+        return "master_bypass";
+    case MQTT_FORWARD_REASON_LOCAL:
+        return "local";
+    case MQTT_FORWARD_REASON_NOT_EVALUATED_LOCAL_CONSUME:
+        return "not_evaluated_local_consume";
+    case MQTT_FORWARD_REASON_NOT_EVALUATED_AUTOMATIC_BLOCK:
+        return "not_evaluated_automatic_block";
+    default:
+        return "unknown";
+    }
 }

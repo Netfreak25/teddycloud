@@ -47,7 +47,7 @@ packet-aware TB2 ICI upstream MITM:
 | `mqtt_client_upstream.hostname` | `ici.tonie.cloud` | Tonies ICI upstream hostname. |
 | `mqtt_client_upstream.capture_dir` | `data/diagnostics/tb2-mqtt-passthrough` | Local session capture directory. |
 | `mqtt_client_upstream.capture_max_mib` | `4096` | Maximum total size of completed captures. |
-| `mqtt_client_upstream.forward.*` | `true` | Forwards the selected topic class in both directions. `false` suppresses it locally. |
+| `mqtt_client_upstream.forward.*` | `true`, except `forward.other=false` | Permits the selected PUBLISH class across the Internet boundary in both directions. `false` suppresses only its relay copy, not local processing. |
 
 The former `mqtt_client_upstream.passthrough_enabled` option is internal,
 load-only migration input. Upgrades enable the unified mode only when both old
@@ -78,15 +78,31 @@ disabled forwarding option are sent byte-for-byte unchanged. The box's original
 CONNECT data, including any ICI credential it carries, is therefore still
 forwarded without reconstruction.
 
-Every `mqtt_client_upstream.forward.*` option defaults to `true`. Setting one to
-`false` suppresses its matching `PUBLISH` in both directions. The available
-classes are `claim`, `volume`, `bi_events`, `fresh_tonies`, individual log
-sources plus `logs.other`, and the listed children plus `other` for `metrics`,
+Manual MQTT filters control only PUBLISH traffic across the TONIES Internet
+boundary, in both directions; they do not switch off local status processing or
+locally generated delivery to the box. The decision API explicitly distinguishes
+`box_to_tonies`, `tonies_to_box`, and `local_to_box`. Packet origin comes from the
+connection or the local sender, never from a payload or topic claiming to be
+local. Existing permissions for locally generated settings and controls still
+apply before sending; an Internet-filter exemption does not grant control access.
+
+All `mqtt_client_upstream.forward.*` options default to `true`, except the
+top-level `mqtt_client_upstream.forward.other`, which defaults to `false`.
+Setting a rule to `false` suppresses only its matching Internet-boundary copy.
+The available classes are `claim`, `volume`, `bi_events`, `fresh_tonies`, `setup`,
+individual log sources plus `logs.other`, and the listed children plus `other` for `metrics`,
 `app_reply`, `settings`, `playback`, and `app_control`. Matching is performed on
 `toniebox/<id>/...` topic segments. Log `source` values are read exactly and
 case-sensitively from valid JSON; missing, invalid, or unlisted sources use
-`logs.other`. An `other` option applies only to the group root and children that
-have no dedicated option.
+`logs.other`. A group's `other` option applies only to that group root and
+children with no dedicated option. `forward.setup` covers `setup` and its
+descendants, including the locally observed `setup/status`; its default is
+`true`. The top-level `forward.other` covers otherwise unclassified PUBLISH
+topics, including topics outside `toniebox/<id>/...`. It does not override a
+recognized group's rule. Existing installations without the new keys use these
+defaults: setup remains allowed, previously unclassified PUBLISH traffic is
+suppressed until explicitly allowed. Both new rules support normal box overrides
+and appear through the existing API-driven WebUI filter section.
 
 All forwarding options are overlay-capable. An explicit box value wins;
 otherwise the current global value is read for every packet, so a global change
@@ -112,6 +128,12 @@ shows the switch in the global MQTT filter section and an inactive notice in
 both global and box filter views. Individual rules remain editable while the
 master is off. This switch does not bypass automatic NoCloud/`teddycloud_`
 protection, local status processing or local response correlation.
+
+The evaluator returns the selected route, action (`forward`, `block`, or
+`local`), setting ID when a rule was selected, and a reason. A master bypass is
+reported separately from an allowed rule. A locally consumed reply or automatic
+NoCloud rejection is recorded as a manual decision that was not evaluated; it is
+not mislabeled as a manual-filter block.
 
 After local observation and response correlation, the proxy applies an
 automatic selective NoCloud policy before the manual forwarding switches. It
@@ -152,6 +174,10 @@ PUBLISH flags, topic, QoS and packet ID. An empty result is suppressed. Invalid
 JSON, allocation failure or rebuild failure on these structured topics is also
 suppressed without closing the MQTT session. The original QoS 1/2 publish is
 then completed using the same local acknowledgement state as a manual filter.
+When response correlation and NoCloud protection both rewrite a publish, the
+final payload after both stages is used for the wire packet, capture and stored
+local-response replay. The earlier observer payload must not replace a later
+automatic privacy rewrite.
 
 Suppressed QoS 0 publishes are dropped. For QoS 1 the proxy returns `PUBACK` to
 the sender. For QoS 2 it keeps independent packet-ID state per direction,
@@ -190,6 +216,16 @@ and captured only; TeddyCloud never executes them. For QoS 1 and QoS 2, the
 proxy remembers a bounded set of local consume/rewrite decisions. A duplicate
 PUBLISH therefore reuses the original decision before correlation runs again
 and cannot leak to TONIES after the first packet cleared the pending action.
+
+The Internet-filter boundary does not yet make the box session independent of
+TONIES. Upstream failures can still close that session, and proxy-mode
+`settings/request` handling and settings ownership retain their existing
+behavior. CONNECT/CONNACK, subscriptions, keepalive and ACK packets are not
+manual PUBLISH-filter categories. Required ACKs for locally suppressed packets
+and existing local freshness ACK consumption are unchanged. No new application
+responses are fabricated for unknown topics. Native originalcache routing,
+private content, source assignment and general freshness behavior are outside
+this filter-boundary change.
 
 At global log level `5`, connection diagnostics use the filter prefix
 `TB2 MQTT upstream`; packet decisions use `TB2 MQTT proxy`. They report the DNS,
@@ -243,7 +279,16 @@ I/O timeout of 500 ms continues to apply.
 
 The capture is packet-based and records `packet_type`, optional `topic`,
 `forwarded`, optional `filter_id`, `generated`, and `packet_complete`.
-`data_base64` always contains the packet actually received from that direction.
+PUBLISH decisions additionally record `publish_route`, `manual_filter_decision`,
+and `manual_filter_id` when a manual rule was selected. A route identifies the
+actual ingress or local sender; it is not inferred from `generated`, which also
+marks rebuilt received packets. The legacy `direction` field remains compatible,
+so a local publish can have `direction=upstream_to_box` together with
+`publish_route=local_to_box`. Locally consumed replies and automatic blocks report
+why the manual filter was not evaluated. Protocol-only ACK/control captures do
+not claim a manual PUBLISH-filter decision.
+For a received packet, `data_base64` always contains its original bytes; for a
+locally generated packet, it contains the locally produced bytes.
 If packet-ID collision handling or a partially local `settings/confirm` changes
 the bytes sent on the wire, the entry also contains `wire_data_base64`, the
 original and effective packet IDs when applicable, and an `action`. Local
@@ -883,7 +928,7 @@ as `BatteryPercent`, `BatteryRaw`, `BatteryCurrent`, `BatteryStatus`,
 | `src/mqtt_server.c` | Owns the TCP/TLS listener, packet parsing, subscription tracking, topic handlers and box publishes. |
 | `include/mqtt_nocloud_filter.h` | Declares the per-publish noCloud allow/block/rewrite decision and its rewritten payload ownership. |
 | `src/mqtt_nocloud_filter.c` | Performs lightweight per-packet content-policy lookups and selective claim, playback, metrics, BI-event, log and freshness filtering. |
-| `src/tb2_mqtt_passthrough.c` | Applies the automatic noCloud decision after manual filters, rebuilds partial PUBLISH packets, preserves QoS/packet-ID translation and records capture/status counters. |
+| `src/tb2_mqtt_passthrough.c` | Observes PUBLISH packets locally, then applies automatic NoCloud protection before explicit manual Internet-filter decisions; rebuilds the final payload, preserves QoS/packet-ID translation and records capture/status counters. |
 | `src/mqtt.c` | Exposes the new TB2 runtime box events through the existing Home Assistant discovery/event path. |
 | `include/home_assistant.h` | Raises the entity budget for the additional TB2 runtime event sensors. |
 | `src/handler_api.c` | Exposes runtime state through `getBoxes`, implements the validated box-control HTTP endpoints and marks TB2 settings changes as pending for ICI delivery. |

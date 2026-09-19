@@ -85,6 +85,7 @@ typedef struct tb2_mqtt_local_response_entry
     uint8_t *payload;
     size_t payload_len;
     const char *filter_id;
+    mqtt_forward_filter_result_t manual_decision;
     bool_t completed;
     struct tb2_mqtt_local_response_entry *next;
 } tb2_mqtt_local_response_entry_t;
@@ -543,7 +544,8 @@ static error_t tb2_mqtt_capture_packet_ex(tb2_mqtt_capture_t *capture,
                                            bool_t generated, bool_t packet_complete,
                                            const char *action, uint16_t packet_id,
                                            uint16_t wire_packet_id,
-                                           size_t removed_count)
+                                           size_t removed_count,
+                                           const mqtt_forward_filter_result_t *manual_decision)
 {
     char *encoded = tb2_mqtt_base64_data(data, length);
     if (encoded == NULL)
@@ -590,6 +592,18 @@ static error_t tb2_mqtt_capture_packet_ex(tb2_mqtt_capture_t *capture,
     }
     cJSON_AddBoolToObject(entry, "generated", generated);
     cJSON_AddBoolToObject(entry, "packet_complete", packet_complete);
+    if (packet_type == TB2_MQTT_PACKET_PUBLISH && manual_decision != NULL)
+    {
+        // Rewritten incoming packets can also be generated. Only the actual
+        // ingress/local sender determines the route, never that legacy flag.
+        cJSON_AddStringToObject(entry, "publish_route",
+                               mqtt_forward_route_name(manual_decision->route));
+        cJSON_AddStringToObject(entry, "manual_filter_decision",
+                               mqtt_forward_reason_name(manual_decision->reason));
+        if (manual_decision->setting_id != NULL)
+            cJSON_AddStringToObject(entry, "manual_filter_id",
+                                   manual_decision->setting_id);
+    }
     if (action != NULL)
     {
         cJSON_AddStringToObject(entry, "action", action);
@@ -640,7 +654,7 @@ static error_t tb2_mqtt_capture_packet(tb2_mqtt_capture_t *capture,
 {
     return tb2_mqtt_capture_packet_ex(capture, direction, data, length, NULL, 0,
                                       packet_type, topic, forwarded, filter_id,
-                                      generated, packet_complete, NULL, 0, 0, 0);
+                                      generated, packet_complete, NULL, 0, 0, 0, NULL);
 }
 
 static error_t tb2_mqtt_capture_finish(tb2_mqtt_capture_t *capture, settings_t *settings,
@@ -997,7 +1011,8 @@ static error_t tb2_mqtt_record_packet_ex(tb2_mqtt_passthrough_session_t *session
                                          const char *action, uint16_t packet_id,
                                          uint16_t wire_packet_id,
                                          bool_t count_blocked, bool_t rewritten,
-                                         size_t removed_count)
+                                         size_t removed_count,
+                                         const mqtt_forward_filter_result_t *manual_decision)
 {
     const char *direction = box_to_upstream ? "box_to_upstream" : "upstream_to_box";
     error_t error = tb2_mqtt_capture_packet_ex(&session->capture, direction,
@@ -1005,7 +1020,7 @@ static error_t tb2_mqtt_record_packet_ex(tb2_mqtt_passthrough_session_t *session
                                                packet_type, topic, forwarded, filter_id,
                                                generated, packet_complete, action,
                                                packet_id, wire_packet_id,
-                                               removed_count);
+                                               removed_count, manual_decision);
     if (error)
     {
         tb2_mqtt_trace_error("capture_write", error);
@@ -1061,7 +1076,7 @@ static error_t tb2_mqtt_record_packet(tb2_mqtt_passthrough_session_t *session,
     return tb2_mqtt_record_packet_ex(session, box_to_upstream, data, length,
                                      NULL, 0, packet_type, topic, forwarded,
                                       filter_id, generated, packet_complete, NULL,
-                                      0, 0, !forwarded, FALSE, 0);
+                                      0, 0, !forwarded, FALSE, 0, NULL);
 }
 
 static error_t tb2_mqtt_stream_append(tb2_mqtt_stream_t *stream, const uint8_t *data,
@@ -1274,7 +1289,8 @@ static error_t tb2_mqtt_local_response_make_room(
 static error_t tb2_mqtt_local_response_store(
     tb2_mqtt_passthrough_session_t *session, uint16_t packet_id, uint8_t qos,
     tb2_mqtt_local_response_action_t action, const uint8_t *payload,
-    size_t payload_len, const char *filter_id)
+    size_t payload_len, const char *filter_id,
+    const mqtt_forward_filter_result_t *manual_decision)
 {
     if (packet_id == 0 || (qos != 1 && qos != 2) ||
         (action == TB2_MQTT_LOCAL_RESPONSE_REWRITE && payload == NULL))
@@ -1313,6 +1329,7 @@ static error_t tb2_mqtt_local_response_store(
     entry->action = action;
     entry->payload_len = payload_len;
     entry->filter_id = filter_id;
+    entry->manual_decision = *manual_decision;
     entry->next = session->local_responses;
     session->local_responses = entry;
     session->local_response_count++;
@@ -1453,7 +1470,7 @@ static error_t tb2_mqtt_send_generated_ack(tb2_mqtt_passthrough_session_t *sessi
     return tb2_mqtt_record_packet_ex(
         session, ack_box_to_upstream, packet, sizeof(packet), NULL, 0,
         type, NULL, TRUE, NULL, TRUE, TRUE, capture_action,
-        packet_id, packet_id, FALSE, FALSE, 0);
+        packet_id, packet_id, FALSE, FALSE, 0, NULL);
 }
 
 static error_t tb2_mqtt_parse_publish(const uint8_t *packet, size_t packet_size,
@@ -1587,7 +1604,8 @@ static error_t tb2_mqtt_replay_local_response(
             TB2_MQTT_PACKET_PUBLISH, topic, FALSE, entry->filter_id, FALSE,
             TRUE, count_blocked ? "local_response_replay_block" :
                                   "local_response_replay_consume",
-            entry->packet_id, entry->packet_id, count_blocked, FALSE, 0);
+            entry->packet_id, entry->packet_id, count_blocked, FALSE, 0,
+            &entry->manual_decision);
         if (!error)
         {
             error = tb2_mqtt_send_generated_ack(
@@ -1618,7 +1636,7 @@ static error_t tb2_mqtt_replay_local_response(
             session, TRUE, packet, packet_size, rebuilt, rebuilt_size,
             TB2_MQTT_PACKET_PUBLISH, topic, TRUE, entry->filter_id, TRUE,
             TRUE, "local_response_replay_rewrite", entry->packet_id,
-            entry->packet_id, FALSE, TRUE, 0);
+            entry->packet_id, FALSE, TRUE, 0, &entry->manual_decision);
     }
     osFreeMem(rebuilt);
     return error;
@@ -1659,7 +1677,7 @@ static error_t tb2_mqtt_process_mapped_control(
         error_t error = tb2_mqtt_record_packet_ex(
             session, TRUE, packet, packet_size, NULL, 0, type, NULL, FALSE,
             NULL, FALSE, TRUE, "local_freshness_puback", packet_id,
-            packet_id, FALSE, FALSE, 0);
+            packet_id, FALSE, FALSE, 0, NULL);
         if (!error)
         {
             tb2_mqtt_packet_id_remove(session, entry);
@@ -1692,7 +1710,7 @@ static error_t tb2_mqtt_process_mapped_control(
             session, box_to_upstream, packet, packet_size, rewritten,
             packet_size, type, NULL, TRUE, NULL, FALSE, TRUE,
             entry->wire_id == entry->original_id ? NULL : "packet_id_remap",
-            entry->original_id, entry->wire_id, FALSE, FALSE, 0);
+            entry->original_id, entry->wire_id, FALSE, FALSE, 0, NULL);
     }
     osFreeMem(rewritten);
     if (!error && (type == TB2_MQTT_PACKET_PUBACK ||
@@ -1724,7 +1742,7 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
                 type, NULL, FALSE, qos2_entry->filter_id, FALSE, TRUE,
                 qos2_entry->capture_action != NULL ?
                     qos2_entry->capture_action : "qos2_blocked_publish",
-                packet_id, packet_id, qos2_entry->count_blocked, FALSE, 0);
+                packet_id, packet_id, qos2_entry->count_blocked, FALSE, 0, NULL);
             if (!error)
             {
                 error = tb2_mqtt_send_generated_ack(
@@ -1887,14 +1905,24 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
     size_t filtered_payload_len =
         nocloud_result.action == MQTT_NOCLOUD_REWRITE ?
             nocloud_result.payload_len : effective_payload_len;
+    mqtt_forward_filter_result_t manual_decision = {
+        .route = box_to_upstream ? MQTT_FORWARD_ROUTE_BOX_TO_TONIES :
+                                  MQTT_FORWARD_ROUTE_TONIES_TO_BOX,
+        .action = MQTT_FORWARD_ACTION_BLOCK,
+        .setting_id = NULL,
+        .reason = local_consume ? MQTT_FORWARD_REASON_NOT_EVALUATED_LOCAL_CONSUME :
+                                 MQTT_FORWARD_REASON_NOT_EVALUATED_AUTOMATIC_BLOCK,
+    };
+    if (nocloud_result.action == MQTT_NOCLOUD_REWRITE)
+        filter_id = nocloud_result.filter_id;
     if (!blocked)
     {
-        const char *manual_filter_id = NULL;
-        blocked = mqtt_forward_filter_should_block(
-            session->box_settings, topic, filtered_payload,
-            filtered_payload_len, &manual_filter_id);
+        manual_decision = mqtt_forward_filter_evaluate(
+            session->box_settings, manual_decision.route, topic,
+            filtered_payload, filtered_payload_len);
+        blocked = manual_decision.action == MQTT_FORWARD_ACTION_BLOCK;
         if (blocked)
-            filter_id = manual_filter_id;
+            filter_id = manual_decision.setting_id;
     }
 
     if (box_to_upstream && qos > 0 && (local_consume || local_rewrite))
@@ -1905,7 +1933,8 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
                        TB2_MQTT_LOCAL_RESPONSE_REWRITE);
         error = tb2_mqtt_local_response_store(
             session, packet_id, qos, response_action,
-            observer_result.payload, observer_result.payload_len, filter_id);
+            filtered_payload, filtered_payload_len, filter_id,
+            &manual_decision);
         if (error)
         {
             TRACE_ERROR("TB2 MQTT proxy local response state rejected"
@@ -1916,7 +1945,7 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
                 session, TRUE, packet, packet_size, NULL, 0, type, topic,
                 FALSE, filter_id, FALSE, TRUE,
                 "local_response_state_limit", packet_id, packet_id, FALSE,
-                FALSE, 0);
+                FALSE, 0, &manual_decision);
             osFreeMem(observer_result.payload);
             mqtt_nocloud_filter_result_free(&nocloud_result);
             osFreeMem(topic);
@@ -1924,29 +1953,24 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
         }
     }
 
-    uint8_t *observer_packet = NULL;
-    uint8_t *nocloud_packet = NULL;
+    uint8_t *rebuilt_packet = NULL;
     size_t forwarded_packet_size = packet_size;
     size_t forwarded_packet_id_offset = packet_id_offset;
     const uint8_t *forwarded_packet = packet;
-    if (!blocked && local_rewrite)
-    {
-        error = tb2_mqtt_rebuild_publish(
-            packet, packet_size, fixed_header_size, payload,
-            observer_result.payload, observer_result.payload_len,
-            packet_id_offset, &observer_packet, &forwarded_packet_size,
-            &forwarded_packet_id_offset);
-        if (!error)
-            forwarded_packet = observer_packet;
-    }
-    else if (!blocked && nocloud_result.action == MQTT_NOCLOUD_REWRITE)
+    // The last sanitation stage is authoritative for the wire packet and the
+    // bounded replay entry above; never restore an earlier observer payload.
+    if (!blocked && (local_rewrite ||
+                     nocloud_result.action == MQTT_NOCLOUD_REWRITE))
     {
         error_t rebuild_error = tb2_mqtt_rebuild_publish(
             packet, packet_size, fixed_header_size, payload,
-            (const uint8_t *)nocloud_result.payload,
-            nocloud_result.payload_len, packet_id_offset, &nocloud_packet,
+            filtered_payload, filtered_payload_len, packet_id_offset, &rebuilt_packet,
             &forwarded_packet_size, &forwarded_packet_id_offset);
-        if (rebuild_error)
+        if (rebuild_error && local_rewrite)
+        {
+            error = rebuild_error;
+        }
+        else if (rebuild_error)
         {
             TRACE_WARNING("TB2 MQTT proxy direction=%s topic='%s' action=block"
                           " filter=%s rebuild_error=%s code=%d\r\n",
@@ -1963,8 +1987,7 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
         }
         else
         {
-            forwarded_packet = nocloud_packet;
-            filter_id = nocloud_result.filter_id;
+            forwarded_packet = rebuilt_packet;
         }
     }
 
@@ -1975,11 +1998,14 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
                                "rewrite" : "forward";
     TRACE_DEBUG("TB2 MQTT proxy direction=%s packet_type=PUBLISH topic='%s' qos=%u"
                 " packet_id=%u action=%s filter=%s payload_len=%" PRIuSIZE
-                " removed=%" PRIuSIZE "\r\n",
+                " removed=%" PRIuSIZE " route=%s manual_filter=%s manual_decision=%s\r\n",
                 box_to_upstream ? "box_to_upstream" : "upstream_to_box",
                 topic, (unsigned)qos, (unsigned)packet_id,
                 decision, filter_id != NULL ? filter_id : "-", filtered_payload_len,
-                nocloud_result.removed_count);
+                nocloud_result.removed_count,
+                mqtt_forward_route_name(manual_decision.route),
+                manual_decision.setting_id != NULL ? manual_decision.setting_id : "-",
+                mqtt_forward_reason_name(manual_decision.reason));
 
     uint8_t *wire_packet = NULL;
     tb2_mqtt_packet_id_entry_t *mapping = NULL;
@@ -2016,7 +2042,7 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
             topic, FALSE, observer_result.filter_id, FALSE, TRUE,
             observer_result.capture_action != NULL ?
                 observer_result.capture_action : "local_response_consume",
-            packet_id, packet_id, FALSE, FALSE, 0);
+            packet_id, packet_id, FALSE, FALSE, 0, &manual_decision);
     }
     else if (!error && blocked && nocloud_result.action == MQTT_NOCLOUD_BLOCK)
     {
@@ -2031,7 +2057,7 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
             session, box_to_upstream, packet, packet_size, NULL, 0, type,
             topic, FALSE, filter_id, FALSE, TRUE, capture_action,
             packet_id, packet_id, TRUE, FALSE,
-            nocloud_result.removed_count);
+            nocloud_result.removed_count, &manual_decision);
     }
     else if (!error && !blocked && local_rewrite)
     {
@@ -2040,11 +2066,11 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
         error = tb2_mqtt_record_packet_ex(
             session, box_to_upstream, packet, packet_size, actual_wire,
             forwarded_packet_size, type, topic, TRUE,
-            observer_result.filter_id, TRUE, TRUE,
+            filter_id, TRUE, TRUE,
             observer_result.capture_action != NULL ?
                 observer_result.capture_action : "local_response_rewrite",
             packet_id, mapping != NULL ? mapping->wire_id : packet_id,
-            FALSE, TRUE, 0);
+            FALSE, TRUE, nocloud_result.removed_count, &manual_decision);
     }
     else if (!error && !blocked &&
              nocloud_result.action == MQTT_NOCLOUD_REWRITE)
@@ -2058,7 +2084,7 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
                 "local_status_nocloud_rewrite" : "nocloud_rewrite",
             packet_id,
             mapping != NULL ? mapping->wire_id : packet_id, FALSE, TRUE,
-            nocloud_result.removed_count);
+            nocloud_result.removed_count, &manual_decision);
     }
     else if (!error && wire_packet != NULL)
     {
@@ -2066,7 +2092,7 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
             session, box_to_upstream, packet, packet_size, wire_packet,
             packet_size, type, topic, TRUE, NULL, FALSE, TRUE,
             "packet_id_remap", mapping->original_id, mapping->wire_id, FALSE,
-            FALSE, 0);
+            FALSE, 0, &manual_decision);
     }
     else if (!error && observer_result.locally_processed)
     {
@@ -2074,16 +2100,17 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
             session, box_to_upstream, packet, packet_size, NULL, 0, type,
             topic, !blocked, filter_id, FALSE, TRUE,
             blocked ? "local_status_manual_block" : "local_status_forward",
-            packet_id, packet_id, blocked, FALSE, 0);
+            packet_id, packet_id, blocked, FALSE, 0, &manual_decision);
     }
     else if (!error)
     {
-        error = tb2_mqtt_record_packet(session, box_to_upstream, packet, packet_size,
-                                       type, topic, !blocked, filter_id, FALSE, TRUE);
+        error = tb2_mqtt_record_packet_ex(
+            session, box_to_upstream, packet, packet_size, NULL, 0,
+            type, topic, !blocked, filter_id, FALSE, TRUE, NULL,
+            packet_id, packet_id, blocked, FALSE, 0, &manual_decision);
     }
     osFreeMem(wire_packet);
-    osFreeMem(observer_packet);
-    osFreeMem(nocloud_packet);
+    osFreeMem(rebuilt_packet);
     osFreeMem(observer_result.payload);
     mqtt_nocloud_filter_result_free(&nocloud_result);
     if (!error && blocked && qos == 1)
@@ -2368,7 +2395,10 @@ error_t tb2_mqtt_passthrough_write_local_publish(
             return ERROR_INVALID_PARAMETER;
     }
 
+    const mqtt_forward_filter_result_t manual_decision = mqtt_forward_filter_evaluate(
+        session->box_settings, MQTT_FORWARD_ROUTE_LOCAL_TO_BOX, topic, NULL, 0);
     TRACE_DEBUG("TB2 MQTT proxy generated=PUBLISH direction=upstream_to_box"
+                " route=local_to_box manual_decision=local"
                 " topic='%s' qos=%u packet_id=%u action=%s bytes=%" PRIuSIZE "\r\n",
                 topic, (unsigned)qos, (unsigned)packet_id,
                 capture_action != NULL ? capture_action : "local_publish",
@@ -2377,7 +2407,7 @@ error_t tb2_mqtt_passthrough_write_local_publish(
         session, FALSE, packet, packet_size, NULL, 0,
         TB2_MQTT_PACKET_PUBLISH, topic, TRUE, NULL, TRUE, TRUE,
         capture_action != NULL ? capture_action : "local_publish",
-        packet_id, packet_id, FALSE, FALSE, 0);
+        packet_id, packet_id, FALSE, FALSE, 0, &manual_decision);
 }
 
 void tb2_mqtt_passthrough_close(tb2_mqtt_passthrough_session_t *session,

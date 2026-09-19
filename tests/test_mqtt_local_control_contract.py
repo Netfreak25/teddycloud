@@ -92,6 +92,9 @@ class MqttLocalControlContractTests(unittest.TestCase):
         ]
         self.assertIn("session, FALSE, packet, packet_size", writer)
         self.assertNotIn("session->upstream.tlsContext", writer)
+        self.assertIn("MQTT_FORWARD_ROUTE_LOCAL_TO_BOX", writer)
+        self.assertIn("mqtt_forward_filter_evaluate", writer)
+        self.assertNotIn("mqtt_nocloud_filter_publish", writer)
 
     def test_cloud_to_box_commands_remain_transparent(self):
         observer = self.server[
