@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import json
+import re
 import unittest
 
 
@@ -10,6 +11,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class MqttLocalControlContractTests(unittest.TestCase):
+    def proxy_function(self, name):
+        match = re.search(r"^(?:static )?[\w *]+\b" + re.escape(name) +
+                          r"\([^;]*?\n\{[\s\S]*?\n\}", self.proxy, re.M)
+        self.assertIsNotNone(match, name)
+        return match.group()
+
     @classmethod
     def setUpClass(cls):
         cls.server = (ROOT / "src/mqtt_server.c").read_text(encoding="utf-8")
@@ -194,9 +201,9 @@ class MqttLocalControlContractTests(unittest.TestCase):
         self.assertNotIn("mqtt_connection_has_exact_sub", self.server)
 
     def test_consumed_qos_is_acked_without_blocked_counter(self):
-        self.assertIn("local_consume ? \"local_response_puback\"", self.proxy)
-        self.assertIn("local_consume ? \"local_response_pubrec\"", self.proxy)
-        self.assertIn("qos2_entry->count_blocked", self.proxy)
+        process = self.proxy_function("tb2_mqtt_process_packet")
+        self.assertIn("if (!error && qos > 0)", process)
+        self.assertIn("qos == 1 ? TB2_MQTT_PACKET_PUBACK : TB2_MQTT_PACKET_PUBREC", process)
         consume_capture = self.proxy[
             self.proxy.index("if (!error && local_consume)") :
             self.proxy.index("else if (!error && blocked", self.proxy.index("if (!error && local_consume)"))
@@ -204,25 +211,23 @@ class MqttLocalControlContractTests(unittest.TestCase):
         self.assertIn("packet_id, packet_id, FALSE, FALSE, 0", consume_capture)
 
     def test_qos_retransmits_replay_the_original_local_decision(self):
-        self.assertIn("TB2_MQTT_LOCAL_RESPONSE_HISTORY_MAX 32U", self.proxy)
-        process = self.proxy[
-            self.proxy.index("static error_t tb2_mqtt_process_packet") :
-            self.proxy.index("static error_t tb2_mqtt_process_stream")
-        ]
-        replay = process.index("tb2_mqtt_replay_local_response")
+        history = (ROOT / "include/mqtt_response_history.h").read_text(encoding="utf-8")
+        self.assertIn("MQTT_RESPONSE_HISTORY_ENTRIES 32U", history)
+        self.assertIn("MQTT_RESPONSE_HISTORY_WINDOW_MS 30000U", history)
+        process = self.proxy_function("tb2_mqtt_process_packet")
+        replay = process.index("mqtt_response_history_find")
         observer = process.index("session->observer(session->observer_context")
         self.assertLess(replay, observer)
-        self.assertIn('"local_response_replay_consume"', self.proxy)
-        self.assertIn('"local_response_replay_rewrite"', self.proxy)
-        self.assertIn('"local_response_replay_block"', self.proxy)
-        self.assertIn('"local_response_replay_puback"', self.proxy)
-        self.assertIn('"local_response_replay_pubrec"', self.proxy)
-        self.assertIn('"local_response_state_limit"', self.proxy)
+        self.assertIn('"local_response_replay"', process)
+        self.assertIn("replay->consume ? TB2_MQTT_OBSERVER_CONSUME : TB2_MQTT_OBSERVER_REWRITE", process)
+        self.assertIn("mqtt_response_history_remember", process)
+        self.assertLess(replay, process.index("mqtt_nocloud_filter_publish"))
+        self.assertIn('"local_response_history_full"', process)
         close = self.proxy[
             self.proxy.index("void tb2_mqtt_passthrough_close") :
             self.proxy.index("error_t tb2_mqtt_passthrough_write_status")
         ]
-        self.assertIn("tb2_mqtt_local_responses_free(session);", close)
+        self.assertIn("mqtt_response_history_reset(&session->response_history);", close)
 
     def test_web_save_order_and_tb2_dependency_are_explicit(self):
         enabled = self.web_handler.index("localControl?.value === true")
@@ -235,13 +240,17 @@ class MqttLocalControlContractTests(unittest.TestCase):
                              for item in self.layout["dependencies"]))
 
     def test_settings_import_runs_only_after_final_publish_was_forwarded(self):
-        process = self.proxy[self.proxy.index("static error_t tb2_mqtt_process_packet"):
-                             self.proxy.index("static error_t tb2_mqtt_process_stream")]
-        callback = process.index("session->publish_completed(session->observer_context")
-        self.assertIn("if (!error && !blocked && session->publish_completed != NULL)", process)
-        self.assertGreater(callback, process.rindex("tb2_mqtt_record_packet_ex", 0, callback))
-        self.assertLess(callback, process.index("osFreeMem(observer_result.payload)", callback))
-        self.assertIn("topic, filtered_payload, filtered_payload_len", process[callback:callback+230])
+        writer = self.proxy_function("tb2_mqtt_record_packet_ex")
+        callback = writer.index("tb2_mqtt_notify_publish_completed")
+        self.assertGreater(callback, writer.index("tb2_mqtt_tls_write_all"))
+        self.assertGreater(callback, writer.rindex("osReleaseMutex"))
+        self.assertIn("if (!error && packet_type == TB2_MQTT_PACKET_PUBLISH", writer)
+        self.assertIn("manual_decision->route == MQTT_FORWARD_ROUTE_TONIES_TO_BOX", writer)
+        self.assertIn("session, FALSE, outgoing, outgoing_length", writer[callback:])
+        self.assertIn("wire_data != NULL ? wire_data : data", writer)
+        notifier = self.proxy_function("tb2_mqtt_notify_publish_completed")
+        self.assertIn("tb2_mqtt_parse_publish", notifier)
+        self.assertIn("session->publish_completed", notifier)
 
     def test_settings_ownership_does_not_use_app_control_exception(self):
         sender = self.server[self.server.index("static bool_t mqtt_publish_settings_response"):

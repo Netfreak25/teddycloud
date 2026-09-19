@@ -2,6 +2,7 @@
 """Static architecture contract for the packet-aware TB2 MQTT proxy."""
 
 from pathlib import Path
+import re
 import unittest
 
 
@@ -16,11 +17,14 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         cls.settings = (ROOT / "src/settings.c").read_text(encoding="utf-8")
+        cls.worker = (ROOT / "src/tb2_mqtt_upstream.c").read_text(encoding="utf-8")
 
     def function(self, start, end):
-        return self.passthrough[
-            self.passthrough.index(start) : self.passthrough.index(end)
-        ]
+        # Forward declarations no longer mark a function's body or its end.
+        pattern = re.escape(start.rstrip("(")) + r"\([^;]*?\n\{[\s\S]*?\n\}"
+        match = re.search(pattern, self.passthrough)
+        self.assertIsNotNone(match, start)
+        return match.group()
 
     def test_proxy_is_selected_before_legacy_packet_parser(self):
         start = self.server.index("tb2_mqtt_passthrough_start")
@@ -58,7 +62,7 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
 
     def test_every_packet_is_captured_before_any_write(self):
         recorder = self.function(
-            "static error_t tb2_mqtt_record_packet",
+            "static error_t tb2_mqtt_record_packet_ex",
             "static error_t tb2_mqtt_stream_append",
         )
         self.assertLess(
@@ -88,22 +92,16 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
             "static error_t tb2_mqtt_process_packet",
             "static error_t tb2_mqtt_process_stream",
         )
-        self.assertIn("blocked && qos == 1", processor)
-        self.assertIn("box_to_upstream, 4U, packet_id", processor)
-        self.assertIn("blocked && qos == 2", processor)
+        self.assertIn("if (!error && qos > 0)", processor)
+        self.assertIn("qos == 1 ? TB2_MQTT_PACKET_PUBACK : TB2_MQTT_PACKET_PUBREC", processor)
         self.assertIn("tb2_mqtt_qos2_begin", processor)
-        self.assertIn("box_to_upstream, 5U, packet_id", processor)
-        self.assertIn("tb2_mqtt_qos2_complete", processor)
-        self.assertIn("TB2_MQTT_PACKET_PUBCOMP", processor)
+        controls = self.function("static error_t tb2_mqtt_process_mapped_control", "")
+        self.assertIn("TB2_MQTT_PACKET_PUBCOMP", controls)
 
     def test_qos_two_duplicate_pubrel_remains_idempotent(self):
-        state = self.function(
-            "static tb2_mqtt_qos2_entry_t *tb2_mqtt_qos2_find",
-            "static void tb2_mqtt_qos2_remove",
-        )
-        self.assertIn("existing->completed = FALSE", state)
-        self.assertIn("entry->completed = TRUE", state)
-        self.assertNotIn("osFreeMem", state)
+        state = self.function("static error_t tb2_mqtt_process_mapped_control", "")
+        self.assertIn("if (entry != NULL) tb2_mqtt_qos2_remove", state)
+        self.assertIn("TB2_MQTT_PACKET_PUBCOMP", state)
         self.assertIn("blocked_qos2_box", self.passthrough)
         self.assertIn("blocked_qos2_upstream", self.passthrough)
 
@@ -112,22 +110,16 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
             "static error_t tb2_mqtt_process_packet",
             "static error_t tb2_mqtt_process_stream",
         )
-        self.assertIn("if (!duplicate && qos == 2)", processor)
-        self.assertIn("tb2_mqtt_qos2_remove(list, stale);", processor)
+        self.assertIn("tb2_mqtt_qos2_find(*list, packet_id)", processor)
+        self.assertIn("tb2_mqtt_qos2_begin(list, packet_id", processor)
+        controls = self.function("static error_t tb2_mqtt_process_mapped_control", "")
+        self.assertIn("tb2_mqtt_qos2_remove(list, entry)", controls)
 
-    def test_unknown_pubrel_is_forwarded_unchanged(self):
-        processor = self.function(
-            "static error_t tb2_mqtt_process_packet",
-            "static error_t tb2_mqtt_process_stream",
-        )
-        complete = processor.index("tb2_mqtt_qos2_complete")
-        ordinary = processor.index("if (type != TB2_MQTT_PACKET_PUBLISH)")
-        self.assertLess(complete, ordinary)
-        ordinary_flow = " ".join(processor[ordinary:].split())
-        self.assertIn(
-            "packet_size, type, NULL, TRUE, NULL, FALSE, TRUE",
-            ordinary_flow,
-        )
+    def test_pubrel_is_completed_on_its_own_session(self):
+        controls = self.function("static error_t tb2_mqtt_process_mapped_control", "")
+        self.assertIn("TB2_MQTT_PACKET_PUBCOMP, id", controls)
+        self.assertIn('"local_protocol_ack"', controls)
+        self.assertNotIn("tb2_mqtt_rewrite_packet_id", controls)
 
     def test_capture_and_status_expose_packet_decisions(self):
         for field in (
@@ -210,13 +202,13 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
             "static error_t tb2_mqtt_process_packet",
             "static error_t tb2_mqtt_process_stream",
         )
-        storage_start = processor.index("error = tb2_mqtt_local_response_store(")
-        storage_end = processor.index("if (error)", storage_start)
-        storage = processor[storage_start:storage_end]
-        self.assertIn("filtered_payload", storage)
-        self.assertIn("filtered_payload_len", storage)
-        self.assertNotIn("observer_result.payload", storage)
-        rebuild_start = processor.index("tb2_mqtt_rebuild_publish(", storage_end)
+        # Store the local observer decision, then reapply current privacy/manual
+        # policy on a duplicate; never replay an already authorized cloud copy.
+        replay = processor.index("mqtt_response_history_find")
+        automatic = processor.index("mqtt_nocloud_filter_publish")
+        self.assertLess(replay, automatic)
+        self.assertIn("mqtt_response_history_remember", processor)
+        rebuild_start = processor.index("tb2_mqtt_rebuild_publish(", automatic)
         rebuild_end = processor.index(")", rebuild_start)
         rebuild = processor[rebuild_start:rebuild_end]
         self.assertIn("filtered_payload", rebuild)
@@ -254,42 +246,37 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
             "static error_t tb2_mqtt_process_stream",
         )
         self.assertIn("forwarded_packet_id_offset", processor)
-        self.assertIn("mapping->wire_id, &wire_packet", processor)
+        self.assertIn("destination_id, &wire_packet", processor)
         self.assertIn('"nocloud_rewrite"', processor)
         self.assertIn('"nocloud_block"', processor)
         self.assertIn("MQTT_NOCLOUD_BLOCK", processor)
         self.assertIn("MQTT_NOCLOUD_REWRITE", processor)
 
-    def test_proxy_observes_subscriptions_without_generating_acks(self):
+    def test_local_subscriptions_generate_acks_before_cloud_sync(self):
         processor = self.function(
-            "static error_t tb2_mqtt_process_packet",
-            "static error_t tb2_mqtt_process_stream",
+            "static error_t tb2_mqtt_local_control", "",
         )
-        self.assertIn("TB2_MQTT_PACKET_SUBSCRIBE", processor)
-        self.assertIn("TB2_MQTT_PACKET_UNSUBSCRIBE", processor)
+        self.assertIn("session->subscription_apply", processor)
         self.assertIn("TB2_MQTT_CONTROL_SUBSCRIBE", processor)
         self.assertIn("TB2_MQTT_CONTROL_UNSUBSCRIBE", processor)
-        self.assertNotIn("TB2_MQTT_PACKET_SUBACK", processor)
-        self.assertNotIn("TB2_MQTT_PACKET_UNSUBACK", processor)
+        self.assertIn('"local_suback" : "local_unsuback"', processor)
+        self.assertIn("session->subscriptions_dirty = TRUE", processor)
 
     def test_local_freshness_puback_is_consumed_without_blocked_count(self):
         controls = self.function(
             "static error_t tb2_mqtt_process_mapped_control",
             "static error_t tb2_mqtt_process_packet",
         )
-        self.assertIn("if (entry->local)", controls)
-        self.assertIn("if (type != TB2_MQTT_PACKET_PUBACK)", controls)
-        self.assertIn('"local_freshness_puback"', controls)
+        self.assertIn("local_ack = box_to_upstream && entry->local", controls)
         self.assertIn("TB2_MQTT_CONTROL_LOCAL_PUBACK", controls)
-        self.assertIn("packet_id, FALSE", controls)
+        self.assertIn("id, id, FALSE, FALSE, 0, NULL", controls)
 
     def test_cloud_packet_ids_are_remapped_around_local_ids(self):
         processor = self.function(
             "static error_t tb2_mqtt_process_packet",
             "static error_t tb2_mqtt_process_stream",
         )
-        self.assertIn("tb2_mqtt_packet_id_find_upstream", processor)
-        self.assertIn("tb2_mqtt_packet_id_find_wire", processor)
+        self.assertIn("tb2_mqtt_cloud_id_allocate", processor)
         self.assertIn("tb2_mqtt_allocate_wire_packet_id", processor)
         self.assertIn("tb2_mqtt_rewrite_packet_id", processor)
         self.assertIn('"packet_id_remap"', processor)
@@ -305,8 +292,7 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
             "TB2_MQTT_PACKET_PUBCOMP",
         ):
             self.assertIn(packet_type, controls)
-        self.assertIn("entry->original_id", controls)
-        self.assertIn("entry->wire_id", controls)
+        self.assertIn("&session->packet_ids : &session->cloud_ids", controls)
 
     def test_observer_only_runs_passive_box_handlers(self):
         table = self.server[
@@ -335,20 +321,17 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
         self.assertIn("if (!box_to_upstream", observer)
 
     def test_outbound_tls_uses_only_explicit_tb2_identity(self):
-        tls_init = self.passthrough[
-            self.passthrough.index("static bool_t tb2_mqtt_has_original_identity") :
-            self.passthrough.index("static error_t tb2_mqtt_connect_upstream")
-        ]
-        self.assertIn("settings->internal.client_tb2", tls_init)
-        self.assertNotIn("settings->internal.client_tb1", tls_init)
-        self.assertNotIn("settings->internal.client.", tls_init)
+        config = self.function("static error_t tb2_mqtt_configure_worker", "")
+        self.assertIn("identity->internal.client_tb2", config)
+        self.assertNotIn("client_tb1", config)
+        self.assertIn("tb2_mqtt_upstream_acquire", config)
 
     def test_box_certificate_uses_canonical_cn_overlay_mapping(self):
         mapping = self.passthrough[
             self.passthrough.index("static settings_t *tb2_mqtt_settings_from_certificate") :
             self.passthrough.index("static bool_t tb2_mqtt_has_original_identity")
         ]
-        self.assertIn("get_settings_cn(common_name)", mapping)
+        self.assertIn("settings_get_existing_tb2_from_certificate_subject", mapping)
         self.assertNotIn("get_overlay_id(common_name)", mapping)
         self.assertIn("stage=box_client_auth certificate_present=true", mapping)
 
@@ -370,7 +353,7 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
             self.settings,
         )
         self.assertIn(
-            "osStrcasecmp(settings->commonName, common_name)", self.passthrough
+            "osStrcasecmp(settings->commonName, canonical_box_id)", self.settings
         )
 
     def test_new_box_ids_are_uppercase_but_certificate_paths_stay_lowercase(self):
@@ -395,20 +378,18 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
             self.passthrough.index("static settings_t *tb2_mqtt_settings_from_certificate") :
             self.passthrough.index("static bool_t tb2_mqtt_has_original_identity")
         ]
-        self.assertIn("settings_canonicalize_box_id", certificate_mapping)
+        self.assertIn("settings_get_existing_tb2_from_certificate_subject", certificate_mapping)
         self.assertNotIn("osStringToLower", certificate_mapping)
 
     def test_global_tb2_identity_is_default_until_overlay_override(self):
-        selector = self.passthrough[
-            self.passthrough.index("static bool_t tb2_mqtt_overlay_has_identity_override") :
-            self.passthrough.index("static error_t tb2_mqtt_outbound_tls_init")
-        ]
+        selector = self.function("static bool_t tb2_mqtt_overlay_has_identity_override", "")
+        selector += self.function("static settings_t *tb2_mqtt_select_identity_settings", "")
         self.assertIn("core.client_cert_tb2.file.ca", selector)
         self.assertIn("core.client_cert_tb2.data.key", selector)
         self.assertIn("option->overlayed", selector)
         self.assertIn("overlay_override ? box_settings : get_settings()", selector)
         self.assertIn("source=%s overlay_override=%s", selector)
-        self.assertIn("tb2_mqtt_connect_upstream(identity_settings", self.passthrough)
+        self.assertIn("tb2_mqtt_select_identity_settings(session->box_settings)", self.passthrough)
 
     def test_new_overlay_keeps_tb2_client_identity_inherited(self):
         self.assertIn(
@@ -421,11 +402,11 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
         )
 
     def test_upstream_client_auth_reports_request_and_actual_response(self):
-        self.assertIn("tls_context->clientCertRequested", self.passthrough)
-        self.assertIn("tls_context->cert != NULL", self.passthrough)
-        self.assertIn('"certificate_sent"', self.passthrough)
-        self.assertIn('"empty_certificate"', self.passthrough)
-        self.assertIn('"not_sent"', self.passthrough)
+        self.assertIn("tls->clientCertRequested", self.worker)
+        self.assertIn("tls->cert != NULL", self.worker)
+        self.assertIn('"certificate_sent"', self.worker)
+        self.assertIn('"empty_certificate"', self.worker)
+        self.assertIn('"not_sent"', self.worker)
 
 
 if __name__ == "__main__":

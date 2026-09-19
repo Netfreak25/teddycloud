@@ -59,8 +59,9 @@ These settings are deliberately separate from both the generic external
 `mqtt.*` client and the internal TB2-facing `mqtt_server.*` listener.
 The internal `mqtt_server` remains the incoming TLS endpoint. After that TLS
 handshake and before MQTT packet parsing, the enabled MITM maps the presented
-box certificate to an existing TB2 overlay and opens a second TLS connection using the
-original per-box identity from `core.client_cert_tb2.*`. It must never fall back
+box certificate to an existing TB2 overlay. The box-facing MQTT session is
+established locally; a separate worker opens the optional second TLS connection
+using the original per-box identity from `core.client_cert_tb2.*`. It must never fall back
 to the TB1 `core.client_cert_tb1.*` identity. The local `mqtt_server.cert.*` ICI
 identity is never reused for the outbound role.
 
@@ -70,13 +71,21 @@ TeddyCloud, while DNS inside the TeddyCloud container must continue to resolve
 the public TONIES ICI and HTTPS hostnames. Pointing the container itself back to
 TeddyCloud would create a forwarding loop instead of an upstream connection.
 
-For an enabled connection, decrypted MQTT application bytes are reassembled into
-complete MQTT packets in both directions. Fragmented packets and multiple
-packets in one TLS read are supported up to MQTT's own Remaining Length limit;
-there is no additional proxy packet-size limit. Packets that do not match a
-disabled forwarding option are sent byte-for-byte unchanged. The box's original
-CONNECT data, including any ICI credential it carries, is therefore still
-forwarded without reconstruction.
+Decrypted MQTT application bytes are reassembled into complete packets in both
+directions. Fragmented packets and multiple packets in one TLS read are
+supported. Local and TONIES transport sessions have separate acknowledgements,
+packet IDs, subscriptions and keepalives. The cloud CONNECT retains the box's
+client ID and authentication fields, but uses Clean Session and a Will that has
+passed the same Internet policy as a publish. Credentials are not logged. An
+allowed application payload is unchanged unless a preceding local-response or
+privacy stage explicitly rewrites it; MQTT transport headers may be rebuilt.
+
+Will policy is reevaluated while the cloud connection is active. A planned
+disconnect or policy change attempts a MQTT DISCONNECT before rebuilding the
+cloud connection, so the formerly registered Will is not intentionally fired.
+This is best effort: a Will already registered at TONIES cannot be withdrawn
+after the network has failed, and MQTT provides no retroactive cancellation of
+a Will that the remote broker has already published.
 
 Manual MQTT filters control only PUBLISH traffic across the TONIES Internet
 boundary, in both directions; they do not switch off local status processing or
@@ -175,21 +184,30 @@ JSON, allocation failure or rebuild failure on these structured topics is also
 suppressed without closing the MQTT session. The original QoS 1/2 publish is
 then completed using the same local acknowledgement state as a manual filter.
 When response correlation and NoCloud protection both rewrite a publish, the
-final payload after both stages is used for the wire packet, capture and stored
-local-response replay. The earlier observer payload must not replace a later
-automatic privacy rewrite.
+final payload after both stages is used for the wire packet and capture.
+Local-response replay remembers the observer result, then reevaluates the
+current automatic and manual policy before rebuilding the outgoing packet.
+An earlier observer payload must not replace a later automatic privacy rewrite.
 
-Suppressed QoS 0 publishes are dropped. For QoS 1 the proxy returns `PUBACK` to
-the sender. For QoS 2 it keeps independent packet-ID state per direction,
-returns `PUBREC`, and completes matching and duplicate `PUBREL` packets with
-`PUBCOMP`. ACKs and `PUBREL` packets that do not belong to a locally suppressed
-publish are forwarded unchanged.
+Suppressed QoS 0 publishes have no Internet-side copy. QoS 1 is completed with
+local `PUBACK`; QoS 2 uses independent inbound state, `PUBREC` and `PUBCOMP`.
+QoS 2 duplicates reuse that exchange rather than repeating local application
+effects. General QoS 1 still has MQTT's at-least-once semantics; the bounded
+exact-packet replay protection for consumed or rewritten local replies is
+separate and prevents those replies leaking after correlation was completed.
+This local transport completion also applies to allowed traffic: TONIES has a
+separate exchange and packet-ID space. ACKs are never blindly copied between
+the sessions, and a cloud disconnect cannot acknowledge a local freshness ID.
 
-The proxy also observes box `SUBSCRIBE` and `UNSUBSCRIBE` packets without
-generating `SUBACK` or `UNSUBACK`. This gives the local server an accurate view
-of the box subscriptions while the original packets and acknowledgements remain
-transparent. TeddyCloud may send a matching local server-to-box publish before
-the upstream `SUBACK`, as permitted by MQTT 3.1.1.
+Box `SUBSCRIBE` and `UNSUBSCRIBE` are completed locally, with one SUBACK result
+per requested filter and an UNSUBACK for removal. Cloud subscription
+synchronization is separate and never delays a local reply. The existing local
+subscription observer is still informed, so settings, controls and freshness
+publishes continue to require the appropriate box subscription.
+Cloud PUBLISH delivery rechecks the current local subscriptions, including
+packets already received when the box unsubscribes. The highest matching local
+grant limits the delivered QoS; the original cloud QoS handshake remains
+independent even when delivery is suppressed or downgraded to QoS 0 or 1.
 
 TeddyCloud observes box-to-cloud publishes before the forwarding decision. It
 processes claims and the passive status paths for settings confirms, setup,
@@ -216,25 +234,58 @@ were already pending continue to be consumed after the switch is disabled and
 are discarded when the MQTT connection ends. Cloud commands are not executed
 locally; successfully delivered Cloud Desireds are additionally stored without
 emitting a second command. For QoS 1 and QoS 2, the
-proxy remembers a bounded set of local consume/rewrite decisions. A duplicate
-PUBLISH therefore reuses the original decision before correlation runs again
-and cannot leak to TONIES after the first packet cleared the pending action.
+session remembers local QoS-1 consume/rewrite decisions for up to 30 seconds,
+bounded to 32 entries and 1 MiB of replacement payloads. A DUP PUBLISH must
+match the original packet fingerprint (ignoring only DUP) and packet ID before
+reusing that observer result; different bytes or a new non-DUP use clear the old
+match. Current privacy/manual policy is still applied. This protects a lost
+PUBACK retransmission after the first packet cleared the pending action. If
+this privacy history cannot be retained, only Internet forwarding is suspended;
+the healthy local session continues. It is not a general QoS-1 deduplication
+service or an unlimited replay history.
 
-The Internet-filter boundary does not yet make the box session independent of
-TONIES. Upstream failures can still close that session. Proxy-mode
-`settings/request` ownership is described below. CONNECT/CONNACK,
-subscriptions, keepalive and ACK packets are not
-manual PUBLISH-filter categories. Required ACKs for locally suppressed packets
-and existing local freshness ACK consumption are unchanged. No new application
-responses are fabricated for unknown topics. Native originalcache routing,
-private content, source assignment and general freshness behavior are outside
-this filter-boundary change.
+### Independent box and TONIES sessions
+
+Local CONNECT/CONNACK, subscription replies, PINGRESP and QoS handshakes do not
+wait for TONIES, including when the box first connects during an Internet
+outage. A failed cloud connection does not close the established box session.
+Existing local status processing, subscribed local replies and pending
+`fresh-tonies` continue. Unknown application topics receive no invented
+application response; a transport acknowledgement is not an application-level
+success confirmation.
+
+TONIES transport work runs outside the box-serving main loop. Its bounded
+transient queues hold at most 32 packets and 1 MiB per direction. They are not
+an offline message store: packets cannot be accumulated for later playback
+when TONIES is unavailable, and a failed cloud epoch discards its transport
+work. A successful reconnect creates a fresh Clean Session, synchronizes the
+current subscriptions and uses an independent keepalive. Retry delays increase
+through 1, 2, 4, 8, 16 and 30 seconds, capped at 30 seconds. Worker ownership and
+epoch IDs prevent late results from a closed connection reaching a replacement.
+Worker slots are created lazily and reused only after the old transport has
+retired. A completed worker write means that all bytes reached the TLS write
+boundary, not that TONIES acknowledged MQTT or applied an application command.
+The reconnect delay resets only after the current epoch reaches a fully ready
+MQTT session, not merely after a successful or long-lived TLS connection.
+
+The local session stores up to 32 subscriptions. Clean Session false retains
+only bounded in-memory session state, not a disk-backed broker session or an
+offline PUBLISH queue. A TeddyCloud restart does not restore it. Local
+freshness packet IDs and their pending overlay state are independent of cloud
+packet IDs; losing TONIES must not confirm or discard a local freshness update.
+
+Transport availability does not transfer settings or app-control ownership.
+The configured effective Desired and command forwarding policies still decide
+who may send; an outage does not silently unlock cloud-managed settings or
+enable the local-control exception. Settings-request behavior remains as
+documented below. HTTPS content routing, NoCloud, source assignment and general
+freshness semantics are unchanged by this MQTT transport separation.
 
 At global log level `5`, connection diagnostics use the filter prefix
-`TB2 MQTT upstream`; packet decisions use `TB2 MQTT proxy`. They report the DNS,
-TCP, TLS and packet-forwarding stage, destination address, direction, MQTT packet
-type/topic/QoS, the selected forwarding setting, and textual and numeric error
-codes. Certificate, key and credential contents are not written to these logs.
+`TB2 MQTT upstream`; packet decisions use `TB2 MQTT proxy`. Worker diagnostics
+report the transport epoch, disconnection and error code. Packet diagnostics
+report direction, MQTT packet type/topic/QoS and the selected forwarding setting.
+Certificate, key and credential contents are not written to these logs.
 After a successful upstream TLS handshake, `stage=client_auth` reports whether
 the ICI server sent a TLS CertificateRequest and whether CycloneTLS answered
 with the configured TB2 certificate, an empty certificate list, or no client
@@ -260,10 +311,14 @@ The separate **ICI Upstream** navbar tag polls
 upstream is green. The API contains no credential values, certificate
 paths, payloads or box identifiers.
 
-Each session writes `session.json` and a full Base64 `traffic.jsonl` capture.
+Each packet-aware session attempts to open `session.json` and full Base64
+`traffic.jsonl` capture. Capture-open or write failure suspends the Internet
+leg rather than sending uncaptured cloud traffic. Local protocol replies and
+local operation continue; `upstreamError` exposes the failure. This failure does
+not switch to the unrelated transparent HTTPS mode.
 
-After a newly authenticated connection has completed MQTT CONNECT/CONNACK (or
-the transparent initial forwarding), TeddyCloud closes older active sessions
+After a newly authenticated connection has completed local MQTT CONNECT/CONNACK,
+TeddyCloud closes older active sessions
 for the same canonical box ID and overlay. Failed or incomplete reconnects do
 not displace the working session. Pending freshness remains stored in the
 overlay and is retried on the replacement connection.
@@ -277,8 +332,9 @@ continue; it does not itself close the connection.
 The main loop closes incomplete TLS/MQTT setups with `establishment timeout`
 once it observes 15 seconds since acceptance. This is a loop-checked setup
 deadline, not a hard wall-clock limit for an entire TLS call: each socket I/O
-has its own timeout. Once ICI forwarding is established, the existing proxy
-I/O timeout of 500 ms continues to apply.
+has its own timeout. The established packet-aware box session uses a finite
+500 ms I/O timeout. Cloud socket I/O has its own 500 ms worker timeout; cloud
+DNS, TCP and TLS establishment no longer run in the box-serving main loop.
 
 The capture is packet-based and records `packet_type`, optional `topic`,
 `forwarded`, optional `filter_id`, `generated`, and `packet_complete`.
@@ -297,10 +353,19 @@ the bytes sent on the wire, the entry also contains `wire_data_base64`, the
 original and effective packet IDs when applicable, and an `action`. Local
 settings, app controls and their reply decisions use the actions
 `local_settings_desired`, `local_app_control`, `local_response_consume` and
-`local_response_rewrite`. QoS retransmits additionally use
-`local_response_replay_consume`, `local_response_replay_rewrite` or
-`local_response_replay_block` when a relay filter suppressed the rewritten
-remainder. Locally generated ACKs and freshness publishes,
+`local_response_rewrite`. Exact local-response retransmits use
+`local_response_replay`; automatic and manual decisions still describe any
+filtered remainder. Cloud-bound packets first record `upstream_queued` with
+`forwarded=false`, then `upstream_write_complete` or `upstream_write_failed`
+when the worker reports the actual write outcome. `upstream_unavailable`
+records a dropped Internet copy without pretending it was delivered. The
+completion record retains the original packet and effective wire bytes; only
+a completed write increments forwarding counters. Box-bound delivery first
+records `box_write_pending` with `forwarded=false`, then the actual local action
+or `box_write_failed`. The settings/app-control completion observer runs only
+after a successful box write. A later capture-completion failure suspends cloud
+traffic but does not pretend the already delivered command was never sent.
+Locally generated ACKs and freshness publishes,
 consumed freshness `PUBACK`s, and an incomplete final packet are captured as
 well. Consumed local responses and ACKs do not increase suppressed-message
 counters. Session and status data
@@ -357,17 +422,20 @@ The implementation currently has these fixed limits:
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
-| `MQTT_MAX_PACKET_SIZE` | `4096` | Per-connection receive buffer size. |
+| `MQTT_MAX_PACKET_SIZE` | `4096` | Legacy direct-path receive buffer size; the packet-aware session reassembles its own bounded stream. |
 | `MQTT_MAX_CONNECTIONS` | `32` | Maximum concurrent MQTT connections. |
 | `MQTT_MAX_SUBSCRIPTIONS` | `32` | Maximum stored subscriptions per connection. |
 | `MQTT_LOG_INLINE_PAYLOAD_SIZE` | `256` | Payload size at which optional full-payload capture replaces inline previews. |
 | `MQTT_FRESH_TONIES_DEBOUNCE_SEC` | `2` | Per-overlay coalescing window before a pending `fresh-tonies` publish may be sent. |
 | `MQTT_FRESH_TONIES_RETRY_INTERVAL_SEC` | `5` | Delay before retrying an unacknowledged per-rUID freshness publish. |
 | `MQTT_FRESH_TONIES_MAX_ATTEMPTS` | `3` | Initial freshness publish plus two retries before closing the connection. |
-| `MQTT_CONNECTION_ESTABLISH_TIMEOUT_MS` | `15000` | Maximum time from TCP accept to completed MQTT CONNECT/CONNACK or transparent initial forwarding. |
+| `MQTT_CONNECTION_ESTABLISH_TIMEOUT_MS` | `15000` | Maximum time from TCP accept to completed local MQTT CONNECT/CONNACK. |
 | `MQTT_SETTINGS_DESIRED_MAX_ATTEMPTS` | `3` | Maximum pending settings publishes before waiting for confirm. |
 | `MQTT_SETTINGS_DESIRED_RETRY_INTERVAL_SEC` | `5` | Retry interval for pending settings publishes. |
 | `MQTT_APP_CONTROL_REPLY_WINDOW_MS` | `30000` | Monotonic time window for connection-local ping and STL reply correlation. |
+| `TB2_MQTT_UPSTREAM_QUEUE_MESSAGES` | `32` | Transient worker queue entries per direction; not an offline queue. |
+| `TB2_MQTT_UPSTREAM_QUEUE_BYTES` | `1048576` | Transient worker queue byte budget per direction. |
+| `TB2_MQTT_SESSION_MAX` | `32` | Bounded in-memory local sessions; no disk persistence. |
 
 ## Connection Mapping
 
@@ -420,18 +488,23 @@ exists, instead of treating the last timestamp as a one-second HTTP-only pulse.
 
 ## Supported MQTT Packets
 
-The server implements only the packets it needs:
+The packet-aware TB2 session implements the following local transport behavior,
+whether or not TONIES is reachable:
 
 | Packet | Behavior |
 |--------|----------|
-| `CONNECT` | Maps the connection from the TLS certificate and returns a success `CONNACK`. |
+| `CONNECT` | Validates the MQTT connection, maps the box identity and returns local `CONNACK`; no cloud handshake is required. |
 | `PINGREQ` | Returns `PINGRESP`. |
-| `SUBSCRIBE` | Stores the requested topic filters and returns `SUBACK` with QoS 0. |
-| `PUBLISH` | Routes known box topics, logs unknown topics and sends `PUBACK` for QoS 1 publishes. |
-| `DISCONNECT` | Frees TLS/socket state and clears stored subscriptions. |
+| `SUBSCRIBE` | Applies valid topic filters within the fixed subscription limit and returns a result for each requested filter. Cloud synchronization is separate. |
+| `UNSUBSCRIBE` | Removes local filters and returns `UNSUBACK` without waiting for TONIES. |
+| `PUBLISH` | Observes application status locally, applies the existing Internet policy, and completes inbound QoS 1/2 locally. |
+| `PUBACK`, `PUBREC`, `PUBREL`, `PUBCOMP` | Complete the corresponding local or cloud transport leg; packet IDs are not shared between the legs. |
+| `DISCONNECT` | Ends the box transport; Clean Session decides whether bounded local session state survives in RAM. |
 
-Outbound publishes are sent as QoS 0 packets. The server does not retain
-messages and does not fan out arbitrary topics like a broker.
+Application commands normally use QoS 0; local `fresh-tonies` continues to use
+QoS 1 and its existing retry mechanism. Acknowledging a box publish does not
+promise that TONIES accepted it or that an Internet-side effect completed.
+The server does not retain messages or fan out arbitrary topics like a broker.
 
 ## Payload Logging
 
@@ -524,9 +597,16 @@ as on the relay. The local-control exception never unlocks these device fields.
 | Effective policy | Response to a box settings request |
 |---|---|
 | Upstream off or Desired blocked | TC answers using local values over its available Cloud baseline. |
-| Desired and Request forwarded | TONIES answers; no competing local Desired. |
+| Desired and Request forwarded, cloud ready | TONIES answers; TC waits for this request instead of immediately echoing a local Desired. |
 | Desired forwarded, Request blocked | TC answers once from its stored Cloud snapshot, or the existing local builder if none is available. |
+| Desired and Request forwarded, cloud unavailable or request unanswered after 10 seconds | TC attempts one local snapshot/fallback response; configured Cloud ownership and revisions remain unchanged. |
 | Confirm blocked | TC still processes the confirmation locally; no forwarding exception. |
+
+Only an actual box settings request creates this bounded fallback obligation.
+An upstream outage or timeout does not generate unsolicited local setting
+changes. A successfully forwarded Cloud Desired completes the waiting request;
+a local fallback uses the same saved Cloud baseline and supported-field
+revision rules as a filtered Request, not a fabricated Cloud acknowledgement.
 
 Only the existing ten device settings are projected: volume/headphone limits,
 bedtime limits, ring brightness, scrubbing, skipping, skipping direction and age
@@ -663,13 +743,12 @@ The initial publish uses a newly reserved non-zero packet ID and `DUP=0`. If no
 matching `PUBACK` arrives, the same packet ID and payload are retried after five
 and ten seconds with `DUP=1`. Five seconds after the third attempt, the
 connection is closed. Remaining cache entries are retried after reconnect. A
-foreign valid `PUBACK` is only logged by the local server and remains transparent
-in proxy mode.
+foreign valid `PUBACK` does not confirm freshness and is handled only within its
+own transport session.
 
-The transparent proxy reserves local freshness IDs alongside outstanding
-cloud-to-box QoS IDs. If a later upstream QoS-1 or QoS-2 publish collides, only
-the upstream packet ID is remapped on the box-facing wire; its acknowledgement
-flow is translated back. A `PUBACK` for local freshness is consumed by
+The packet-aware session reserves local freshness IDs alongside outgoing
+box-facing QoS IDs. Cloud publishes use their own local wire IDs, and losing the
+cloud session leaves the local freshness reservation intact. A `PUBACK` for local freshness is consumed by
 TeddyCloud and is not forwarded upstream. Local freshness publishes bypass the
 bidirectional forwarding filters because they are generated by TeddyCloud, not
 relayed cloud traffic.
@@ -759,6 +838,15 @@ subscription capabilities, semantic playback/volume/battery/headphone/bedtime
 state, pong correlation data and bounded setup/event/fleet/alarm diagnostic
 snapshots. Every semantic state carries `valid` and `updatedAt`; invalid MQTT
 payloads do not overwrite the previous valid state.
+
+`runtime.mqtt` separates `localConnected` from `upstreamState` and
+`upstreamError`. A box can be locally online with a disconnected or retrying
+upstream. These transport fields contain no credentials and do not change the
+ownership decisions reported by `runtime.controls` or the Settings API.
+The main loop publishes a synchronized per-session snapshot for HTTP readers;
+one box's cloud failure does not mark another box's cloud session disconnected.
+The aggregate navbar status counts connected upstream sessions rather than
+equating an accepted local connection with a connected TONIES session.
 
 `runtime.controls` remains the authoritative set of booleans for playback,
 volume, ping, bedtime and sleep. Optional `runtime.controlReasons` explains a
@@ -922,7 +1010,9 @@ packets and bounded QoS replay handling are retained.
 
 A dedicated mutex protects the app-control send/correlation/close lifecycle.
 It does not make all TLS operations or the general MQTT relay thread-safe and
-does not add a queue, retry service or offline-autonomous MQTT session.
+does not provide a command retry queue. The separate upstream worker owns cloud
+transport synchronization; the local session and its bounded transport queues
+do not extend the app-reply correlation window or replay offline commands.
 
 ### Incoming `playback/state`
 
@@ -1062,7 +1152,8 @@ as `BatteryPercent`, `BatteryRaw`, `BatteryCurrent`, `BatteryStatus`,
 | `src/mqtt_server.c` | Owns the TCP/TLS listener, packet parsing, subscription tracking, topic handlers and box publishes. |
 | `include/mqtt_nocloud_filter.h` | Declares the per-publish noCloud allow/block/rewrite decision and its rewritten payload ownership. |
 | `src/mqtt_nocloud_filter.c` | Performs lightweight per-packet content-policy lookups and selective claim, playback, metrics, BI-event, log and freshness filtering. |
-| `src/tb2_mqtt_passthrough.c` | Observes PUBLISH packets locally, then applies automatic NoCloud protection before explicit manual Internet-filter decisions; rebuilds the final payload, preserves QoS/packet-ID translation and records capture/status counters. |
+| `src/tb2_mqtt_passthrough.c` | Terminates the local MQTT session independently from TONIES, applies the existing observer/NoCloud/manual policy, owns separate QoS/packet-ID state and records capture/status counters. |
+| `src/tb2_mqtt_upstream.c` | Fixed worker slots own cloud DNS/TCP/TLS, bounded transient queues and capped reconnect backoff. Epoch-tagged results prevent stale transports reaching a replacement box session. |
 | `src/mqtt.c` | Exposes the new TB2 runtime box events through the existing Home Assistant discovery/event path. |
 | `include/home_assistant.h` | Raises the entity budget for the additional TB2 runtime event sensors. |
 | `src/handler_api.c` | Exposes runtime state through `getBoxes`, implements the validated box-control HTTP endpoints and marks TB2 settings changes as pending for ICI delivery. |

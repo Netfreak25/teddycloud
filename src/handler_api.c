@@ -701,6 +701,7 @@ static void api_add_toniebox_runtime(cJSON *json_entry, settings_t *settings, ui
     cJSON *runtime = cJSON_AddObjectToObject(json_entry, "runtime");
     cJSON_AddBoolToObject(runtime, "online", settings->internal.online);
     cJSON_AddNumberToObject(runtime, "lastConnection", (double)settings->internal.last_connection);
+    mqtt_server_add_runtime_status(runtime, overlay_id);
 
     cJSON *controls = cJSON_AddObjectToObject(runtime, "controls");
     cJSON *control_reasons = cJSON_AddObjectToObject(runtime, "controlReasons");

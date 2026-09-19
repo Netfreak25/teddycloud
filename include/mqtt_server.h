@@ -23,6 +23,9 @@ typedef enum
 /** Same effective command policy used by capabilities and actual senders. */
 mqtt_control_availability_t mqtt_server_control_availability(uint8_t overlay_id, const char *command);
 const char *mqtt_server_control_reason(mqtt_control_availability_t availability);
+/** Add local MQTT connectivity and the independent per-box upstream status. */
+struct cJSON;
+void mqtt_server_add_runtime_status(struct cJSON *runtime, uint8_t overlay_id);
 
 void mqtt_server_init();
 error_t mqtt_server_reload_certificate();

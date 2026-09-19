@@ -44,6 +44,7 @@ uint_t tcpWaitForEvents(Socket *socket, uint_t eventMask, systime_t timeout);
 #define MQTT_FRESH_TONIES_REASON_MAX 32
 #define MQTT_CONNECTION_ESTABLISH_TIMEOUT_MS 15000U
 #define MQTT_CONNECTION_IO_TIMEOUT_MS 300U
+#define MQTT_SETTINGS_REQUEST_TIMEOUT_MS 10000U
 #define MQTT_CONNECT_FLAG_USERNAME 0x80U
 #define MQTT_CONNECT_FLAG_PASSWORD 0x40U
 #define MQTT_CONNECT_FLAG_WILL_RETAIN 0x20U
@@ -90,6 +91,9 @@ typedef struct {
     uint32_t fresh_tonie_sent_at;
     bool_t observer_local_reply_matched;
     mqtt_settings_sent_t settings_sent;
+    bool_t settings_request_pending;
+    bool_t settings_request_sent;
+    systime_t settings_request_since;
     mqtt_app_control_state_t app_control;
 } MqttClientConnection;
 
@@ -347,6 +351,8 @@ static void mqtt_connection_close_locked(MqttClientConnection *conn, const char 
     conn->box_topic_id[0] = '\0';
     conn->observer_local_reply_matched = FALSE;
     osMemset(&conn->settings_sent, 0, sizeof(conn->settings_sent));
+    conn->settings_request_pending = FALSE;
+    conn->settings_request_sent = FALSE;
     mqtt_app_control_reset(&conn->app_control);
 }
 
@@ -1441,6 +1447,10 @@ static bool_t mqtt_connection_publish_packet_internal(MqttClientConnection *conn
                       written,
                       error2text(error));
         osFreeMem(packet);
+        /* Packet sessions belong to the main loop. The relay records box write
+         * failures for that owner; an HTTP control thread must not free it. */
+        if (conn->passthrough != NULL)
+            return FALSE;
         if (app_control_locked)
             mqtt_connection_close_locked(conn, "publish write failed");
         else
@@ -1499,7 +1509,7 @@ bool_t mqtt_server_has_active_box_connection(uint8_t overlay_id)
     for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
     {
         MqttClientConnection *conn = &connections[i];
-        if (conn->active && conn->box_connection && conn->client_ctx.settings != NULL &&
+        if (conn->active && conn->established && conn->box_connection && conn->client_ctx.settings != NULL &&
             conn->client_ctx.settings->internal.overlayNumber == overlay_id)
         {
             return TRUE;
@@ -1507,6 +1517,37 @@ bool_t mqtt_server_has_active_box_connection(uint8_t overlay_id)
     }
 
     return FALSE;
+}
+
+void mqtt_server_add_runtime_status(cJSON *runtime, uint8_t overlay_id)
+{
+    cJSON *mqtt = cJSON_AddObjectToObject(runtime, "mqtt");
+    if (mqtt == NULL)
+        return;
+    mutex_lock(MUTEX_MQTT_APP_CONTROL);
+    for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
+    {
+        MqttClientConnection *conn = &connections[i];
+        if (!conn->active || !conn->established || !conn->box_connection ||
+            conn->box_overlay_id != overlay_id)
+            continue;
+        if (conn->passthrough != NULL)
+            tb2_mqtt_passthrough_add_runtime_status(conn->passthrough, mqtt);
+        else
+        {
+            cJSON_AddBoolToObject(mqtt, "localConnected", TRUE);
+            cJSON_AddStringToObject(mqtt, "upstreamState", "disabled");
+            cJSON_AddStringToObject(mqtt, "upstreamError", "");
+        }
+        mutex_unlock(MUTEX_MQTT_APP_CONTROL);
+        return;
+    }
+    cJSON_AddBoolToObject(mqtt, "localConnected", FALSE);
+    cJSON_AddStringToObject(mqtt, "upstreamState",
+        tb2_mqtt_passthrough_is_enabled() ? "error" : "disabled");
+    cJSON_AddStringToObject(mqtt, "upstreamError",
+        tb2_mqtt_passthrough_is_enabled() ? "local_disconnected" : "");
+    mutex_unlock(MUTEX_MQTT_APP_CONTROL);
 }
 
 static void mqtt_touch_box_connection(MqttClientConnection *conn)
@@ -1679,6 +1720,25 @@ static bool_t mqtt_publish_settings_response(MqttClientConnection *conn,
 static bool_t mqtt_publish_settings_desired_to_connection(MqttClientConnection *conn, bool_t track_pending_attempt)
 {
     return mqtt_publish_settings_response(conn, track_pending_attempt, FALSE);
+}
+
+/** Transport fallback only: configured authority and revision rules do not change. */
+static void mqtt_settings_request_pump(MqttClientConnection *conn)
+{
+    if (!conn->settings_request_pending || !conn->active || !conn->established)
+        return;
+    bool_t connected = conn->passthrough != NULL &&
+        tb2_mqtt_passthrough_is_upstream_connected(conn->passthrough);
+    if (connected && osGetSystemTime() - conn->settings_request_since < MQTT_SETTINGS_REQUEST_TIMEOUT_MS)
+        return;
+    bool_t sent = conn->settings_request_sent;
+    conn->settings_request_pending = FALSE;
+    conn->settings_request_sent = FALSE;
+    TRACE_INFO("MQTT settings request fallback box=%s reason=%s upstream_sent=%s\r\n",
+        mqtt_connection_common_name(conn), connected ? "response_timeout" : "upstream_unavailable",
+        sent ? "true" : "false");
+    if (!mqtt_publish_settings_response(conn, TRUE, TRUE))
+        TRACE_WARNING("MQTT settings request fallback failed box=%s\r\n", mqtt_connection_common_name(conn));
 }
 
 static bool_t mqtt_publish_pending_settings_desired_to_connection(MqttClientConnection *conn, bool_t require_subscription, bool_t force)
@@ -2511,6 +2571,131 @@ static error_t handle_mqtt_subscribe(MqttClientConnection *conn,
     return error;
 }
 
+static int mqtt_passthrough_subscription_qos(void *context, const char *topic)
+{
+    MqttClientConnection *conn = context;
+    if (conn == NULL || topic == NULL)
+        return -1;
+    int qos = -1;
+    mutex_lock(MUTEX_MQTT_APP_CONTROL);
+    if (conn->active)
+    {
+        for (size_t i = 0; i < conn->subscription_count; i++)
+        {
+            if (mqtt_topic_match(conn->subscriptions[i].topic, topic) &&
+                conn->subscriptions[i].qos > qos)
+                qos = conn->subscriptions[i].qos;
+        }
+    }
+    mutex_unlock(MUTEX_MQTT_APP_CONTROL);
+    return qos;
+}
+
+static size_t mqtt_passthrough_subscription_snapshot(void *context,
+    tb2_mqtt_subscription_t *subscriptions, size_t capacity)
+{
+    MqttClientConnection *conn = context;
+    if (conn == NULL || subscriptions == NULL)
+        return 0;
+    mutex_lock(MUTEX_MQTT_APP_CONTROL);
+    if (!conn->active || capacity < conn->subscription_count)
+    {
+        mutex_unlock(MUTEX_MQTT_APP_CONTROL);
+        return 0;
+    }
+    for (size_t i = 0; i < conn->subscription_count; i++)
+    {
+        osStrcpy(subscriptions[i].topic, conn->subscriptions[i].topic);
+        subscriptions[i].qos = conn->subscriptions[i].qos;
+    }
+    size_t count = conn->subscription_count;
+    mutex_unlock(MUTEX_MQTT_APP_CONTROL);
+    return count;
+}
+
+/** Validate the whole packet before publishing a new local subscription table. */
+static error_t mqtt_passthrough_subscription_apply_locked(void *context, bool_t unsubscribe,
+    const uint8_t *payload, size_t payload_len, uint8_t *codes,
+    size_t capacity, size_t *count)
+{
+    MqttClientConnection *conn = context;
+    if (conn == NULL || !conn->active || !conn->box_connection || payload == NULL || payload_len < 2 || count == NULL ||
+        codes == NULL || (payload[0] == 0 && payload[1] == 0))
+        return ERROR_INVALID_PARAMETER;
+    MqttSubscription proposed[MQTT_MAX_SUBSCRIPTIONS];
+    osMemcpy(proposed, conn->subscriptions, sizeof(proposed));
+    size_t proposed_count = conn->subscription_count;
+    size_t position = 2;
+    size_t topic_count = 0;
+    while (position < payload_len)
+    {
+        if (position + 2 > payload_len || topic_count >= capacity)
+            return ERROR_INVALID_LENGTH;
+        size_t length = ((size_t)payload[position] << 8) | payload[position + 1];
+        position += 2;
+        if (length == 0 || length >= sizeof(proposed[0].topic) ||
+            length > payload_len - position ||
+            !tb2_mqtt_topic_filter_valid(payload + position, length))
+            return ERROR_INVALID_LENGTH;
+        char topic[sizeof(proposed[0].topic)];
+        osMemcpy(topic, payload + position, length);
+        topic[length] = '\0';
+        position += length;
+        uint8_t qos = 0;
+        if (!unsubscribe)
+        {
+            if (position >= payload_len || payload[position] > 2)
+                return ERROR_INVALID_TYPE;
+            qos = payload[position++];
+        }
+        size_t index;
+        for (index = 0; index < proposed_count; index++)
+            if (osStrcmp(proposed[index].topic, topic) == 0)
+                break;
+        if (unsubscribe)
+        {
+            if (index < proposed_count)
+            {
+                proposed_count--;
+                osMemmove(&proposed[index], &proposed[index + 1],
+                    (proposed_count - index) * sizeof(proposed[0]));
+                osMemset(&proposed[proposed_count], 0, sizeof(proposed[0]));
+            }
+            codes[topic_count++] = 0;
+        }
+        else if (index == MQTT_MAX_SUBSCRIPTIONS)
+            codes[topic_count++] = 0x80;
+        else
+        {
+            osStrcpy(proposed[index].topic, topic);
+            proposed[index].qos = qos;
+            if (index == proposed_count)
+                proposed_count++;
+            codes[topic_count++] = qos;
+        }
+    }
+    if (topic_count == 0)
+        return ERROR_INVALID_LENGTH;
+    osMemcpy(conn->subscriptions, proposed, sizeof(proposed));
+    conn->subscription_count = proposed_count;
+    if (!unsubscribe)
+        for (size_t i = 0; i < proposed_count; i++)
+            mqtt_connection_update_context(conn, proposed[i].topic);
+    *count = topic_count;
+    return NO_ERROR;
+}
+
+static error_t mqtt_passthrough_subscription_apply(void *context, bool_t unsubscribe,
+    const uint8_t *payload, size_t payload_len, uint8_t *codes,
+    size_t capacity, size_t *count)
+{
+    mutex_lock(MUTEX_MQTT_APP_CONTROL);
+    error_t error = mqtt_passthrough_subscription_apply_locked(context, unsubscribe,
+        payload, payload_len, codes, capacity, count);
+    mutex_unlock(MUTEX_MQTT_APP_CONTROL);
+    return error;
+}
+
 static error_t handle_mqtt_unsubscribe(MqttClientConnection *conn,
                                        MqttMessageType type, const char *topic,
                                        const uint8_t *payload,
@@ -3291,6 +3476,12 @@ static void mqtt_passthrough_publish_completed(void *context, bool_t box_to_upst
     const char *topic, const uint8_t *payload, size_t payload_len)
 {
     MqttClientConnection *conn = context;
+    if (box_to_upstream && mqtt_settings_topic_matches(conn, topic, "/settings/request"))
+    {
+        if (conn->settings_request_pending)
+            conn->settings_request_sent = TRUE;
+        return;
+    }
     if (!box_to_upstream && conn != NULL)
     {
         static const char *commands[] = {"ping", "stl", "sleep"};
@@ -3314,6 +3505,8 @@ static void mqtt_passthrough_publish_completed(void *context, bool_t box_to_upst
     }
     if (box_to_upstream || !mqtt_settings_topic_matches(conn, topic, "/settings/desired"))
         return;
+    conn->settings_request_pending = FALSE;
+    conn->settings_request_sent = FALSE;
     settings_t *settings = conn->client_ctx.settings;
     mqtt_update_settings_authority(conn);
     // Even an old revision rejected for persistence was delivered by TONIES:
@@ -3388,12 +3581,22 @@ static error_t mqtt_passthrough_observe_publish(
         mqtt_forward_filter_result_t route = mqtt_forward_filter_evaluate(
             conn->client_ctx.settings, MQTT_FORWARD_ROUTE_BOX_TO_TONIES, topic, payload, payload_len);
         if (mqtt_settings_cloud_managed(conn->client_ctx.settings) &&
-            route.action == MQTT_FORWARD_ACTION_FORWARD)
+            route.action == MQTT_FORWARD_ACTION_FORWARD &&
+            tb2_mqtt_passthrough_is_upstream_connected(conn->passthrough))
+        {
+            if (!conn->settings_request_pending)
+            {
+                conn->settings_request_pending = TRUE;
+                conn->settings_request_sent = FALSE;
+                conn->settings_request_since = osGetSystemTime();
+            }
             return NO_ERROR;
+        }
+        bool_t offline = !tb2_mqtt_passthrough_is_upstream_connected(conn->passthrough);
         // Reuse bounded QoS replay for a locally answered request. If forwarding
         // is allowed, the stored replacement is byte-identical to the request.
         uint8_t *replay = NULL;
-        if (qos > 0)
+        if (qos > 0 && !offline)
         {
             replay = osAllocMem(payload_len > 0 ? payload_len : 1);
             if (replay == NULL)
@@ -3407,7 +3610,11 @@ static error_t mqtt_passthrough_observe_publish(
         }
         result->locally_processed = TRUE;
         result->capture_action = "local_settings_request";
-        if (qos > 0)
+        conn->settings_request_pending = FALSE;
+        conn->settings_request_sent = FALSE;
+        if (offline)
+            result->action = TB2_MQTT_OBSERVER_CONSUME;
+        else if (qos > 0)
         {
             result->action = TB2_MQTT_OBSERVER_REWRITE;
             result->payload = replay;
@@ -3501,17 +3708,8 @@ static void mqtt_passthrough_observe_control(
         return;
     }
 
-    bool_t unsubscribe = event == TB2_MQTT_CONTROL_UNSUBSCRIBE;
-    error_t error = mqtt_apply_subscription_packet(conn, payload, payload_len,
-                                                   unsubscribe, NULL);
-    if (error)
-    {
-        TRACE_WARNING("MQTT passthrough %s observer failed packet_id=%u error=%s code=%d\r\n",
-                      unsubscribe ? "UNSUBSCRIBE" : "SUBSCRIBE",
-                      (unsigned)packet_id, error2text(error), (int)error);
-        return;
-    }
-    if (!unsubscribe)
+    // The broker applied the validated table before acknowledging this packet.
+    if (event == TB2_MQTT_CONTROL_SUBSCRIBE)
         mqtt_server_publish_fresh_tonies(&conn->client_ctx);
 }
 
@@ -3566,9 +3764,18 @@ void mqtt_server_task()
                 }
                 else if (conn->active)
                 {
-                    mqtt_touch_box_connection(conn);
-                    mqtt_publish_pending_settings_desired_to_connection(conn, TRUE, FALSE);
-                    mqtt_fresh_tonies_pump(conn);
+                    if (!conn->established && tb2_mqtt_passthrough_is_established(conn->passthrough))
+                    {
+                        conn->established = TRUE;
+                        mqtt_connection_replace_existing_box_sessions(conn);
+                    }
+                    if (conn->established)
+                    {
+                        mqtt_touch_box_connection(conn);
+                        mqtt_settings_request_pump(conn);
+                        mqtt_publish_pending_settings_desired_to_connection(conn, TRUE, FALSE);
+                        mqtt_fresh_tonies_pump(conn);
+                    }
                 }
                 continue;
             }
@@ -3592,15 +3799,19 @@ void mqtt_server_task()
                     if (!conn->mode_decided)
                     {
                         conn->mode_decided = TRUE;
-                        if (conn->tlsContext != NULL && tb2_mqtt_passthrough_is_enabled())
+                        if (conn->tlsContext != NULL)
                         {
                             bool_t handled = FALSE;
                             settings_t *passthrough_box_settings = NULL;
                             error = tb2_mqtt_passthrough_start(conn->tlsContext, conn->socket,
+                                                               (size_t)mqtt_connection_slot(conn),
                                                                &conn->passthrough, &handled,
                                                                mqtt_passthrough_observe_publish,
                                                                mqtt_passthrough_observe_control,
                                                                mqtt_passthrough_publish_completed,
+                                                               mqtt_passthrough_subscription_snapshot,
+                                                               mqtt_passthrough_subscription_apply,
+                                                               mqtt_passthrough_subscription_qos,
                                                                conn,
                                                                &passthrough_box_settings);
                             if (!error && handled)
@@ -3614,7 +3825,7 @@ void mqtt_server_task()
                                 error = tb2_mqtt_passthrough_forward_initial(conn->passthrough,
                                                                              conn->buffer,
                                                                              conn->buffer_len);
-                                if (!error)
+                                if (!error && tb2_mqtt_passthrough_is_established(conn->passthrough))
                                 {
                                     conn->established = TRUE;
                                     mqtt_connection_replace_existing_box_sessions(conn);

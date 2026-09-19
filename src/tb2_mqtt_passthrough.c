@@ -21,6 +21,9 @@
 #include "http/http_server_misc.h"
 #include "mqtt_forward_filter.h"
 #include "mqtt_nocloud_filter.h"
+#include "mqtt_response_history.h"
+#include <stdatomic.h>
+#include "mutex_manager.h"
 #include "os_ext.h"
 #include "os_port.h"
 #include "platform.h"
@@ -28,6 +31,7 @@
 #include "server_helpers.h"
 #include "settings.h"
 #include "tb2_mqtt_passthrough.h"
+#include "tb2_mqtt_upstream.h"
 #include "tls.h"
 #include "tls_adapter.h"
 
@@ -67,28 +71,12 @@ typedef struct tb2_mqtt_packet_id_entry
     uint16_t wire_id;
     uint8_t qos;
     bool_t local;
+    bool_t pubrel;
+    uint8_t packet_type;
+    uint8_t *packet;
+    size_t packet_length;
     struct tb2_mqtt_packet_id_entry *next;
 } tb2_mqtt_packet_id_entry_t;
-
-typedef enum
-{
-    TB2_MQTT_LOCAL_RESPONSE_CONSUME = 0,
-    TB2_MQTT_LOCAL_RESPONSE_BLOCK,
-    TB2_MQTT_LOCAL_RESPONSE_REWRITE
-} tb2_mqtt_local_response_action_t;
-
-typedef struct tb2_mqtt_local_response_entry
-{
-    uint16_t packet_id;
-    uint8_t qos;
-    tb2_mqtt_local_response_action_t action;
-    uint8_t *payload;
-    size_t payload_len;
-    const char *filter_id;
-    mqtt_forward_filter_result_t manual_decision;
-    bool_t completed;
-    struct tb2_mqtt_local_response_entry *next;
-} tb2_mqtt_local_response_entry_t;
 
 typedef struct
 {
@@ -96,6 +84,7 @@ typedef struct
     OsMutex mutex;
     uint32_t session_counter;
     uint32_t active_sessions;
+    uint32_t upstream_sessions;
     char state[16];
     char error_code[32];
     uint64_t bytes_box_to_upstream;
@@ -133,28 +122,133 @@ typedef struct
     time_t started_at;
 } tb2_mqtt_capture_t;
 
-struct tb2_mqtt_passthrough_session
-{
+#define TB2_MQTT_INFLIGHT_MAX 32U
+#define TB2_MQTT_BUFFER_LIMIT (1024U * 1024U)
+#define TB2_MQTT_SESSION_MAX 32U
+#define TB2_MQTT_HANDSHAKE_TIMEOUT_MS 10000U
+#define TB2_MQTT_POLICY_CHECK_MS 1000U
+
+typedef struct {
+    uint64_t token;
+    uint8_t *original;
+    size_t original_length;
+    uint8_t *wire;
+    size_t wire_length;
+    size_t budget_bytes;
+    char *topic;
+    const char *action;
+    const char *filter_id;
+    mqtt_forward_filter_result_t decision;
+    bool_t has_decision;
+    uint16_t original_id;
+    uint16_t wire_id;
+    uint8_t packet_type;
+    bool_t generated;
+    bool_t rewritten;
+    size_t removed;
+} tb2_mqtt_pending_write_t;
+
+typedef enum {
+    TB2_MQTT_CLOUD_DOWN, TB2_MQTT_CLOUD_CONNACK,
+    TB2_MQTT_CLOUD_SUBACK, TB2_MQTT_CLOUD_READY
+} tb2_mqtt_cloud_phase_t;
+
+struct tb2_mqtt_passthrough_session {
     TlsContext *box_tls;
     Socket *box_socket;
-    HttpClientContext upstream;
-    bool_t upstream_initialized;
     settings_t *box_settings;
     tb2_mqtt_publish_observer_t observer;
     tb2_mqtt_control_observer_t control_observer;
     tb2_mqtt_publish_completed_t publish_completed;
+    tb2_mqtt_subscription_snapshot_t subscription_snapshot;
+    tb2_mqtt_subscription_apply_t subscription_apply;
+    tb2_mqtt_subscription_qos_t subscription_qos;
     void *observer_context;
     tb2_mqtt_stream_t box_stream;
     tb2_mqtt_stream_t upstream_stream;
     tb2_mqtt_qos2_entry_t *blocked_qos2_box;
     tb2_mqtt_qos2_entry_t *blocked_qos2_upstream;
     tb2_mqtt_packet_id_entry_t *packet_ids;
-    tb2_mqtt_local_response_entry_t *local_responses;
-    size_t local_response_count;
+    tb2_mqtt_packet_id_entry_t *cloud_ids;
     uint16_t next_local_packet_id;
+    uint16_t next_cloud_packet_id;
     tb2_mqtt_capture_t capture;
     bool_t capture_opened;
+    atomic_bool capture_failed;
+    atomic_bool privacy_failed;
+    OsMutex io_mutex;
+    OsMutex ids_mutex;
+    tb2_mqtt_upstream_worker_t *worker;
+    uint64_t owner;
+    uint64_t epoch;
+    uint64_t confirmed_epoch;
+    uint64_t next_token;
+    tb2_mqtt_pending_write_t writes[TB2_MQTT_INFLIGHT_MAX];
+    size_t writes_bytes;
+    tb2_mqtt_cloud_phase_t cloud_phase;
+    uint8_t *connect_packet;
+    size_t connect_length;
+    size_t connect_header;
+    size_t connect_flags_offset;
+    size_t will_begin;
+    size_t will_end;
+    uint8_t *cloud_connect;
+    size_t cloud_connect_length;
+    uint16_t keepalive;
+    uint32_t last_box_rx;
+    uint32_t last_cloud_tx;
+    uint32_t cloud_started_at;
+    uint32_t ping_sent_at;
+    bool_t ping_pending;
+    bool_t established;
+    bool_t clean_session;
+    bool_t clean_disconnect;
+    bool_t upstream_configured;
+    bool_t ever_connected;
+    char client_id[256];
+    char upstream_error[48];
+    tb2_mqtt_subscription_t synced[TB2_MQTT_SUBSCRIPTIONS_MAX];
+    size_t synced_count;
+    bool_t subscriptions_dirty;
+    int saved_slot;
+    bool_t configure_attempted;
+    atomic_bool box_write_failed;
+    /* API snapshot: protected by the global status mutex, never a live
+     * cross-thread read of worker/parser state. */
+    bool_t runtime_local;
+    bool_t runtime_cloud;
+    char runtime_state[16];
+    char runtime_error[48];
+    uint32_t last_configure_at;
+    uint32_t last_will_check;
+    mqtt_response_history_t response_history;
 };
+
+typedef struct {
+    bool_t used;
+    uint64_t owner;
+    bool_t persistent;
+    tb2_mqtt_passthrough_session_t *active;
+    char box[32];
+    char client_id[256];
+    tb2_mqtt_subscription_t subscriptions[TB2_MQTT_SUBSCRIPTIONS_MAX];
+    size_t subscription_count;
+    tb2_mqtt_qos2_entry_t *incoming;
+    tb2_mqtt_packet_id_entry_t *outgoing;
+    uint16_t next_id;
+    mqtt_response_history_t response_history;
+} tb2_mqtt_saved_session_t;
+static tb2_mqtt_saved_session_t saved_sessions[TB2_MQTT_SESSION_MAX];
+static uint64_t next_owner;
+static void tb2_mqtt_cloud_reset(tb2_mqtt_passthrough_session_t *session, const char *reason);
+static error_t tb2_mqtt_process_stream(tb2_mqtt_passthrough_session_t *session,
+    bool_t box_to_upstream, const uint8_t *data, size_t length);
+static void tb2_mqtt_packet_ids_clear(tb2_mqtt_packet_id_entry_t **list);
+static void tb2_mqtt_pending_writes_clear(tb2_mqtt_passthrough_session_t *session);
+static bool_t tb2_mqtt_utf8_valid(const uint8_t *text, size_t length);
+static bool_t tb2_mqtt_cloud_available(const tb2_mqtt_passthrough_session_t *session);
+static void tb2_mqtt_notify_publish_completed(tb2_mqtt_passthrough_session_t *session,
+    bool_t box_to_upstream, const uint8_t *packet, size_t length);
 
 static tb2_mqtt_passthrough_status_t mqtt_passthrough_status;
 
@@ -162,27 +256,6 @@ static void tb2_mqtt_trace_error(const char *stage, error_t error)
 {
     TRACE_ERROR("TB2 MQTT upstream stage=%s failed error=%s code=%d\r\n",
                 stage, error2text(error), (int)error);
-}
-
-static void tb2_mqtt_trace_upstream_client_auth(const HttpClientContext *upstream)
-{
-    const TlsContext *tls_context = upstream != NULL ? upstream->tlsContext : NULL;
-    if (tls_context == NULL)
-    {
-        TRACE_DEBUG("TB2 MQTT upstream stage=client_auth certificate_request=unknown"
-                    " response=unknown reason=tls_context_missing\r\n");
-        return;
-    }
-
-    const bool_t requested = tls_context->clientCertRequested;
-    const bool_t certificate_sent = requested && tls_context->cert != NULL;
-    const char *response = !requested ? "not_sent" :
-                           certificate_sent ? "certificate_sent" : "empty_certificate";
-    TRACE_DEBUG("TB2 MQTT upstream stage=client_auth certificate_request=%s"
-                " response=%s resumed=%s\r\n",
-                requested ? "received" : "not_received",
-                response,
-                tls_context->resume ? "true" : "false");
 }
 
 static void tb2_mqtt_set_private_permissions(const char *path, bool_t directory)
@@ -302,142 +375,6 @@ static settings_t *tb2_mqtt_select_identity_settings(settings_t *box_settings)
                 overlay_override ? "box_overlay" : "global_default",
                 overlay_override ? "true" : "false");
     return identity_settings;
-}
-
-static error_t tb2_mqtt_outbound_tls_init(HttpClientContext *context, TlsContext *tls_context)
-{
-    settings_t *settings = (settings_t *)context->sourceCtx;
-    TRACE_DEBUG("TB2 MQTT upstream stage=tls_init begin server=%s identity=%s\r\n",
-                context->serverName,
-                tb2_mqtt_has_original_identity(settings) ? "available" : "unavailable");
-    if (!tb2_mqtt_has_original_identity(settings))
-    {
-        tb2_mqtt_trace_error("tls_identity", ERROR_FAILURE);
-        return ERROR_FAILURE;
-    }
-
-    error_t error = tlsSetPrng(tls_context, rand_get_algo(), rand_get_context());
-    if (error)
-    {
-        tb2_mqtt_trace_error("tls_prng", error);
-    }
-    if (!error)
-    {
-        error = tlsSetTrustedCaList(tls_context, settings->internal.client_tb2.ca,
-                                    osStrlen(settings->internal.client_tb2.ca));
-        if (error)
-        {
-            tb2_mqtt_trace_error("tls_ca", error);
-        }
-    }
-    if (!error)
-    {
-        error = tlsAddCertificate(tls_context, settings->internal.client_tb2.crt,
-                                  osStrlen(settings->internal.client_tb2.crt),
-                                  settings->internal.client_tb2.key,
-                                  osStrlen(settings->internal.client_tb2.key));
-        if (error)
-        {
-            tb2_mqtt_trace_error("tls_client_certificate", error);
-        }
-    }
-    if (!error)
-    {
-        error = tlsSetServerName(tls_context, context->serverName);
-        if (error)
-        {
-            tb2_mqtt_trace_error("tls_server_name", error);
-        }
-    }
-    if (!error)
-    {
-        tls_context_key_log_init(tls_context);
-        TRACE_DEBUG("TB2 MQTT upstream stage=tls_init ready server=%s\r\n",
-                    context->serverName);
-    }
-    return error;
-}
-
-static error_t tb2_mqtt_connect_upstream(settings_t *box_settings, HttpClientContext *upstream)
-{
-    settings_t *global = get_settings();
-    upstream->serverName = global->mqtt_client_upstream.hostname;
-    upstream->sourceCtx = box_settings;
-
-    TRACE_DEBUG("TB2 MQTT upstream stage=connect begin target=%s:%u timeout_ms=%u\r\n",
-                global->mqtt_client_upstream.hostname,
-                (unsigned)global->mqtt_client_upstream.port,
-                (unsigned)global->core.http_client_timeout);
-
-    error_t error = httpClientSetTimeout(upstream, global->core.http_client_timeout);
-    if (error)
-    {
-        tb2_mqtt_trace_error("configure_timeout", error);
-    }
-    if (!error)
-    {
-        error = httpClientRegisterTlsInitCallback(upstream, tb2_mqtt_outbound_tls_init);
-        if (error)
-        {
-            tb2_mqtt_trace_error("register_tls_callback", error);
-        }
-    }
-    if (error)
-    {
-        return error;
-    }
-
-    void *resolver = resolve_host(global->mqtt_client_upstream.hostname);
-    if (resolver == NULL)
-    {
-        tb2_mqtt_trace_error("dns_resolve", ERROR_ADDRESS_NOT_FOUND);
-        return ERROR_ADDRESS_NOT_FOUND;
-    }
-    TRACE_DEBUG("TB2 MQTT upstream stage=dns_resolve success host=%s\r\n",
-                global->mqtt_client_upstream.hostname);
-
-    error = ERROR_ADDRESS_NOT_FOUND;
-    for (int position = 0;; position++)
-    {
-        IpAddr address;
-        if (!resolve_get_ip(resolver, position, &address))
-        {
-            break;
-        }
-        TRACE_DEBUG("TB2 MQTT upstream stage=tcp_connect attempt=%d address=%s port=%u\r\n",
-                    position + 1, ipAddrToString(&address, NULL),
-                    (unsigned)global->mqtt_client_upstream.port);
-        error = httpClientConnect(upstream, &address,
-                                  (uint16_t)global->mqtt_client_upstream.port);
-        if (!error)
-        {
-            tb2_mqtt_trace_upstream_client_auth(upstream);
-            TRACE_DEBUG("TB2 MQTT upstream stage=tcp_tls_connect success attempt=%d address=%s\r\n",
-                        position + 1, ipAddrToString(&address, NULL));
-            break;
-        }
-        tb2_mqtt_trace_error("tcp_tls_connect", error);
-    }
-    resolve_free(resolver);
-
-    if (!error && upstream->socket != NULL)
-    {
-        error_t timeout_error = socketSetTimeout(upstream->socket, TB2_MQTT_TUNNEL_IO_TIMEOUT_MS);
-        if (timeout_error)
-        {
-            tb2_mqtt_trace_error("configure_tunnel_timeout", timeout_error);
-            return timeout_error;
-        }
-        TRACE_DEBUG("TB2 MQTT upstream stage=connect ready target=%s:%u io_timeout_ms=%u\r\n",
-                    global->mqtt_client_upstream.hostname,
-                    (unsigned)global->mqtt_client_upstream.port,
-                    (unsigned)TB2_MQTT_TUNNEL_IO_TIMEOUT_MS);
-    }
-    else if (error)
-    {
-        tb2_mqtt_trace_error("connect_exhausted", error);
-    }
-    return error;
 }
 
 static error_t tb2_mqtt_capture_open(tb2_mqtt_capture_t *capture, settings_t *settings)
@@ -860,12 +797,6 @@ static void tb2_mqtt_status_start(void)
     osReleaseMutex(&mqtt_passthrough_status.mutex);
 }
 
-static void tb2_mqtt_status_connected(void)
-{
-    osAcquireMutex(&mqtt_passthrough_status.mutex);
-    osStrcpy(mqtt_passthrough_status.state, "connected");
-    osReleaseMutex(&mqtt_passthrough_status.mutex);
-}
 
 static void tb2_mqtt_status_add_bytes(bool_t box_to_upstream, size_t length)
 {
@@ -1002,88 +933,190 @@ static void tb2_mqtt_add_nocloud_stats(
     osReleaseMutex(&mqtt_passthrough_status.mutex);
 }
 
+static void tb2_mqtt_pending_write_free(tb2_mqtt_pending_write_t *write)
+{
+    osFreeMem(write->original);
+    osFreeMem(write->wire);
+    osFreeMem(write->topic);
+    osMemset(write, 0, sizeof(*write));
+}
+
+static void tb2_mqtt_pending_writes_clear(tb2_mqtt_passthrough_session_t *session)
+{
+    for (size_t i = 0; i < TB2_MQTT_INFLIGHT_MAX; i++)
+        tb2_mqtt_pending_write_free(&session->writes[i]);
+    session->writes_bytes = 0;
+}
+
+/* Caller holds io_mutex. A failed handoff is transport loss, not a policy block. */
+static void tb2_mqtt_capture_transport_drop(tb2_mqtt_passthrough_session_t *session,
+    const uint8_t *data, size_t length, const uint8_t *wire, size_t wire_length,
+    uint8_t type, const char *topic, const char *reason,
+    const mqtt_forward_filter_result_t *decision)
+{
+    if (session->capture_opened && !session->capture_failed &&
+        tb2_mqtt_capture_packet_ex(&session->capture, "box_to_upstream",
+            data, length, wire, wire_length, type, topic, FALSE, NULL, FALSE,
+            TRUE, reason, 0, 0, 0, decision))
+        session->capture_failed = TRUE;
+    TRACE_WARNING("TB2 MQTT cloud handoff dropped reason=%s; local connection retained\r\n", reason);
+}
+
+/* io_mutex serializes box TLS writes and capture. Never invoke observers while
+ * holding it: HTTP controls acquire their own app-control lock first. */
 static error_t tb2_mqtt_record_packet_ex(tb2_mqtt_passthrough_session_t *session,
-                                         bool_t box_to_upstream,
-                                         const uint8_t *data, size_t length,
-                                         const uint8_t *wire_data, size_t wire_length,
-                                         uint8_t packet_type, const char *topic,
-                                         bool_t forwarded, const char *filter_id,
-                                         bool_t generated, bool_t packet_complete,
-                                         const char *action, uint16_t packet_id,
-                                         uint16_t wire_packet_id,
-                                         bool_t count_blocked, bool_t rewritten,
-                                         size_t removed_count,
-                                         const mqtt_forward_filter_result_t *manual_decision)
+    bool_t box_to_upstream, const uint8_t *data, size_t length,
+    const uint8_t *wire_data, size_t wire_length, uint8_t packet_type, const char *topic,
+    bool_t forwarded, const char *filter_id, bool_t generated, bool_t packet_complete,
+    const char *action, uint16_t packet_id, uint16_t wire_packet_id,
+    bool_t count_blocked, bool_t rewritten, size_t removed_count,
+    const mqtt_forward_filter_result_t *manual_decision)
 {
     const char *direction = box_to_upstream ? "box_to_upstream" : "upstream_to_box";
-    error_t error = tb2_mqtt_capture_packet_ex(&session->capture, direction,
-                                               data, length, wire_data, wire_length,
-                                               packet_type, topic, forwarded, filter_id,
-                                               generated, packet_complete, action,
-                                               packet_id, wire_packet_id,
-                                               removed_count, manual_decision);
-    if (error)
+    const uint8_t *outgoing = wire_data != NULL ? wire_data : data;
+    size_t outgoing_length = wire_data != NULL ? wire_length : length;
+    osAcquireMutex(&session->io_mutex);
+    bool_t cloud_send = box_to_upstream && forwarded;
+    bool_t cloud_available = session->worker != NULL && session->epoch != 0 &&
+        !session->capture_failed && !session->privacy_failed && tb2_mqtt_passthrough_is_enabled() &&
+        (packet_type != TB2_MQTT_PACKET_PUBLISH ||
+         session->cloud_phase == TB2_MQTT_CLOUD_READY);
+    bool_t box_send = !box_to_upstream && forwarded;
+    const char *capture_action = cloud_send ?
+        (cloud_available ? "upstream_queued" : "upstream_unavailable") :
+        box_send ? "box_write_pending" : action;
+    error_t capture_error = session->capture_opened && !session->capture_failed ?
+        tb2_mqtt_capture_packet_ex(&session->capture, direction, data, length,
+            wire_data, wire_length, packet_type, topic, cloud_send || box_send ? FALSE : forwarded,
+            filter_id, generated, packet_complete, capture_action, packet_id,
+            wire_packet_id, removed_count, manual_decision) : ERROR_WRITE_FAILED;
+    if (capture_error && !session->capture_failed)
     {
-        tb2_mqtt_trace_error("capture_write", error);
-        return ERROR_WRITE_FAILED;
+        session->capture_failed = TRUE;
+        osStrcpy(session->upstream_error, "capture_write_failed");
+        TRACE_WARNING("TB2 MQTT capture failed; Internet relay suspended, local session retained\r\n");
     }
-
+    if (cloud_send)
+    {
+        if (!cloud_available || session->capture_failed)
+        {
+            osReleaseMutex(&session->io_mutex);
+            return NO_ERROR;
+        }
+        tb2_mqtt_pending_write_t *pending = NULL;
+        for (size_t i = 0; i < TB2_MQTT_INFLIGHT_MAX; i++)
+            if (session->writes[i].token == 0) { pending = &session->writes[i]; break; }
+        /* Count original capture bytes, wire bytes, the worker's owned copy
+         * and the diagnostic topic against the same handoff budget. */
+        size_t topic_bytes = topic != NULL ? osStrlen(topic) + 1 : 0;
+        size_t budget = length + 2U * outgoing_length + topic_bytes;
+        if (pending == NULL || length > TB2_MQTT_BUFFER_LIMIT ||
+            outgoing_length > TB2_MQTT_BUFFER_LIMIT || budget > TB2_MQTT_BUFFER_LIMIT ||
+            session->writes_bytes > TB2_MQTT_BUFFER_LIMIT - budget)
+        {
+            osStrcpy(session->upstream_error, "upstream_buffer_full");
+            tb2_mqtt_capture_transport_drop(session, data, length, wire_data, wire_length,
+                packet_type, topic, "upstream_buffer_full", manual_decision);
+            tb2_mqtt_upstream_reconnect(session->worker, ERROR_OUT_OF_RESOURCES);
+            osReleaseMutex(&session->io_mutex);
+            return NO_ERROR;
+        }
+        pending->original = osAllocMem(length);
+        pending->wire = osAllocMem(outgoing_length);
+        pending->topic = topic != NULL ? osAllocMem(osStrlen(topic) + 1) : NULL;
+        if (pending->topic != NULL) osStrcpy(pending->topic, topic);
+        uint8_t *transport_copy = osAllocMem(outgoing_length);
+        if (pending->original == NULL || pending->wire == NULL ||
+            transport_copy == NULL || (topic != NULL && pending->topic == NULL))
+        {
+            osFreeMem(transport_copy);
+            tb2_mqtt_pending_write_free(pending);
+            tb2_mqtt_capture_transport_drop(session, data, length, wire_data, wire_length,
+                packet_type, topic, "upstream_out_of_memory", manual_decision);
+            tb2_mqtt_upstream_reconnect(session->worker, ERROR_OUT_OF_MEMORY);
+            osReleaseMutex(&session->io_mutex);
+            return NO_ERROR;
+        }
+        osMemcpy(pending->original, data, length);
+        osMemcpy(pending->wire, outgoing, outgoing_length);
+        osMemcpy(transport_copy, outgoing, outgoing_length);
+        pending->budget_bytes = budget;
+        pending->original_length = length;
+        pending->wire_length = outgoing_length;
+        pending->action = action;
+        pending->filter_id = filter_id;
+        pending->original_id = packet_id;
+        pending->wire_id = wire_packet_id;
+        pending->packet_type = packet_type;
+        pending->generated = generated;
+        pending->rewritten = rewritten;
+        pending->removed = removed_count;
+        pending->has_decision = manual_decision != NULL;
+        if (manual_decision != NULL) pending->decision = *manual_decision;
+        pending->token = ++session->next_token;
+        error_t error = tb2_mqtt_upstream_send(session->worker, session->epoch,
+            pending->token, transport_copy, outgoing_length);
+        if (error)
+        {
+            osFreeMem(transport_copy);
+            tb2_mqtt_pending_write_free(pending);
+            osStrcpy(session->upstream_error, "upstream_unavailable");
+            tb2_mqtt_capture_transport_drop(session, data, length, wire_data, wire_length,
+                packet_type, topic, error == ERROR_OUT_OF_RESOURCES ?
+                "upstream_buffer_full" : "upstream_unavailable", manual_decision);
+        }
+        else session->writes_bytes += budget;
+        osReleaseMutex(&session->io_mutex);
+        return NO_ERROR;
+    }
     if (!forwarded)
     {
         if (count_blocked)
         {
-            if (box_to_upstream)
-                session->capture.messages_blocked_box_to_upstream++;
-            else
-                session->capture.messages_blocked_upstream_to_box++;
+            if (box_to_upstream) session->capture.messages_blocked_box_to_upstream++;
+            else session->capture.messages_blocked_upstream_to_box++;
             tb2_mqtt_status_add_message(box_to_upstream, TRUE);
         }
-        tb2_mqtt_add_nocloud_stats(session, box_to_upstream, FALSE,
-                                   removed_count);
+        tb2_mqtt_add_nocloud_stats(session, box_to_upstream, FALSE, removed_count);
+        osReleaseMutex(&session->io_mutex);
         return NO_ERROR;
     }
-
-    TlsContext *destination = box_to_upstream ? session->upstream.tlsContext : session->box_tls;
-    const uint8_t *outgoing = wire_data != NULL ? wire_data : data;
-    size_t outgoing_length = wire_data != NULL ? wire_length : length;
-    error = tb2_mqtt_tls_write_all(destination, outgoing, outgoing_length);
-    if (error)
+    if ((session->capture_failed || session->privacy_failed) && manual_decision != NULL &&
+        manual_decision->route == MQTT_FORWARD_ROUTE_TONIES_TO_BOX)
+    { osReleaseMutex(&session->io_mutex); return NO_ERROR; }
+    /* Local control and protocol ACKs must still work when capture storage fails. */
+    error_t error = tb2_mqtt_tls_write_all(session->box_tls, outgoing, outgoing_length);
+    if (error) session->box_write_failed = TRUE;
+    if (session->capture_opened && !session->capture_failed &&
+        tb2_mqtt_capture_packet_ex(&session->capture, direction, data, length,
+            wire_data, wire_length, packet_type, topic, !error, filter_id,
+            generated, packet_complete, error ? "box_write_failed" :
+                action != NULL ? action : "box_write_complete",
+            packet_id, wire_packet_id, removed_count, manual_decision))
     {
-        return error;
+        session->capture_failed = TRUE;
+        osStrcpy(session->upstream_error, "capture_write_failed");
+        TRACE_WARNING("TB2 MQTT capture completion failed; Internet relay suspended\r\n");
     }
-    if (box_to_upstream)
-    {
-        session->capture.bytes_box_to_upstream += outgoing_length;
-        session->capture.messages_forwarded_box_to_upstream++;
-    }
-    else
+    if (!error)
     {
         session->capture.bytes_upstream_to_box += outgoing_length;
         session->capture.messages_forwarded_upstream_to_box++;
+        tb2_mqtt_status_add_bytes(FALSE, outgoing_length);
+        tb2_mqtt_status_add_message(FALSE, FALSE);
+        tb2_mqtt_add_nocloud_stats(session, FALSE, rewritten, removed_count);
     }
-    tb2_mqtt_status_add_bytes(box_to_upstream, outgoing_length);
-    tb2_mqtt_status_add_message(box_to_upstream, FALSE);
-    tb2_mqtt_add_nocloud_stats(session, box_to_upstream, rewritten,
-                               removed_count);
-    return NO_ERROR;
-}
-
-static error_t tb2_mqtt_record_packet(tb2_mqtt_passthrough_session_t *session,
-                                      bool_t box_to_upstream, const uint8_t *data,
-                                      size_t length, uint8_t packet_type, const char *topic,
-                                      bool_t forwarded, const char *filter_id, bool_t generated,
-                                      bool_t packet_complete)
-{
-    return tb2_mqtt_record_packet_ex(session, box_to_upstream, data, length,
-                                     NULL, 0, packet_type, topic, forwarded,
-                                      filter_id, generated, packet_complete, NULL,
-                                      0, 0, !forwarded, FALSE, 0, NULL);
+    osReleaseMutex(&session->io_mutex);
+    if (!error && packet_type == TB2_MQTT_PACKET_PUBLISH && manual_decision != NULL &&
+        manual_decision->route == MQTT_FORWARD_ROUTE_TONIES_TO_BOX)
+        tb2_mqtt_notify_publish_completed(session, FALSE, outgoing, outgoing_length);
+    return error;
 }
 
 static error_t tb2_mqtt_stream_append(tb2_mqtt_stream_t *stream, const uint8_t *data,
                                       size_t length)
 {
-    if (length > SIZE_MAX - stream->length)
+    if (length > TB2_MQTT_BUFFER_LIMIT || stream->length > TB2_MQTT_BUFFER_LIMIT - length)
     {
         return ERROR_INVALID_LENGTH;
     }
@@ -1186,6 +1219,9 @@ static error_t tb2_mqtt_qos2_begin(tb2_mqtt_qos2_entry_t **list,
         existing->capture_action = capture_action;
         return NO_ERROR;
     }
+    size_t count = 0;
+    for (tb2_mqtt_qos2_entry_t *p = *list; p; p = p->next) count++;
+    if (count >= TB2_MQTT_INFLIGHT_MAX) return ERROR_OUT_OF_RESOURCES;
     tb2_mqtt_qos2_entry_t *entry = osAllocMem(sizeof(*entry));
     if (entry == NULL)
         return ERROR_OUT_OF_MEMORY;
@@ -1197,16 +1233,6 @@ static error_t tb2_mqtt_qos2_begin(tb2_mqtt_qos2_entry_t **list,
     entry->next = *list;
     *list = entry;
     return NO_ERROR;
-}
-
-static tb2_mqtt_qos2_entry_t *tb2_mqtt_qos2_complete(
-    tb2_mqtt_qos2_entry_t *list, uint16_t packet_id)
-{
-    tb2_mqtt_qos2_entry_t *entry = tb2_mqtt_qos2_find(list, packet_id);
-    if (entry == NULL)
-        return NULL;
-    entry->completed = TRUE;
-    return entry;
 }
 
 static void tb2_mqtt_qos2_remove(tb2_mqtt_qos2_entry_t **list,
@@ -1234,209 +1260,106 @@ static void tb2_mqtt_qos2_free(tb2_mqtt_qos2_entry_t **list)
     }
 }
 
-static tb2_mqtt_local_response_entry_t *tb2_mqtt_local_response_find(
-    tb2_mqtt_passthrough_session_t *session, uint16_t packet_id, uint8_t qos)
+static tb2_mqtt_packet_id_entry_t *tb2_mqtt_id_find(tb2_mqtt_packet_id_entry_t *list, uint16_t id)
 {
-    tb2_mqtt_local_response_entry_t *entry = session->local_responses;
-    while (entry != NULL)
-    {
-        if (entry->packet_id == packet_id && entry->qos == qos)
-            return entry;
-        entry = entry->next;
-    }
+    for (; list != NULL; list = list->next)
+        if (list->wire_id == id) return list;
     return NULL;
 }
-
-static void tb2_mqtt_local_response_remove(
-    tb2_mqtt_passthrough_session_t *session,
-    tb2_mqtt_local_response_entry_t *target)
+static tb2_mqtt_packet_id_entry_t *tb2_mqtt_packet_id_find_wire(
+    tb2_mqtt_passthrough_session_t *session, uint16_t id)
 {
-    tb2_mqtt_local_response_entry_t **cursor = &session->local_responses;
-    while (*cursor != NULL)
-    {
-        if (*cursor == target)
+    return tb2_mqtt_id_find(session->packet_ids, id);
+}
+static void tb2_mqtt_id_remove(tb2_mqtt_packet_id_entry_t **list,
+                              tb2_mqtt_packet_id_entry_t *target)
+{
+    for (; *list != NULL; list = &(*list)->next)
+        if (*list == target)
         {
-            *cursor = target->next;
-            osFreeMem(target->payload);
+            *list = target->next;
+            osFreeMem(target->packet);
             osFreeMem(target);
-            if (session->local_response_count > 0)
-                session->local_response_count--;
             return;
         }
-        cursor = &(*cursor)->next;
-    }
 }
-
-static error_t tb2_mqtt_local_response_make_room(
-    tb2_mqtt_passthrough_session_t *session)
+static void tb2_mqtt_packet_id_remove(tb2_mqtt_passthrough_session_t *session,
+                                     tb2_mqtt_packet_id_entry_t *target)
 {
-    while (session->local_response_count >=
-           TB2_MQTT_LOCAL_RESPONSE_HISTORY_MAX)
-    {
-        tb2_mqtt_local_response_entry_t *candidate = NULL;
-        for (tb2_mqtt_local_response_entry_t *entry = session->local_responses;
-             entry != NULL; entry = entry->next)
-        {
-            if (entry->completed)
-                candidate = entry;
-        }
-        if (candidate == NULL)
-            return ERROR_OUT_OF_RESOURCES;
-        tb2_mqtt_local_response_remove(session, candidate);
-    }
-    return NO_ERROR;
+    tb2_mqtt_id_remove(&session->packet_ids, target);
 }
-
-static error_t tb2_mqtt_local_response_store(
-    tb2_mqtt_passthrough_session_t *session, uint16_t packet_id, uint8_t qos,
-    tb2_mqtt_local_response_action_t action, const uint8_t *payload,
-    size_t payload_len, const char *filter_id,
-    const mqtt_forward_filter_result_t *manual_decision)
+static void tb2_mqtt_packet_ids_clear(tb2_mqtt_packet_id_entry_t **list)
 {
-    if (packet_id == 0 || (qos != 1 && qos != 2) ||
-        (action == TB2_MQTT_LOCAL_RESPONSE_REWRITE && payload == NULL))
-    {
-        return ERROR_INVALID_PARAMETER;
-    }
-
-    tb2_mqtt_local_response_entry_t *existing =
-        tb2_mqtt_local_response_find(session, packet_id, qos);
-    if (existing != NULL)
-        tb2_mqtt_local_response_remove(session, existing);
-
-    error_t error = tb2_mqtt_local_response_make_room(session);
-    if (error)
-        return error;
-
-    tb2_mqtt_local_response_entry_t *entry = osAllocMem(sizeof(*entry));
-    if (entry == NULL)
-        return ERROR_OUT_OF_MEMORY;
-    osMemset(entry, 0, sizeof(*entry));
-
-    if (action == TB2_MQTT_LOCAL_RESPONSE_REWRITE)
-    {
-        entry->payload = osAllocMem(payload_len > 0 ? payload_len : 1);
-        if (entry->payload == NULL)
-        {
-            osFreeMem(entry);
-            return ERROR_OUT_OF_MEMORY;
-        }
-        if (payload_len > 0)
-            osMemcpy(entry->payload, payload, payload_len);
-    }
-
-    entry->packet_id = packet_id;
-    entry->qos = qos;
-    entry->action = action;
-    entry->payload_len = payload_len;
-    entry->filter_id = filter_id;
-    entry->manual_decision = *manual_decision;
-    entry->next = session->local_responses;
-    session->local_responses = entry;
-    session->local_response_count++;
-    return NO_ERROR;
+    while (*list != NULL) tb2_mqtt_id_remove(list, *list);
 }
-
-static void tb2_mqtt_local_response_mark_completed(
-    tb2_mqtt_passthrough_session_t *session, uint16_t packet_id, uint8_t qos)
-{
-    tb2_mqtt_local_response_entry_t *entry =
-        tb2_mqtt_local_response_find(session, packet_id, qos);
-    if (entry != NULL)
-        entry->completed = TRUE;
-}
-
-static void tb2_mqtt_local_responses_free(
-    tb2_mqtt_passthrough_session_t *session)
-{
-    while (session->local_responses != NULL)
-        tb2_mqtt_local_response_remove(session, session->local_responses);
-}
-
-static tb2_mqtt_packet_id_entry_t *tb2_mqtt_packet_id_find_wire(
-    tb2_mqtt_passthrough_session_t *session, uint16_t wire_id)
-{
-    tb2_mqtt_packet_id_entry_t *entry = session->packet_ids;
-    while (entry != NULL)
-    {
-        if (entry->wire_id == wire_id)
-            return entry;
-        entry = entry->next;
-    }
-    return NULL;
-}
-
-static tb2_mqtt_packet_id_entry_t *tb2_mqtt_packet_id_find_upstream(
-    tb2_mqtt_passthrough_session_t *session, uint16_t original_id)
-{
-    tb2_mqtt_packet_id_entry_t *entry = session->packet_ids;
-    while (entry != NULL)
-    {
-        if (!entry->local && entry->original_id == original_id)
-            return entry;
-        entry = entry->next;
-    }
-    return NULL;
-}
-
 static error_t tb2_mqtt_packet_id_add(tb2_mqtt_passthrough_session_t *session,
-                                      uint16_t original_id, uint16_t wire_id,
-                                      uint8_t qos, bool_t local)
+    uint16_t original_id, uint16_t wire_id, uint8_t qos, bool_t local)
 {
+    size_t count = 0;
+    for (tb2_mqtt_packet_id_entry_t *p = session->packet_ids; p; p = p->next) count++;
+    if (count >= TB2_MQTT_INFLIGHT_MAX) return ERROR_OUT_OF_RESOURCES;
     tb2_mqtt_packet_id_entry_t *entry = osAllocMem(sizeof(*entry));
-    if (entry == NULL)
-        return ERROR_OUT_OF_MEMORY;
+    if (entry == NULL) return ERROR_OUT_OF_MEMORY;
+    osMemset(entry, 0, sizeof(*entry));
     entry->original_id = original_id;
     entry->wire_id = wire_id;
     entry->qos = qos;
     entry->local = local;
+    entry->packet_type = TB2_MQTT_PACKET_PUBLISH;
     entry->next = session->packet_ids;
     session->packet_ids = entry;
     return NO_ERROR;
 }
-
-static void tb2_mqtt_packet_id_remove(tb2_mqtt_passthrough_session_t *session,
-                                      tb2_mqtt_packet_id_entry_t *target)
-{
-    tb2_mqtt_packet_id_entry_t **cursor = &session->packet_ids;
-    while (*cursor != NULL)
-    {
-        if (*cursor == target)
-        {
-            *cursor = target->next;
-            osFreeMem(target);
-            return;
-        }
-        cursor = &(*cursor)->next;
-    }
-}
-
-static void tb2_mqtt_packet_ids_free(tb2_mqtt_passthrough_session_t *session)
-{
-    while (session->packet_ids != NULL)
-    {
-        tb2_mqtt_packet_id_entry_t *removed = session->packet_ids;
-        session->packet_ids = removed->next;
-        osFreeMem(removed);
-    }
-}
-
 static error_t tb2_mqtt_allocate_wire_packet_id(
     tb2_mqtt_passthrough_session_t *session, uint16_t *packet_id)
 {
-    for (uint32_t attempt = 0; attempt < UINT16_MAX; attempt++)
+    for (uint32_t i = 0; i < UINT16_MAX; i++)
     {
-        uint16_t candidate = session->next_local_packet_id;
-        if (candidate == 0)
-            candidate = UINT16_MAX;
-        session->next_local_packet_id = candidate > 1 ? candidate - 1 : UINT16_MAX;
-        if (tb2_mqtt_packet_id_find_wire(session, candidate) == NULL)
-        {
-            *packet_id = candidate;
-            return NO_ERROR;
-        }
+        uint16_t id = session->next_local_packet_id;
+        if (id == 0) id = UINT16_MAX;
+        session->next_local_packet_id = id > 1 ? id - 1 : UINT16_MAX;
+        if (tb2_mqtt_packet_id_find_wire(session, id) == NULL)
+        { *packet_id = id; return NO_ERROR; }
     }
     return ERROR_OUT_OF_RESOURCES;
+}
+static error_t tb2_mqtt_cloud_id_allocate(tb2_mqtt_passthrough_session_t *session,
+                                         uint8_t type, uint8_t qos, uint16_t *id)
+{
+    size_t count = 0;
+    for (tb2_mqtt_packet_id_entry_t *p = session->cloud_ids; p; p = p->next) count++;
+    if (count >= TB2_MQTT_INFLIGHT_MAX) return ERROR_OUT_OF_RESOURCES;
+    do { if (++session->next_cloud_packet_id == 0) session->next_cloud_packet_id = 1; }
+    while (tb2_mqtt_id_find(session->cloud_ids, session->next_cloud_packet_id));
+    tb2_mqtt_packet_id_entry_t *entry = osAllocMem(sizeof(*entry));
+    if (entry == NULL) return ERROR_OUT_OF_MEMORY;
+    osMemset(entry, 0, sizeof(*entry));
+    entry->wire_id = *id = session->next_cloud_packet_id;
+    entry->packet_type = type;
+    entry->qos = qos;
+    entry->next = session->cloud_ids;
+    session->cloud_ids = entry;
+    return NO_ERROR;
+}
+/* Bound the retransmission state independently of worker handoff queues. */
+static error_t tb2_mqtt_id_store_packet(tb2_mqtt_packet_id_entry_t *list,
+    tb2_mqtt_packet_id_entry_t *entry, const uint8_t *packet, size_t length)
+{
+    size_t bytes = length;
+    if (length > TB2_MQTT_BUFFER_LIMIT) return ERROR_OUT_OF_RESOURCES;
+    for (tb2_mqtt_packet_id_entry_t *p = list; p; p = p->next)
+        if (p != entry)
+        {
+            if (p->packet_length > TB2_MQTT_BUFFER_LIMIT - bytes) return ERROR_OUT_OF_RESOURCES;
+            bytes += p->packet_length;
+        }
+    uint8_t *copy = osAllocMem(length);
+    if (copy == NULL) return ERROR_OUT_OF_MEMORY;
+    osMemcpy(copy, packet, length);
+    osFreeMem(entry->packet);
+    entry->packet = copy;
+    entry->packet_length = length;
+    return NO_ERROR;
 }
 
 static error_t tb2_mqtt_rewrite_packet_id(const uint8_t *packet,
@@ -1461,7 +1384,7 @@ static error_t tb2_mqtt_send_generated_ack(tb2_mqtt_passthrough_session_t *sessi
                                            uint16_t packet_id,
                                            const char *capture_action)
 {
-    uint8_t packet[] = {(uint8_t)(type << 4), 0x02U,
+    uint8_t packet[] = {(uint8_t)((type << 4) | (type == TB2_MQTT_PACKET_PUBREL ? 2 : 0)), 0x02U,
                         (uint8_t)(packet_id >> 8), (uint8_t)packet_id};
     bool_t ack_box_to_upstream = !source_box_to_upstream;
     TRACE_DEBUG("TB2 MQTT proxy generated=%s direction=%s packet_id=%u\r\n",
@@ -1481,7 +1404,7 @@ static error_t tb2_mqtt_parse_publish(const uint8_t *packet, size_t packet_size,
                                       size_t *packet_id_offset)
 {
     *qos = (packet[0] >> 1) & 0x03U;
-    if (*qos == 3 || fixed_header_size + 2 > packet_size)
+    if (*qos == 3 || (*qos == 0 && (packet[0] & 8)) || fixed_header_size + 2 > packet_size)
         return ERROR_INVALID_LENGTH;
     size_t offset = fixed_header_size;
     size_t topic_len = ((size_t)packet[offset] << 8) | packet[offset + 1];
@@ -1493,7 +1416,8 @@ static error_t tb2_mqtt_parse_publish(const uint8_t *packet, size_t packet_size,
         return ERROR_OUT_OF_MEMORY;
     osMemcpy(*topic, packet + offset, topic_len);
     (*topic)[topic_len] = '\0';
-    if (osStrlen(*topic) != topic_len)
+    if (!tb2_mqtt_utf8_valid((const uint8_t *)*topic, topic_len) ||
+        memchr(*topic, '+', topic_len) || memchr(*topic, '#', topic_len))
     {
         osFreeMem(*topic);
         *topic = NULL;
@@ -1523,6 +1447,21 @@ static error_t tb2_mqtt_parse_publish(const uint8_t *packet, size_t packet_size,
     *payload = packet + offset;
     *payload_len = packet_size - offset;
     return NO_ERROR;
+}
+
+/* Called only after the complete packet was written, never on queue acceptance. */
+static void tb2_mqtt_notify_publish_completed(tb2_mqtt_passthrough_session_t *session,
+    bool_t box_to_upstream, const uint8_t *packet, size_t length)
+{
+    if (session->publish_completed == NULL) return;
+    size_t size, header, offset, payload_length;
+    uint8_t qos; uint16_t id; char *topic = NULL; const uint8_t *payload = NULL;
+    if (!tb2_mqtt_packet_size(packet, length, &size, &header) &&
+        !tb2_mqtt_parse_publish(packet, size, header, &topic, &payload,
+            &payload_length, &qos, &id, &offset))
+        session->publish_completed(session->observer_context, box_to_upstream,
+            topic, payload, payload_length);
+    osFreeMem(topic);
 }
 
 static error_t tb2_mqtt_rebuild_publish(
@@ -1586,61 +1525,459 @@ static error_t tb2_mqtt_rebuild_publish(
     return NO_ERROR;
 }
 
-static error_t tb2_mqtt_replay_local_response(
-    tb2_mqtt_passthrough_session_t *session, const uint8_t *packet,
-    size_t packet_size, size_t fixed_header_size, const char *topic,
-    const uint8_t *payload, size_t packet_id_offset,
-    tb2_mqtt_local_response_entry_t *entry)
+/* MQTT strings are validated before they become a topic, client ID or path key. */
+static bool_t tb2_mqtt_utf8_valid(const uint8_t *text, size_t length)
 {
-    TRACE_DEBUG("TB2 MQTT proxy direction=box_to_upstream packet_type=PUBLISH"
-                " topic='%s' qos=%u packet_id=%u action=local_response_replay\r\n",
-                topic, (unsigned)entry->qos, (unsigned)entry->packet_id);
-
-    if (entry->action != TB2_MQTT_LOCAL_RESPONSE_REWRITE)
+    for (size_t i = 0; i < length;)
     {
-        bool_t count_blocked =
-            entry->action == TB2_MQTT_LOCAL_RESPONSE_BLOCK;
-        error_t error = tb2_mqtt_record_packet_ex(
-            session, TRUE, packet, packet_size, NULL, 0,
-            TB2_MQTT_PACKET_PUBLISH, topic, FALSE, entry->filter_id, FALSE,
-            TRUE, count_blocked ? "local_response_replay_block" :
-                                  "local_response_replay_consume",
-            entry->packet_id, entry->packet_id, count_blocked, FALSE, 0,
-            &entry->manual_decision);
-        if (!error)
+        uint32_t cp = text[i++];
+        unsigned trailing = 0;
+        uint32_t minimum = 0;
+        if (cp >= 0xc2 && cp <= 0xdf) { cp &= 0x1f; trailing = 1; minimum = 0x80; }
+        else if (cp >= 0xe0 && cp <= 0xef) { cp &= 0x0f; trailing = 2; minimum = 0x800; }
+        else if (cp >= 0xf0 && cp <= 0xf4) { cp &= 7; trailing = 3; minimum = 0x10000; }
+        else if (cp >= 0x80) return FALSE;
+        if (trailing > length - i) return FALSE;
+        while (trailing--)
         {
-            error = tb2_mqtt_send_generated_ack(
-                session, TRUE, entry->qos == 1 ? TB2_MQTT_PACKET_PUBACK :
-                                                 TB2_MQTT_PACKET_PUBREC,
-                entry->packet_id,
-                count_blocked ?
-                    (entry->qos == 1 ? "blocked_replay_puback" :
-                                       "blocked_replay_pubrec") :
-                    (entry->qos == 1 ? "local_response_replay_puback" :
-                                       "local_response_replay_pubrec"));
+            if ((text[i] & 0xc0) != 0x80) return FALSE;
+            cp = (cp << 6) | (text[i++] & 0x3f);
         }
-        if (!error && entry->qos == 1)
-            entry->completed = TRUE;
-        return error;
+        if (cp < minimum || cp == 0 || cp > 0x10ffff ||
+            (cp >= 0xd800 && cp <= 0xdfff) || (cp >= 0xfdd0 && cp <= 0xfdef) ||
+            (cp & 0xffff) == 0xfffe || (cp & 0xffff) == 0xffff) return FALSE;
     }
-
-    uint8_t *rebuilt = NULL;
-    size_t rebuilt_size = 0;
-    size_t rebuilt_packet_id_offset = 0;
-    error_t error = tb2_mqtt_rebuild_publish(
-        packet, packet_size, fixed_header_size, payload, entry->payload,
-        entry->payload_len, packet_id_offset, &rebuilt, &rebuilt_size,
-        &rebuilt_packet_id_offset);
-    if (!error)
+    return TRUE;
+}
+bool_t tb2_mqtt_topic_filter_valid(const uint8_t *text, size_t length)
+{
+    if (length == 0 || !tb2_mqtt_utf8_valid(text, length)) return FALSE;
+    for (size_t i = 0; i < length; i++)
     {
-        error = tb2_mqtt_record_packet_ex(
-            session, TRUE, packet, packet_size, rebuilt, rebuilt_size,
-            TB2_MQTT_PACKET_PUBLISH, topic, TRUE, entry->filter_id, TRUE,
-            TRUE, "local_response_replay_rewrite", entry->packet_id,
-            entry->packet_id, FALSE, TRUE, 0, &entry->manual_decision);
+        if (text[i] == '#' && (i + 1 != length || (i && text[i - 1] != '/'))) return FALSE;
+        if (text[i] == '+' && ((i && text[i - 1] != '/') ||
+            (i + 1 < length && text[i + 1] != '/'))) return FALSE;
     }
-    osFreeMem(rebuilt);
+    return TRUE;
+}
+static bool_t tb2_mqtt_read_field(const uint8_t *packet, size_t length, size_t *offset,
+    const uint8_t **value, size_t *size, bool_t utf8)
+{
+    if (*offset > length || length - *offset < 2) return FALSE;
+    *size = ((size_t)packet[*offset] << 8) | packet[*offset + 1];
+    *offset += 2;
+    if (*size > length - *offset) return FALSE;
+    *value = packet + *offset;
+    *offset += *size;
+    return !utf8 || tb2_mqtt_utf8_valid(*value, *size);
+}
+static uint8_t *tb2_mqtt_make_packet(uint8_t first, const uint8_t *body,
+                                    size_t length, size_t *packet_length)
+{
+    if (length > TB2_MQTT_MAX_REMAINING_LENGTH) return NULL;
+    uint8_t header[5] = {first};
+    size_t count = 1, remaining = length;
+    do {
+        uint8_t digit = remaining % 128;
+        remaining /= 128;
+        header[count++] = digit | (remaining ? 0x80 : 0);
+    } while (remaining);
+    uint8_t *packet = osAllocMem(count + length);
+    if (packet == NULL) return NULL;
+    osMemcpy(packet, header, count);
+    if (length) osMemcpy(packet + count, body, length);
+    *packet_length = count + length;
+    return packet;
+}
+/* Apply the current local grant, including an UNSUBSCRIBE that raced with
+ * already received Cloud bytes. Keep the source leg's QoS handshake separate. */
+static error_t tb2_mqtt_limit_publish_qos(const uint8_t *packet, size_t length,
+    size_t id_offset, uint8_t qos, uint8_t **output, size_t *output_length)
+{
+    size_t size, header;
+    error_t error = tb2_mqtt_packet_size(packet, length, &size, &header);
+    if (error || id_offset < header || id_offset + 2 > size) return ERROR_INVALID_LENGTH;
+    size_t body_length = size - header - (qos == 0 ? 2 : 0);
+    uint8_t *body = osAllocMem(body_length);
+    if (body == NULL) return ERROR_OUT_OF_MEMORY;
+    size_t prefix = id_offset - header;
+    osMemcpy(body, packet + header, prefix);
+    osMemcpy(body + prefix, packet + id_offset + (qos == 0 ? 2 : 0),
+        body_length - prefix);
+    uint8_t first = (packet[0] & (uint8_t)~6U) | (qos << 1);
+    if (qos == 0) first &= (uint8_t)~8U;
+    *output = tb2_mqtt_make_packet(first, body, body_length, output_length);
+    osFreeMem(body);
+    return *output != NULL ? NO_ERROR : ERROR_OUT_OF_MEMORY;
+}
+
+static error_t tb2_mqtt_local_reply(tb2_mqtt_passthrough_session_t *session,
+    uint8_t first, const uint8_t *body, size_t length, const char *action)
+{
+    size_t packet_length = 0;
+    uint8_t *packet = tb2_mqtt_make_packet(first, body, length, &packet_length);
+    if (packet == NULL) return ERROR_OUT_OF_MEMORY;
+    error_t error = tb2_mqtt_record_packet_ex(session, FALSE, packet, packet_length,
+        NULL, 0, first >> 4, NULL, TRUE, NULL, TRUE, TRUE, action, 0, 0, FALSE, FALSE, 0, NULL);
+    osFreeMem(packet);
     return error;
+}
+static error_t tb2_mqtt_cloud_packet(tb2_mqtt_passthrough_session_t *session,
+    uint8_t first, const uint8_t *body, size_t length, const char *action)
+{
+    size_t packet_length = 0;
+    uint8_t *packet = tb2_mqtt_make_packet(first, body, length, &packet_length);
+    if (packet == NULL) return ERROR_OUT_OF_MEMORY;
+    error_t error = tb2_mqtt_record_packet_ex(session, TRUE, packet, packet_length,
+        NULL, 0, first >> 4, NULL, TRUE, NULL, TRUE, TRUE, action, 0, 0, FALSE, FALSE, 0, NULL);
+    osFreeMem(packet);
+    return error;
+}
+static void tb2_mqtt_saved_clear(tb2_mqtt_saved_session_t *saved)
+{
+    tb2_mqtt_qos2_free(&saved->incoming);
+    tb2_mqtt_packet_ids_clear(&saved->outgoing);
+    mqtt_response_history_reset(&saved->response_history);
+    osMemset(saved, 0, sizeof(*saved));
+}
+/* Snapshot subscriptions while callbacks are safe, not from close() which is
+ * already called under the server app-control mutex. */
+static void tb2_mqtt_save_subscriptions(tb2_mqtt_passthrough_session_t *session)
+{
+    if (session->saved_slot < 0 || session->subscription_snapshot == NULL) return;
+    tb2_mqtt_saved_session_t *saved = &saved_sessions[session->saved_slot];
+    if (saved->owner != session->owner) return;
+    saved->subscription_count = session->subscription_snapshot(session->observer_context,
+        saved->subscriptions, TB2_MQTT_SUBSCRIPTIONS_MAX);
+}
+static error_t tb2_mqtt_restore_subscriptions(tb2_mqtt_passthrough_session_t *session,
+                                              tb2_mqtt_saved_session_t *saved)
+{
+    if (!saved->subscription_count || session->subscription_apply == NULL) return NO_ERROR;
+    uint8_t body[2 + TB2_MQTT_SUBSCRIPTIONS_MAX * 259];
+    size_t offset = 2;
+    body[0] = 0; body[1] = 1;
+    for (size_t i = 0; i < saved->subscription_count; i++)
+    {
+        size_t length = osStrlen(saved->subscriptions[i].topic);
+        body[offset++] = (uint8_t)(length >> 8);
+        body[offset++] = (uint8_t)length;
+        osMemcpy(body + offset, saved->subscriptions[i].topic, length);
+        offset += length;
+        body[offset++] = saved->subscriptions[i].qos;
+    }
+    uint8_t codes[TB2_MQTT_SUBSCRIPTIONS_MAX];
+    size_t count = 0;
+    return session->subscription_apply(session->observer_context, FALSE, body, offset,
+        codes, sizeof(codes), &count);
+}
+static error_t tb2_mqtt_accept_connect(tb2_mqtt_passthrough_session_t *session,
+    const uint8_t *packet, size_t length, size_t header)
+{
+    if (session->established || session->connect_packet != NULL) return ERROR_INVALID_TYPE;
+    size_t pos = header, n = 0;
+    const uint8_t *field = NULL;
+    if (!tb2_mqtt_read_field(packet, length, &pos, &field, &n, TRUE) ||
+        length - pos < 4) return ERROR_INVALID_LENGTH;
+    uint8_t level = packet[pos++], flags = packet[pos++];
+    if (!((n == 4 && !osMemcmp(field, "MQTT", 4) && level == 4) ||
+          (n == 6 && !osMemcmp(field, "MQIsdp", 6) && level == 3))) return ERROR_INVALID_VERSION;
+    if ((flags & 1) || (!(flags & 4) && (flags & 0x38)) ||
+        ((flags >> 3) & 3) == 3 || ((flags & 0x40) && !(flags & 0x80)))
+        return ERROR_INVALID_TYPE;
+    session->connect_flags_offset = pos - 1;
+    session->keepalive = ((uint16_t)packet[pos] << 8) | packet[pos + 1];
+    pos += 2;
+    session->clean_session = (flags & 2) != 0;
+    if (!tb2_mqtt_read_field(packet, length, &pos, &field, &n, TRUE) ||
+        n == 0 || n >= sizeof(session->client_id)) return ERROR_INVALID_LENGTH;
+    osMemcpy(session->client_id, field, n);
+    session->client_id[n] = '\0';
+    session->will_begin = pos;
+    if (flags & 4)
+    {
+        if (!tb2_mqtt_read_field(packet, length, &pos, &field, &n, TRUE) || n == 0 ||
+            memchr(field, '+', n) || memchr(field, '#', n) ||
+            !tb2_mqtt_read_field(packet, length, &pos, &field, &n, FALSE))
+            return ERROR_INVALID_LENGTH;
+    }
+    session->will_end = pos;
+    if ((flags & 0x80) && !tb2_mqtt_read_field(packet, length, &pos, &field, &n, TRUE))
+        return ERROR_INVALID_LENGTH;
+    if ((flags & 0x40) && !tb2_mqtt_read_field(packet, length, &pos, &field, &n, FALSE))
+        return ERROR_INVALID_LENGTH;
+    if (pos != length) return ERROR_INVALID_LENGTH;
+
+    int slot = -1, free_slot = -1;
+    for (size_t i = 0; i < TB2_MQTT_SESSION_MAX; i++)
+    {
+        if (!saved_sessions[i].used && free_slot < 0) free_slot = (int)i;
+        if (saved_sessions[i].used &&
+            !osStrcasecmp(saved_sessions[i].box, session->box_settings->commonName))
+        { slot = (int)i; break; }
+    }
+    if (slot < 0) slot = free_slot;
+    if (slot < 0)
+    {
+        const uint8_t unavailable[] = {0, 3};
+        tb2_mqtt_local_reply(session, 0x20, unavailable, sizeof(unavailable), "local_connack_rejected");
+        return ERROR_OUT_OF_RESOURCES;
+    }
+    tb2_mqtt_saved_session_t *saved = &saved_sessions[slot];
+    bool_t resume = saved->used && saved->persistent && !session->clean_session &&
+        !osStrcmp(saved->client_id, session->client_id);
+    if (saved->active != NULL)
+    {
+        tb2_mqtt_passthrough_session_t *old = saved->active;
+        osAcquireMutex(&old->ids_mutex);
+        if (resume)
+        {
+            saved->incoming = old->blocked_qos2_box;
+            old->blocked_qos2_box = NULL;
+            /* Overlay Freshness retries own local IDs; they are not resumed
+             * through a different concrete connection. */
+            tb2_mqtt_packet_id_entry_t *p = old->packet_ids;
+            while (p != NULL)
+            {
+                tb2_mqtt_packet_id_entry_t *next = p->next;
+                if (p->local) tb2_mqtt_packet_id_remove(old, p);
+                p = next;
+            }
+            saved->response_history = old->response_history;
+            mqtt_response_history_init(&old->response_history);
+            saved->outgoing = old->packet_ids;
+            old->packet_ids = NULL;
+            saved->next_id = old->next_local_packet_id;
+        }
+        osReleaseMutex(&old->ids_mutex);
+    }
+    if (!resume) tb2_mqtt_saved_clear(saved);
+    session->saved_slot = slot;
+    saved->used = TRUE;
+    saved->owner = session->owner;
+    saved->persistent = !session->clean_session;
+    saved->active = session;
+    osStrncpy(saved->box, session->box_settings->commonName, sizeof(saved->box) - 1);
+    osStrcpy(saved->client_id, session->client_id);
+    if (resume)
+    {
+        session->blocked_qos2_box = saved->incoming; saved->incoming = NULL;
+        session->packet_ids = saved->outgoing; saved->outgoing = NULL;
+        session->next_local_packet_id = saved->next_id;
+        session->response_history = saved->response_history;
+        mqtt_response_history_init(&saved->response_history);
+        error_t error = tb2_mqtt_restore_subscriptions(session, saved);
+        if (error) return error;
+    }
+    session->connect_packet = osAllocMem(length);
+    if (session->connect_packet == NULL) return ERROR_OUT_OF_MEMORY;
+    osMemcpy(session->connect_packet, packet, length);
+    session->connect_length = length;
+    session->connect_header = header;
+    const uint8_t connack[] = {resume ? 1 : 0, 0};
+    error_t error = tb2_mqtt_local_reply(session, 0x20, connack, sizeof(connack), "local_connack");
+    if (error) return error;
+    session->established = TRUE;
+    session->last_box_rx = osGetSystemTime();
+    tb2_mqtt_save_subscriptions(session);
+    /* Resume only already transmitted protocol exchanges, never an offline queue. */
+    for (tb2_mqtt_packet_id_entry_t *p = session->packet_ids; p; p = p->next)
+        if (!p->local && p->packet != NULL)
+        {
+            if (!p->pubrel) p->packet[0] |= 0x08;
+            error = tb2_mqtt_record_packet_ex(session, FALSE, p->packet, p->packet_length,
+                NULL, 0, p->pubrel ? 6 : 3, NULL, TRUE, NULL, TRUE, TRUE,
+                "local_session_resume", p->wire_id, p->wire_id, FALSE, FALSE, 0, NULL);
+            if (error) return error;
+        }
+    TRACE_INFO("TB2 MQTT local session established overlay=%u resumed=%s\r\n",
+        (unsigned)session->box_settings->internal.overlayNumber, resume ? "true" : "false");
+    return NO_ERROR;
+}
+
+static error_t tb2_mqtt_sync_subscriptions(tb2_mqtt_passthrough_session_t *session)
+{
+    tb2_mqtt_subscription_t current[TB2_MQTT_SUBSCRIPTIONS_MAX];
+    size_t count = session->subscription_snapshot != NULL ?
+        session->subscription_snapshot(session->observer_context, current, TB2_MQTT_SUBSCRIPTIONS_MAX) : 0;
+    uint8_t body[2 + TB2_MQTT_SUBSCRIPTIONS_MAX * 259];
+    size_t offset = 2;
+    for (size_t i = 0; i < session->synced_count; i++)
+    {
+        bool_t present = FALSE;
+        for (size_t j = 0; j < count; j++)
+            if (!osStrcmp(session->synced[i].topic, current[j].topic)) present = TRUE;
+        if (!present)
+        {
+            size_t length = osStrlen(session->synced[i].topic);
+            body[offset++] = (uint8_t)(length >> 8); body[offset++] = (uint8_t)length;
+            osMemcpy(body + offset, session->synced[i].topic, length); offset += length;
+        }
+    }
+    uint16_t id;
+    if (offset > 2)
+    {
+        error_t error = tb2_mqtt_cloud_id_allocate(session, 10, 0, &id);
+        if (error) return error;
+        body[0] = (uint8_t)(id >> 8); body[1] = (uint8_t)id;
+        error = tb2_mqtt_cloud_packet(session, 0xa2, body, offset, "upstream_unsubscribe");
+        if (error) return error;
+    }
+    offset = 2;
+    size_t changed = 0;
+    for (size_t i = 0; i < count; i++)
+    {
+        bool_t same = FALSE;
+        for (size_t j = 0; j < session->synced_count; j++)
+            if (!osStrcmp(current[i].topic, session->synced[j].topic) &&
+                current[i].qos == session->synced[j].qos) same = TRUE;
+        if (!same)
+        {
+            size_t length = osStrlen(current[i].topic);
+            body[offset++] = (uint8_t)(length >> 8); body[offset++] = (uint8_t)length;
+            osMemcpy(body + offset, current[i].topic, length); offset += length;
+            body[offset++] = current[i].qos;
+            changed++;
+        }
+    }
+    if (changed)
+    {
+        error_t error = tb2_mqtt_cloud_id_allocate(session, 8, 0, &id);
+        if (error) return error;
+        tb2_mqtt_id_find(session->cloud_ids, id)->original_id = (uint16_t)changed;
+        body[0] = (uint8_t)(id >> 8); body[1] = (uint8_t)id;
+        error = tb2_mqtt_cloud_packet(session, 0x82, body, offset, "upstream_subscribe");
+        if (error) return error;
+    }
+    osMemcpy(session->synced, current, count * sizeof(*current));
+    session->synced_count = count;
+    session->subscriptions_dirty = FALSE;
+    session->cloud_phase = TB2_MQTT_CLOUD_READY;
+    for (tb2_mqtt_packet_id_entry_t *p = session->cloud_ids; p; p = p->next)
+        if (p->packet_type == 8 || p->packet_type == 10) session->cloud_phase = TB2_MQTT_CLOUD_SUBACK;
+    session->cloud_started_at = osGetSystemTime();
+    return NO_ERROR;
+}
+
+static error_t tb2_mqtt_local_control(tb2_mqtt_passthrough_session_t *session,
+    bool_t box_to_upstream, const uint8_t *packet, size_t length,
+    size_t header, bool_t *handled)
+{
+    uint8_t type = packet[0] >> 4;
+    *handled = type != 3 && !(type >= 4 && type <= 7);
+    if (!*handled) return NO_ERROR;
+    error_t error = tb2_mqtt_record_packet_ex(session, box_to_upstream, packet, length,
+        NULL, 0, type, NULL, FALSE, NULL, FALSE, TRUE, "session_control",
+        0, 0, FALSE, FALSE, 0, NULL);
+    if (error) return error;
+    if (box_to_upstream)
+    {
+        if (type == 1) return tb2_mqtt_accept_connect(session, packet, length, header);
+        if (!session->established) return ERROR_INVALID_TYPE;
+        if (type == 12 && length == header)
+            return tb2_mqtt_local_reply(session, 0xd0, NULL, 0, "local_pingresp");
+        if (type == 14 && length == header)
+        { session->clean_disconnect = TRUE; return ERROR_END_OF_STREAM; }
+        if (type != 8 && type != 10) return ERROR_INVALID_TYPE;
+        if (session->subscription_apply == NULL || length - header < 2) return ERROR_INVALID_LENGTH;
+        uint8_t codes[TB2_MQTT_SUBSCRIPTIONS_MAX], reply[2 + TB2_MQTT_SUBSCRIPTIONS_MAX];
+        size_t count = 0;
+        error = session->subscription_apply(session->observer_context, type == 10,
+            packet + header, length - header, codes, sizeof(codes), &count);
+        if (error) return error;
+        reply[0] = packet[header]; reply[1] = packet[header + 1];
+        if (type == 8) osMemcpy(reply + 2, codes, count);
+        error = tb2_mqtt_local_reply(session, type == 8 ? 0x90 : 0xb0,
+            reply, type == 8 ? count + 2 : 2, type == 8 ? "local_suback" : "local_unsuback");
+        if (error) return error;
+        session->subscriptions_dirty = TRUE;
+        tb2_mqtt_save_subscriptions(session);
+        if (session->control_observer != NULL)
+            session->control_observer(session->observer_context,
+                type == 8 ? TB2_MQTT_CONTROL_SUBSCRIBE : TB2_MQTT_CONTROL_UNSUBSCRIBE,
+                ((uint16_t)reply[0] << 8) | reply[1], packet + header, length - header);
+        return NO_ERROR;
+    }
+    if (type == 2)
+    {
+        if (session->cloud_phase != TB2_MQTT_CLOUD_CONNACK ||
+            length - header != 2 || packet[header] != 0 || packet[header + 1] != 0)
+            return ERROR_ACCESS_DENIED;
+        session->upstream_error[0] = '\0';
+        session->ever_connected = TRUE;
+        return tb2_mqtt_sync_subscriptions(session);
+    }
+    if (type == 13 && length == header)
+    { session->ping_pending = FALSE; return NO_ERROR; }
+    if (type != 9 && type != 11) return ERROR_INVALID_TYPE;
+    if (length - header < 2) return ERROR_INVALID_LENGTH;
+    uint16_t id = ((uint16_t)packet[header] << 8) | packet[header + 1];
+    tb2_mqtt_packet_id_entry_t *entry = tb2_mqtt_id_find(session->cloud_ids, id);
+    if (entry == NULL || entry->packet_type != (type == 9 ? 8 : 10)) return ERROR_INVALID_TYPE;
+    if (type == 9)
+    {
+        if (length - header != 2U + entry->original_id) return ERROR_INVALID_LENGTH;
+        for (size_t i = header + 2; i < length; i++)
+            if (packet[i] > 2) return ERROR_ACCESS_DENIED;
+    }
+    else if (length - header != 2) return ERROR_INVALID_LENGTH;
+    tb2_mqtt_id_remove(&session->cloud_ids, entry);
+    session->cloud_phase = TB2_MQTT_CLOUD_READY;
+    for (tb2_mqtt_packet_id_entry_t *p = session->cloud_ids; p; p = p->next)
+        if (p->packet_type == 8 || p->packet_type == 10) session->cloud_phase = TB2_MQTT_CLOUD_SUBACK;
+    return NO_ERROR;
+}
+
+/* Register only a Will that passes the same Internet protection as a PUBLISH.
+ * Credentials are copied byte-for-byte; only CleanSession and sanitized Will
+ * fields are changed. No decoded credentials are logged. */
+static error_t tb2_mqtt_build_cloud_connect(tb2_mqtt_passthrough_session_t *session,
+                                           uint8_t **output, size_t *output_length)
+{
+    uint8_t *packet = session->connect_packet;
+    size_t length = session->connect_length;
+    uint8_t flags = packet[session->connect_flags_offset] | 2;
+    bool_t will = (flags & 4) != 0;
+    const uint8_t *topic = NULL, *payload = NULL;
+    size_t topic_length = 0, payload_length = 0, pos = session->will_begin;
+    mqtt_nocloud_filter_result_t privacy = {0};
+    if (will)
+    {
+        if (!tb2_mqtt_read_field(packet, length, &pos, &topic, &topic_length, TRUE) ||
+            !tb2_mqtt_read_field(packet, length, &pos, &payload, &payload_length, FALSE))
+            return ERROR_INVALID_LENGTH;
+        char *name = osAllocMem(topic_length + 1);
+        if (name == NULL) return ERROR_OUT_OF_MEMORY;
+        osMemcpy(name, topic, topic_length); name[topic_length] = '\0';
+        mqtt_nocloud_filter_publish(session->box_settings, TRUE, name, payload, payload_length, &privacy);
+        if (privacy.action == MQTT_NOCLOUD_REWRITE)
+        { payload = (const uint8_t *)privacy.payload; payload_length = privacy.payload_len; }
+        mqtt_forward_filter_result_t decision = mqtt_forward_filter_evaluate(session->box_settings,
+            MQTT_FORWARD_ROUTE_BOX_TO_TONIES, name, payload, payload_length);
+        will = privacy.action != MQTT_NOCLOUD_BLOCK && decision.action == MQTT_FORWARD_ACTION_FORWARD &&
+            payload_length <= UINT16_MAX;
+        osFreeMem(name);
+    }
+    if (!will) flags &= (uint8_t)~0x3cU;
+    size_t body_length = session->will_begin - session->connect_header +
+        (will ? 4 + topic_length + payload_length : 0) + length - session->will_end;
+    uint8_t *body = osAllocMem(body_length);
+    if (body == NULL) { mqtt_nocloud_filter_result_free(&privacy); return ERROR_OUT_OF_MEMORY; }
+    pos = session->will_begin - session->connect_header;
+    osMemcpy(body, packet + session->connect_header, pos);
+    body[session->connect_flags_offset - session->connect_header] = flags;
+    if (will)
+    {
+        body[pos++] = (uint8_t)(topic_length >> 8); body[pos++] = (uint8_t)topic_length;
+        osMemcpy(body + pos, topic, topic_length); pos += topic_length;
+        body[pos++] = (uint8_t)(payload_length >> 8); body[pos++] = (uint8_t)payload_length;
+        osMemcpy(body + pos, payload, payload_length); pos += payload_length;
+    }
+    osMemcpy(body + pos, packet + session->will_end, length - session->will_end);
+    *output = tb2_mqtt_make_packet(0x10, body, body_length, output_length);
+    osFreeMem(body);
+    mqtt_nocloud_filter_result_free(&privacy);
+    return *output != NULL ? NO_ERROR : ERROR_OUT_OF_MEMORY;
 }
 
 static error_t tb2_mqtt_process_mapped_control(
@@ -1648,175 +1985,76 @@ static error_t tb2_mqtt_process_mapped_control(
     const uint8_t *packet, size_t packet_size, size_t fixed_header_size,
     uint8_t type, bool_t *handled)
 {
-    *handled = FALSE;
-    bool_t from_box_ack = box_to_upstream &&
-                          (type == TB2_MQTT_PACKET_PUBACK ||
-                           type == TB2_MQTT_PACKET_PUBREC ||
-                           type == TB2_MQTT_PACKET_PUBCOMP);
-    bool_t from_upstream_pubrel = !box_to_upstream && type == TB2_MQTT_PACKET_PUBREL;
-    if (!from_box_ack && !from_upstream_pubrel)
-        return NO_ERROR;
-    if (packet_size - fixed_header_size != 2)
-        return ERROR_INVALID_LENGTH;
-
-    uint16_t packet_id = ((uint16_t)packet[fixed_header_size] << 8) |
-                         packet[fixed_header_size + 1];
-    if (packet_id == 0)
-        return ERROR_INVALID_LENGTH;
-
-    tb2_mqtt_packet_id_entry_t *entry = from_box_ack ?
-        tb2_mqtt_packet_id_find_wire(session, packet_id) :
-        tb2_mqtt_packet_id_find_upstream(session, packet_id);
-    if (entry == NULL)
-        return NO_ERROR;
-
-    if (entry->local)
+    *handled = type >= TB2_MQTT_PACKET_PUBACK && type <= TB2_MQTT_PACKET_PUBCOMP;
+    if (!*handled) return NO_ERROR;
+    if (packet_size - fixed_header_size != 2) return ERROR_INVALID_LENGTH;
+    uint16_t id = ((uint16_t)packet[fixed_header_size] << 8) | packet[fixed_header_size + 1];
+    if (id == 0) return ERROR_INVALID_LENGTH;
+    error_t error = tb2_mqtt_record_packet_ex(session, box_to_upstream, packet,
+        packet_size, NULL, 0, type, NULL, FALSE, NULL, FALSE, TRUE,
+        "local_protocol_ack", id, id, FALSE, FALSE, 0, NULL);
+    if (error) return error;
+    if (type == TB2_MQTT_PACKET_PUBREL)
     {
-        if (type != TB2_MQTT_PACKET_PUBACK)
-            return ERROR_INVALID_TYPE;
-        *handled = TRUE;
-        error_t error = tb2_mqtt_record_packet_ex(
-            session, TRUE, packet, packet_size, NULL, 0, type, NULL, FALSE,
-            NULL, FALSE, TRUE, "local_freshness_puback", packet_id,
-            packet_id, FALSE, FALSE, 0, NULL);
-        if (!error)
+        tb2_mqtt_qos2_entry_t **list = tb2_mqtt_qos2_list(session, box_to_upstream);
+        tb2_mqtt_qos2_entry_t *entry = tb2_mqtt_qos2_find(*list, id);
+        if (entry != NULL) tb2_mqtt_qos2_remove(list, entry);
+        return tb2_mqtt_send_generated_ack(session, box_to_upstream,
+            TB2_MQTT_PACKET_PUBCOMP, id, "local_pubcomp");
+    }
+    osAcquireMutex(&session->ids_mutex);
+    tb2_mqtt_packet_id_entry_t **list = box_to_upstream ?
+        &session->packet_ids : &session->cloud_ids;
+    tb2_mqtt_packet_id_entry_t *entry = tb2_mqtt_id_find(*list, id);
+    bool_t local_ack = FALSE, send_pubrel = FALSE;
+    if (entry != NULL)
+    {
+        if (type == TB2_MQTT_PACKET_PUBREC && entry->qos == 2)
         {
-            tb2_mqtt_packet_id_remove(session, entry);
-            if (session->control_observer != NULL)
-            {
-                session->control_observer(session->observer_context,
-                                          TB2_MQTT_CONTROL_LOCAL_PUBACK,
-                                          packet_id, NULL, 0);
-            }
+            uint8_t pubrel[] = {0x62, 2, (uint8_t)(id >> 8), (uint8_t)id};
+            entry->pubrel = TRUE;
+            error = tb2_mqtt_id_store_packet(*list, entry, pubrel, sizeof(pubrel));
+            send_pubrel = !error;
         }
-        return error;
+        else if ((type == TB2_MQTT_PACKET_PUBACK && entry->qos == 1) ||
+                 (type == TB2_MQTT_PACKET_PUBCOMP && entry->qos == 2 && entry->pubrel))
+        {
+            local_ack = box_to_upstream && entry->local;
+            tb2_mqtt_id_remove(list, entry);
+        }
+        else error = ERROR_INVALID_TYPE;
     }
-
-    if ((type == TB2_MQTT_PACKET_PUBACK && entry->qos != 1) ||
-        ((type == TB2_MQTT_PACKET_PUBREC || type == TB2_MQTT_PACKET_PUBREL ||
-          type == TB2_MQTT_PACKET_PUBCOMP) && entry->qos != 2))
-    {
-        return ERROR_INVALID_TYPE;
-    }
-
-    *handled = TRUE;
-    uint16_t outgoing_id = from_box_ack ? entry->original_id : entry->wire_id;
-    uint8_t *rewritten = NULL;
-    error_t error = tb2_mqtt_rewrite_packet_id(packet, packet_size,
-                                               fixed_header_size,
-                                               outgoing_id, &rewritten);
-    if (!error)
-    {
-        error = tb2_mqtt_record_packet_ex(
-            session, box_to_upstream, packet, packet_size, rewritten,
-            packet_size, type, NULL, TRUE, NULL, FALSE, TRUE,
-            entry->wire_id == entry->original_id ? NULL : "packet_id_remap",
-            entry->original_id, entry->wire_id, FALSE, FALSE, 0, NULL);
-    }
-    osFreeMem(rewritten);
-    if (!error && (type == TB2_MQTT_PACKET_PUBACK ||
-                   type == TB2_MQTT_PACKET_PUBCOMP))
-    {
-        tb2_mqtt_packet_id_remove(session, entry);
-    }
+    osReleaseMutex(&session->ids_mutex);
+    if (!error && send_pubrel)
+        error = tb2_mqtt_send_generated_ack(session, box_to_upstream,
+            TB2_MQTT_PACKET_PUBREL, id, "local_pubrel");
+    if (!error && local_ack && session->control_observer != NULL)
+        session->control_observer(session->observer_context,
+            TB2_MQTT_CONTROL_LOCAL_PUBACK, id, NULL, 0);
     return error;
 }
 
 static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
-                                       bool_t box_to_upstream, const uint8_t *packet,
-                                       size_t packet_size, size_t fixed_header_size)
+    bool_t box_to_upstream, const uint8_t *packet, size_t packet_size, size_t fixed_header_size)
 {
     uint8_t type = packet[0] >> 4;
-    if (type == TB2_MQTT_PACKET_PUBREL)
-    {
-        if (packet_size - fixed_header_size < 2)
-            return ERROR_INVALID_LENGTH;
-        uint16_t packet_id = ((uint16_t)packet[fixed_header_size] << 8) |
-                             packet[fixed_header_size + 1];
-        tb2_mqtt_qos2_entry_t **list = tb2_mqtt_qos2_list(session, box_to_upstream);
-        tb2_mqtt_qos2_entry_t *qos2_entry =
-            tb2_mqtt_qos2_complete(*list, packet_id);
-        if (qos2_entry != NULL)
-        {
-            error_t error = tb2_mqtt_record_packet_ex(
-                session, box_to_upstream, packet, packet_size, NULL, 0,
-                type, NULL, FALSE, qos2_entry->filter_id, FALSE, TRUE,
-                qos2_entry->capture_action != NULL ?
-                    qos2_entry->capture_action : "qos2_blocked_publish",
-                packet_id, packet_id, qos2_entry->count_blocked, FALSE, 0, NULL);
-            if (!error)
-            {
-                error = tb2_mqtt_send_generated_ack(
-                    session, box_to_upstream, TB2_MQTT_PACKET_PUBCOMP,
-                    packet_id, qos2_entry->count_blocked ?
-                                   "blocked_pubcomp" :
-                                   "local_response_pubcomp");
-            }
-            if (!error)
-                tb2_mqtt_local_response_mark_completed(session, packet_id, 2);
-            return error;
-        }
-    }
-
-    bool_t mapped_control_handled = FALSE;
-    error_t error = tb2_mqtt_process_mapped_control(
-        session, box_to_upstream, packet, packet_size, fixed_header_size,
-        type, &mapped_control_handled);
-    if (error || mapped_control_handled)
-        return error;
-
-    if (box_to_upstream &&
-        (type == TB2_MQTT_PACKET_SUBSCRIBE ||
-         type == TB2_MQTT_PACKET_UNSUBSCRIBE))
-    {
-        if (packet_size - fixed_header_size < 2)
-            return ERROR_INVALID_LENGTH;
-        uint16_t packet_id = ((uint16_t)packet[fixed_header_size] << 8) |
-                             packet[fixed_header_size + 1];
-        if (packet_id == 0)
-            return ERROR_INVALID_LENGTH;
-        if (session->control_observer != NULL)
-        {
-            session->control_observer(
-                session->observer_context,
-                type == TB2_MQTT_PACKET_SUBSCRIBE ?
-                    TB2_MQTT_CONTROL_SUBSCRIBE : TB2_MQTT_CONTROL_UNSUBSCRIBE,
-                packet_id, packet + fixed_header_size,
-                packet_size - fixed_header_size);
-        }
-    }
-
-    if (type != TB2_MQTT_PACKET_PUBLISH)
-    {
-        TRACE_DEBUG("TB2 MQTT proxy direction=%s packet_type=%s action=forward bytes=%" PRIuSIZE "\r\n",
-                    box_to_upstream ? "box_to_upstream" : "upstream_to_box",
-                    tb2_mqtt_packet_type_name(type), packet_size);
-        tb2_mqtt_local_response_entry_t *completed_response = NULL;
-        if (!box_to_upstream &&
-            (type == TB2_MQTT_PACKET_PUBACK ||
-             type == TB2_MQTT_PACKET_PUBCOMP) &&
-            packet_size - fixed_header_size == 2)
-        {
-            uint16_t packet_id =
-                ((uint16_t)packet[fixed_header_size] << 8) |
-                packet[fixed_header_size + 1];
-            uint8_t qos = type == TB2_MQTT_PACKET_PUBACK ? 1 : 2;
-            tb2_mqtt_local_response_entry_t *entry =
-                tb2_mqtt_local_response_find(session, packet_id, qos);
-            if (entry != NULL &&
-                entry->action == TB2_MQTT_LOCAL_RESPONSE_REWRITE)
-            {
-                completed_response = entry;
-            }
-        }
-
-        error = tb2_mqtt_record_packet(session, box_to_upstream, packet,
-                                       packet_size, type, NULL, TRUE, NULL,
-                                       FALSE, TRUE);
-        if (!error && completed_response != NULL)
-            tb2_mqtt_local_response_remove(session, completed_response);
-        return error;
-    }
+    uint8_t flags = packet[0] & 0x0fU;
+    if (type == 0 || type > 14 ||
+        (type != TB2_MQTT_PACKET_PUBLISH &&
+         flags != ((type == 6 || type == 8 || type == 10) ? 2 : 0)))
+        return ERROR_INVALID_TYPE;
+    if (box_to_upstream && !session->established && type != 1)
+        return ERROR_INVALID_TYPE;
+    if (box_to_upstream) session->last_box_rx = osGetSystemTime();
+    bool_t handled = FALSE;
+    error_t error = tb2_mqtt_local_control(session, box_to_upstream,
+        packet, packet_size, fixed_header_size, &handled);
+    if (error || handled) return error;
+    error = tb2_mqtt_process_mapped_control(session, box_to_upstream, packet,
+        packet_size, fixed_header_size, type, &handled);
+    if (error || handled) return error;
+    if (type != TB2_MQTT_PACKET_PUBLISH || !session->established)
+        return ERROR_INVALID_TYPE;
 
     char *topic = NULL;
     const uint8_t *payload = NULL;
@@ -1830,45 +2068,84 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
     if (error)
         return error;
 
-    if (box_to_upstream && qos > 0)
+    /* QoS2 Method B: process once, retain only receipt identity until PUBREL.
+     * Completed IDs are immediately reusable; DUP alone is not an identity. */
+    if (qos == 2)
     {
-        bool_t duplicate = (packet[0] & 0x08U) != 0;
-        tb2_mqtt_local_response_entry_t *entry =
-            tb2_mqtt_local_response_find(session, packet_id, qos);
-        if (duplicate && entry != NULL)
+        tb2_mqtt_qos2_entry_t **list = tb2_mqtt_qos2_list(session, box_to_upstream);
+        if (tb2_mqtt_qos2_find(*list, packet_id) != NULL)
         {
-            error = tb2_mqtt_replay_local_response(
-                session, packet, packet_size, fixed_header_size, topic,
-                payload, packet_id_offset, entry);
+            error = tb2_mqtt_record_packet_ex(session, box_to_upstream, packet,
+                packet_size, NULL, 0, type, topic, FALSE, NULL, FALSE, TRUE,
+                "local_qos2_duplicate", packet_id, packet_id, FALSE, FALSE, 0, NULL);
+            if (!error) error = tb2_mqtt_send_generated_ack(session, box_to_upstream,
+                TB2_MQTT_PACKET_PUBREC, packet_id, "local_pubrec");
             osFreeMem(topic);
             return error;
         }
-        if (!duplicate && entry != NULL)
-            tb2_mqtt_local_response_remove(session, entry);
-        if (!duplicate && qos == 2)
+        error = tb2_mqtt_qos2_begin(list, packet_id, FALSE, NULL, NULL);
+        if (error)
         {
-            tb2_mqtt_qos2_entry_t **list =
-                tb2_mqtt_qos2_list(session, box_to_upstream);
-            tb2_mqtt_qos2_entry_t *stale =
-                tb2_mqtt_qos2_find(*list, packet_id);
-            if (stale != NULL)
-                tb2_mqtt_qos2_remove(list, stale);
+            /* Do not acknowledge acceptance without a QoS2 receipt slot.
+             * The peer can retry after outstanding exchanges finish. */
+            tb2_mqtt_record_packet_ex(session, box_to_upstream, packet, packet_size,
+                NULL, 0, type, topic, FALSE, "transport.inflight_full", FALSE, TRUE,
+                "qos2_backpressure", packet_id, 0, FALSE, FALSE, 0, NULL);
+            osFreeMem(topic);
+            return NO_ERROR;
         }
     }
 
+    const mqtt_response_history_record_t *replay = NULL;
+    if (box_to_upstream && qos == 1)
+    {
+        if (!(packet[0] & 8)) mqtt_response_history_forget(&session->response_history, packet_id);
+        else replay = mqtt_response_history_find(&session->response_history, packet_id,
+            packet, packet_size, osGetSystemTime());
+    }
     tb2_mqtt_observer_result_t observer_result;
     osMemset(&observer_result, 0, sizeof(observer_result));
     observer_result.action = TB2_MQTT_OBSERVER_FORWARD;
-    if (session->observer != NULL)
+    if (replay != NULL)
+    {
+        observer_result.action = replay->consume ? TB2_MQTT_OBSERVER_CONSUME : TB2_MQTT_OBSERVER_REWRITE;
+        observer_result.locally_processed = TRUE;
+        observer_result.capture_action = "local_response_replay";
+        if (!replay->consume)
+        {
+            observer_result.payload = osAllocMem(replay->payload_len ? replay->payload_len : 1);
+            if (observer_result.payload == NULL)
+            {
+                session->privacy_failed = TRUE;
+                tb2_mqtt_cloud_reset(session, "local_response_history_full");
+                observer_result.action = TB2_MQTT_OBSERVER_CONSUME;
+            }
+            else
+            {
+                if (replay->payload_len) osMemcpy(observer_result.payload, replay->payload, replay->payload_len);
+                observer_result.payload_len = replay->payload_len;
+            }
+        }
+    }
+    else if (session->observer != NULL)
     {
         error = session->observer(session->observer_context, box_to_upstream,
-                                  topic, payload, payload_len, qos,
-                                  &observer_result);
+            topic, payload, payload_len, qos, &observer_result);
         if (error)
         {
             osFreeMem(observer_result.payload);
             osFreeMem(topic);
             return error;
+        }
+        if (box_to_upstream && qos == 1 && observer_result.action != TB2_MQTT_OBSERVER_FORWARD &&
+            mqtt_response_history_remember(&session->response_history, packet_id,
+                packet, packet_size, observer_result.action == TB2_MQTT_OBSERVER_CONSUME,
+                observer_result.payload, observer_result.payload_len, osGetSystemTime()))
+        {
+            /* Pending may already have been consumed. Fail closed for the
+             * Internet leg, without disconnecting the healthy local box. */
+            session->privacy_failed = TRUE;
+            tb2_mqtt_cloud_reset(session, "local_response_history_full");
         }
     }
 
@@ -1926,34 +2203,6 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
             filter_id = manual_decision.setting_id;
     }
 
-    if (box_to_upstream && qos > 0 && (local_consume || local_rewrite))
-    {
-        tb2_mqtt_local_response_action_t response_action = local_consume ?
-            TB2_MQTT_LOCAL_RESPONSE_CONSUME :
-            (blocked ? TB2_MQTT_LOCAL_RESPONSE_BLOCK :
-                       TB2_MQTT_LOCAL_RESPONSE_REWRITE);
-        error = tb2_mqtt_local_response_store(
-            session, packet_id, qos, response_action,
-            filtered_payload, filtered_payload_len, filter_id,
-            &manual_decision);
-        if (error)
-        {
-            TRACE_ERROR("TB2 MQTT proxy local response state rejected"
-                        " packet_id=%u qos=%u error=%s code=%d\r\n",
-                        (unsigned)packet_id, (unsigned)qos,
-                        error2text(error), (int)error);
-            error_t capture_error = tb2_mqtt_record_packet_ex(
-                session, TRUE, packet, packet_size, NULL, 0, type, topic,
-                FALSE, filter_id, FALSE, TRUE,
-                "local_response_state_limit", packet_id, packet_id, FALSE,
-                FALSE, 0, &manual_decision);
-            osFreeMem(observer_result.payload);
-            mqtt_nocloud_filter_result_free(&nocloud_result);
-            osFreeMem(topic);
-            return capture_error ? capture_error : error;
-        }
-    }
-
     uint8_t *rebuilt_packet = NULL;
     size_t forwarded_packet_size = packet_size;
     size_t forwarded_packet_id_offset = packet_id_offset;
@@ -2009,34 +2258,78 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
                 mqtt_forward_reason_name(manual_decision.reason));
 
     uint8_t *wire_packet = NULL;
-    tb2_mqtt_packet_id_entry_t *mapping = NULL;
-    if (!blocked && !box_to_upstream && qos > 0)
+    uint8_t *qos_packet = NULL;
+    uint8_t target_qos = qos;
+    bool_t transport_blocked = FALSE;
+    if (!blocked && !box_to_upstream)
     {
-        mapping = tb2_mqtt_packet_id_find_upstream(session, packet_id);
-        if (mapping == NULL)
+        int grant = session->subscription_qos != NULL ?
+            session->subscription_qos(session->observer_context, topic) : -1;
+        if (grant < 0)
         {
-            uint16_t wire_id = packet_id;
-            if (tb2_mqtt_packet_id_find_wire(session, wire_id) != NULL)
-            {
-                error = tb2_mqtt_allocate_wire_packet_id(session, &wire_id);
-            }
-            if (!error)
-            {
-                error = tb2_mqtt_packet_id_add(session, packet_id, wire_id,
-                                               qos, FALSE);
-            }
-            if (!error)
-                mapping = tb2_mqtt_packet_id_find_upstream(session, packet_id);
+            blocked = transport_blocked = TRUE;
+            filter_id = "transport.not_subscribed";
         }
-        if (!error && mapping != NULL && mapping->wire_id != packet_id)
+        else if (qos > grant)
         {
-            error = tb2_mqtt_rewrite_packet_id(
-                forwarded_packet, forwarded_packet_size,
-                forwarded_packet_id_offset, mapping->wire_id, &wire_packet);
+            target_qos = (uint8_t)grant;
+            error = tb2_mqtt_limit_publish_qos(forwarded_packet, forwarded_packet_size,
+                forwarded_packet_id_offset, target_qos, &qos_packet, &forwarded_packet_size);
+            if (!error) forwarded_packet = qos_packet;
+            else
+            {
+                blocked = transport_blocked = TRUE;
+                filter_id = "transport.inflight_full";
+                error = NO_ERROR;
+            }
+        }
+    }
+    tb2_mqtt_packet_id_entry_t *mapping = NULL;
+    if (!error && !blocked && target_qos > 0 &&
+        (!box_to_upstream || tb2_mqtt_cloud_available(session)))
+    {
+        uint16_t destination_id = 0;
+        osAcquireMutex(&session->ids_mutex);
+        error = box_to_upstream ?
+            tb2_mqtt_cloud_id_allocate(session, type, target_qos, &destination_id) :
+            tb2_mqtt_allocate_wire_packet_id(session, &destination_id);
+        if (!error && !box_to_upstream)
+            error = tb2_mqtt_packet_id_add(session, packet_id, destination_id, target_qos, FALSE);
+        tb2_mqtt_packet_id_entry_t *list = box_to_upstream ? session->cloud_ids : session->packet_ids;
+        if (!error) mapping = tb2_mqtt_id_find(list, destination_id);
+        if (!error)
+            error = tb2_mqtt_rewrite_packet_id(forwarded_packet, forwarded_packet_size,
+                forwarded_packet_id_offset, destination_id, &wire_packet);
+        if (!error && mapping != NULL)
+            error = tb2_mqtt_id_store_packet(list, mapping, wire_packet, forwarded_packet_size);
+        osReleaseMutex(&session->ids_mutex);
+        if (error)
+        {
+            if (mapping != NULL)
+            {
+                osAcquireMutex(&session->ids_mutex);
+                tb2_mqtt_id_remove(box_to_upstream ? &session->cloud_ids : &session->packet_ids, mapping);
+                osReleaseMutex(&session->ids_mutex);
+                mapping = NULL;
+            }
+            osFreeMem(wire_packet);
+            wire_packet = NULL;
+            /* A relay resource shortage must not close a healthy box leg. */
+            tb2_mqtt_cloud_reset(session, "upstream_buffer_full");
+            error = NO_ERROR;
+            blocked = TRUE;
+            filter_id = "transport.inflight_full";
+            transport_blocked = TRUE;
         }
     }
 
-    if (!error && local_consume)
+    if (!error && transport_blocked)
+    {
+        error = tb2_mqtt_record_packet_ex(session, box_to_upstream, packet, packet_size,
+            NULL, 0, type, topic, FALSE, filter_id, FALSE, TRUE, filter_id,
+            packet_id, 0, FALSE, FALSE, 0, &manual_decision);
+    }
+    else if (!error && local_consume)
     {
         error = tb2_mqtt_record_packet_ex(
             session, box_to_upstream, packet, packet_size, NULL, 0, type,
@@ -2087,13 +2380,19 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
             mapping != NULL ? mapping->wire_id : packet_id, FALSE, TRUE,
             nocloud_result.removed_count, &manual_decision);
     }
-    else if (!error && wire_packet != NULL)
+    else if (!error && !blocked && wire_packet != NULL)
     {
         error = tb2_mqtt_record_packet_ex(
             session, box_to_upstream, packet, packet_size, wire_packet,
-            packet_size, type, topic, TRUE, NULL, FALSE, TRUE,
-            "packet_id_remap", mapping->original_id, mapping->wire_id, FALSE,
+            forwarded_packet_size, type, topic, TRUE, filter_id, FALSE, TRUE,
+            "packet_id_remap", packet_id, mapping->wire_id, FALSE,
             FALSE, 0, &manual_decision);
+    }
+    else if (!error && !blocked && qos_packet != NULL)
+    {
+        error = tb2_mqtt_record_packet_ex(session, box_to_upstream, packet, packet_size,
+            qos_packet, forwarded_packet_size, type, topic, TRUE, NULL, TRUE, TRUE,
+            "subscription_qos_limit", packet_id, 0, FALSE, FALSE, 0, &manual_decision);
     }
     else if (!error && observer_result.locally_processed)
     {
@@ -2110,34 +2409,15 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
             type, topic, !blocked, filter_id, FALSE, TRUE, NULL,
             packet_id, packet_id, blocked, FALSE, 0, &manual_decision);
     }
-    if (!error && !blocked && session->publish_completed != NULL)
-        session->publish_completed(session->observer_context, box_to_upstream,
-                                   topic, filtered_payload, filtered_payload_len);
     osFreeMem(wire_packet);
+    osFreeMem(qos_packet);
     osFreeMem(rebuilt_packet);
     osFreeMem(observer_result.payload);
     mqtt_nocloud_filter_result_free(&nocloud_result);
-    if (!error && blocked && qos == 1)
-    {
-        error = tb2_mqtt_send_generated_ack(
-            session, box_to_upstream, 4U, packet_id,
-            local_consume ? "local_response_puback" : "blocked_puback");
-        if (!error && (local_consume || local_rewrite))
-            tb2_mqtt_local_response_mark_completed(session, packet_id, qos);
-    }
-    else if (!error && blocked && qos == 2)
-    {
-        tb2_mqtt_qos2_entry_t **list = tb2_mqtt_qos2_list(session, box_to_upstream);
-        error = tb2_mqtt_qos2_begin(
-            list, packet_id, !local_consume,
-            local_consume ? observer_result.filter_id : filter_id,
-            local_consume ? "local_response_consume" :
-                            "qos2_blocked_publish");
-        if (!error)
-            error = tb2_mqtt_send_generated_ack(
-                session, box_to_upstream, 5U, packet_id,
-                local_consume ? "local_response_pubrec" : "blocked_pubrec");
-    }
+    if (!error && qos > 0)
+        error = tb2_mqtt_send_generated_ack(session, box_to_upstream,
+            qos == 1 ? TB2_MQTT_PACKET_PUBACK : TB2_MQTT_PACKET_PUBREC,
+            packet_id, qos == 1 ? "local_puback" : "local_pubrec");
     osFreeMem(topic);
     return error;
 }
@@ -2162,10 +2442,15 @@ static error_t tb2_mqtt_process_stream(tb2_mqtt_passthrough_session_t *session,
             return NO_ERROR;
         if (error)
             return error;
+        uint64_t epoch = session->epoch;
         error = tb2_mqtt_process_packet(session, box_to_upstream, stream->data,
                                         packet_size, fixed_header_size);
         if (error)
             return error;
+        /* A bounded Cloud resource failure can reset this stream from inside
+         * the packet handler. Never subtract from an already cleared buffer. */
+        if (!box_to_upstream && session->epoch != epoch) return NO_ERROR;
+        if (stream->length < packet_size) return NO_ERROR;
         stream->length -= packet_size;
         if (stream->length > 0)
         {
@@ -2178,180 +2463,369 @@ static error_t tb2_mqtt_process_stream(tb2_mqtt_passthrough_session_t *session,
 static error_t tb2_mqtt_forward_ready(tb2_mqtt_passthrough_session_t *session,
                                       bool_t box_to_upstream)
 {
-    TlsContext *source = box_to_upstream ? session->box_tls : session->upstream.tlsContext;
-    Socket *source_socket = box_to_upstream ? session->box_socket : session->upstream.socket;
-    if (!tlsIsRxReady(source) &&
-        (tcpWaitForEvents(source_socket, SOCKET_EVENT_RX_READY, 0) & SOCKET_EVENT_RX_READY) == 0)
-        return NO_ERROR;
-
+    if (!box_to_upstream) return NO_ERROR; /* Cloud I/O belongs to its worker. */
+    osAcquireMutex(&session->io_mutex);
+    if (!tlsIsRxReady(session->box_tls) &&
+        !(tcpWaitForEvents(session->box_socket, SOCKET_EVENT_RX_READY, 0) & SOCKET_EVENT_RX_READY))
+    { osReleaseMutex(&session->io_mutex); return NO_ERROR; }
     uint8_t buffer[TB2_MQTT_TUNNEL_BUFFER_SIZE];
     size_t received = 0;
-    error_t error = tlsRead(source, buffer, sizeof(buffer), &received, 0);
-    if (error == ERROR_WOULD_BLOCK || error == ERROR_TIMEOUT)
-        return NO_ERROR;
-    if (error)
+    error_t error = tlsRead(session->box_tls, buffer, sizeof(buffer), &received, 0);
+    osReleaseMutex(&session->io_mutex);
+    /* A partial TLS read can return bytes together with a timeout. */
+    if (received > 0)
     {
-        TRACE_ERROR("TB2 MQTT upstream stage=tls_read direction=%s failed error=%s code=%d\r\n",
-                    box_to_upstream ? "box_to_upstream" : "upstream_to_box",
-                    error2text(error), (int)error);
-        return error;
+        error_t processed = tb2_mqtt_process_stream(session, TRUE, buffer, received);
+        if (processed) return processed;
     }
-    if (received == 0)
-        return ERROR_END_OF_STREAM;
-    return tb2_mqtt_process_stream(session, box_to_upstream, buffer, received);
+    if (error == ERROR_WOULD_BLOCK || error == ERROR_TIMEOUT) return NO_ERROR;
+    if (error) return error;
+    return received ? NO_ERROR : ERROR_END_OF_STREAM;
+}
+
+static void tb2_mqtt_cloud_clear(tb2_mqtt_passthrough_session_t *session, const char *reason)
+{
+    session->cloud_phase = TB2_MQTT_CLOUD_DOWN;
+    if (osStrcmp(reason, "disabled")) tb2_mqtt_status_attempt_failed(reason);
+    session->epoch = 0;
+    session->upstream_stream.length = 0;
+    session->synced_count = 0;
+    session->subscriptions_dirty = TRUE;
+    session->ping_pending = FALSE;
+    osStrncpy(session->upstream_error, reason, sizeof(session->upstream_error) - 1);
+    tb2_mqtt_packet_ids_clear(&session->cloud_ids);
+    tb2_mqtt_qos2_free(&session->blocked_qos2_upstream);
+    TRACE_INFO("TB2 MQTT cloud disconnected overlay=%u reason=%s; local connection retained\r\n",
+        (unsigned)session->box_settings->internal.overlayNumber, reason);
+}
+
+static void tb2_mqtt_cloud_reset(tb2_mqtt_passthrough_session_t *session, const char *reason)
+{
+    tb2_mqtt_cloud_clear(session, reason);
+    if (session->worker != NULL) tb2_mqtt_upstream_reconnect(session->worker, ERROR_FAILURE);
+}
+static void tb2_mqtt_cloud_shutdown(tb2_mqtt_passthrough_session_t *session,
+                                   bool_t reconnect, const char *reason)
+{
+    const uint8_t packet[] = {0xe0, 0};
+    tb2_mqtt_record_packet_ex(session, TRUE, packet, sizeof(packet), NULL, 0,
+        14, NULL, FALSE, NULL, TRUE, TRUE, "upstream_disconnect_requested",
+        0, 0, FALSE, FALSE, 0, NULL);
+    tb2_mqtt_cloud_clear(session, reason);
+    if (session->worker != NULL) tb2_mqtt_upstream_shutdown(session->worker, reconnect, NO_ERROR);
+}
+static void tb2_mqtt_capture_cloud_disconnect(tb2_mqtt_passthrough_session_t *session,
+                                              error_t result)
+{
+    const uint8_t packet[] = {0xe0, 0};
+    osAcquireMutex(&session->io_mutex);
+    if (session->capture_opened && !session->capture_failed &&
+        tb2_mqtt_capture_packet_ex(&session->capture, "box_to_upstream",
+            packet, sizeof(packet), NULL, 0, 14, NULL, result == NO_ERROR,
+            NULL, TRUE, TRUE, result ? "upstream_disconnect_failed" :
+            "upstream_disconnect_complete", 0, 0, 0, NULL))
+        session->capture_failed = TRUE;
+    osReleaseMutex(&session->io_mutex);
+}
+
+static error_t tb2_mqtt_configure_worker(tb2_mqtt_passthrough_session_t *session)
+{
+    mutex_lock(MUTEX_SETTINGS);
+    settings_t *identity = tb2_mqtt_select_identity_settings(session->box_settings);
+    settings_t *global = get_settings();
+    if (!tb2_mqtt_has_original_identity(identity))
+    {
+        mutex_unlock(MUTEX_SETTINGS);
+        osStrcpy(session->upstream_error, "upstream_identity_unavailable");
+        return ERROR_NOT_FOUND;
+    }
+    tb2_mqtt_upstream_config_t config = {
+        .hostname = global->mqtt_client_upstream.hostname,
+        .port = global->mqtt_client_upstream.port,
+        .timeout_ms = global->core.http_client_timeout,
+        .ca = identity->internal.client_tb2.ca,
+        .certificate = identity->internal.client_tb2.crt,
+        .private_key = identity->internal.client_tb2.key,
+    };
+    error_t error = session->worker == NULL ?
+        tb2_mqtt_upstream_acquire(&config, session->owner, &session->worker) :
+        tb2_mqtt_upstream_reconfigure(session->worker, &config, session->owner);
+    mutex_unlock(MUTEX_SETTINGS);
+    if (!error) session->upstream_configured = TRUE;
+    else osStrcpy(session->upstream_error, "upstream_worker_unavailable");
+    return error;
+}
+
+static void tb2_mqtt_complete_write(tb2_mqtt_passthrough_session_t *session,
+                                    const tb2_mqtt_upstream_event_t *event)
+{
+    tb2_mqtt_pending_write_t *pending = NULL;
+    for (size_t i = 0; i < TB2_MQTT_INFLIGHT_MAX; i++)
+        if (session->writes[i].token == event->token) { pending = &session->writes[i]; break; }
+    if (pending == NULL || event->token == 0) return;
+    bool_t delivered = event->type == TB2_MQTT_UPSTREAM_TX_COMPLETE;
+    osAcquireMutex(&session->io_mutex);
+    if (session->capture_opened && !session->capture_failed)
+    {
+        error_t error = tb2_mqtt_capture_packet_ex(&session->capture, "box_to_upstream",
+            pending->original, pending->original_length, pending->wire, pending->wire_length,
+            pending->packet_type, pending->topic, delivered, pending->filter_id,
+            pending->generated, TRUE, delivered ? "upstream_write_complete" : "upstream_write_failed",
+            pending->original_id, pending->wire_id, pending->removed,
+            pending->has_decision ? &pending->decision : NULL);
+        if (error) session->capture_failed = TRUE;
+    }
+    if (delivered)
+    {
+        session->capture.bytes_box_to_upstream += pending->wire_length;
+        session->capture.messages_forwarded_box_to_upstream++;
+        tb2_mqtt_status_add_bytes(TRUE, pending->wire_length);
+        tb2_mqtt_status_add_message(TRUE, FALSE);
+        tb2_mqtt_add_nocloud_stats(session, TRUE, pending->rewritten, pending->removed);
+        session->last_cloud_tx = osGetSystemTime();
+    }
+    osReleaseMutex(&session->io_mutex);
+    if (delivered && pending->packet_type == TB2_MQTT_PACKET_PUBLISH)
+        tb2_mqtt_notify_publish_completed(session, TRUE, pending->wire, pending->wire_length);
+    session->writes_bytes -= pending->budget_bytes;
+    tb2_mqtt_pending_write_free(pending);
 }
 
 error_t tb2_mqtt_passthrough_init(void)
 {
     osMemset(&mqtt_passthrough_status, 0, sizeof(mqtt_passthrough_status));
-    if (!osCreateMutex(&mqtt_passthrough_status.mutex))
-    {
-        return ERROR_OUT_OF_RESOURCES;
-    }
+    if (!osCreateMutex(&mqtt_passthrough_status.mutex)) return ERROR_OUT_OF_RESOURCES;
     mqtt_passthrough_status.initialized = TRUE;
     osStrcpy(mqtt_passthrough_status.state, "disabled");
     return NO_ERROR;
 }
-
 void tb2_mqtt_passthrough_deinit(void)
 {
+    for (size_t i = 0; i < TB2_MQTT_SESSION_MAX; i++) tb2_mqtt_saved_clear(&saved_sessions[i]);
     if (mqtt_passthrough_status.initialized)
-    {
-        osDeleteMutex(&mqtt_passthrough_status.mutex);
-        mqtt_passthrough_status.initialized = FALSE;
-    }
+    { osDeleteMutex(&mqtt_passthrough_status.mutex); mqtt_passthrough_status.initialized = FALSE; }
 }
-
 bool_t tb2_mqtt_passthrough_is_enabled(void)
 {
-    settings_t *settings = get_settings();
-    return settings->mqtt_client_upstream.enabled;
+    return get_settings()->mqtt_client_upstream.enabled;
+}
+static bool_t tb2_mqtt_cloud_available(const tb2_mqtt_passthrough_session_t *session)
+{
+    return session != NULL && session->cloud_phase == TB2_MQTT_CLOUD_READY &&
+        session->epoch != 0 && !session->capture_failed && !session->privacy_failed &&
+        tb2_mqtt_passthrough_is_enabled();
+}
+
+static void tb2_mqtt_runtime_update(tb2_mqtt_passthrough_session_t *session)
+{
+    osAcquireMutex(&session->io_mutex);
+    bool_t connected = tb2_mqtt_cloud_available(session);
+    if (connected && session->confirmed_epoch != session->epoch)
+    {
+        tb2_mqtt_upstream_confirm_session(session->worker, session->epoch);
+        session->confirmed_epoch = session->epoch;
+    }
+    const char *state = !tb2_mqtt_passthrough_is_enabled() ? "disabled" :
+        connected ? "connected" :
+        session->upstream_error[0] ? "error" :
+        session->ever_connected ? "reconnecting" : "connecting";
+    osAcquireMutex(&mqtt_passthrough_status.mutex);
+    if (connected != session->runtime_cloud)
+    {
+        if (connected)
+        {
+            mqtt_passthrough_status.upstream_sessions++;
+            mqtt_passthrough_status.last_success = time(NULL);
+        }
+        else if (mqtt_passthrough_status.upstream_sessions)
+            mqtt_passthrough_status.upstream_sessions--;
+    }
+    session->runtime_cloud = connected;
+    session->runtime_local = session->established;
+    osStrcpy(session->runtime_state, state);
+    osStrcpy(session->runtime_error, session->upstream_error);
+    osReleaseMutex(&mqtt_passthrough_status.mutex);
+    osReleaseMutex(&session->io_mutex);
+}
+bool_t tb2_mqtt_passthrough_is_established(const tb2_mqtt_passthrough_session_t *session)
+{
+    osAcquireMutex(&mqtt_passthrough_status.mutex);
+    bool_t connected = session != NULL && session->runtime_local;
+    osReleaseMutex(&mqtt_passthrough_status.mutex);
+    return connected;
+}
+bool_t tb2_mqtt_passthrough_is_upstream_connected(const tb2_mqtt_passthrough_session_t *session)
+{
+    osAcquireMutex(&mqtt_passthrough_status.mutex);
+    bool_t connected = session != NULL && session->runtime_cloud &&
+        !session->capture_failed && !session->privacy_failed;
+    osReleaseMutex(&mqtt_passthrough_status.mutex);
+    return connected && tb2_mqtt_passthrough_is_enabled();
+}
+void tb2_mqtt_passthrough_add_runtime_status(const tb2_mqtt_passthrough_session_t *session,
+                                            cJSON *mqtt)
+{
+    osAcquireMutex(&mqtt_passthrough_status.mutex);
+    cJSON_AddBoolToObject(mqtt, "localConnected", session != NULL && session->runtime_local);
+    cJSON_AddStringToObject(mqtt, "upstreamState", !tb2_mqtt_passthrough_is_enabled() ?
+        "disabled" : session != NULL ? session->runtime_state : "connecting");
+    cJSON_AddStringToObject(mqtt, "upstreamError", session != NULL ? session->runtime_error : "");
+    osReleaseMutex(&mqtt_passthrough_status.mutex);
 }
 
 error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
-                                   tb2_mqtt_passthrough_session_t **session,
-                                   bool_t *handled,
-                                   tb2_mqtt_publish_observer_t observer,
-                                   tb2_mqtt_control_observer_t control_observer,
-                                   tb2_mqtt_publish_completed_t publish_completed,
-                                   void *observer_context,
-                                   settings_t **box_settings_out)
+    size_t connection_slot, tb2_mqtt_passthrough_session_t **session, bool_t *handled,
+    tb2_mqtt_publish_observer_t observer, tb2_mqtt_control_observer_t control_observer,
+    tb2_mqtt_publish_completed_t publish_completed,
+    tb2_mqtt_subscription_snapshot_t subscription_snapshot,
+    tb2_mqtt_subscription_apply_t subscription_apply,
+    tb2_mqtt_subscription_qos_t subscription_qos, void *observer_context,
+    settings_t **box_settings_out)
 {
-    *session = NULL;
-    *handled = FALSE;
-    if (box_settings_out != NULL)
-        *box_settings_out = NULL;
-    if (!tb2_mqtt_passthrough_is_enabled())
+    *session = NULL; *handled = FALSE;
+    if (box_settings_out) *box_settings_out = NULL;
+    settings_t *settings = tb2_mqtt_settings_from_certificate(box_tls);
+    if (settings == NULL)
     {
-        return NO_ERROR;
+        *handled = tb2_mqtt_passthrough_is_enabled();
+        return *handled ? ERROR_FAILURE : NO_ERROR;
     }
     *handled = TRUE;
-    TRACE_DEBUG("TB2 MQTT upstream stage=passthrough_start enabled=true\r\n");
-
-    settings_t *box_settings = tb2_mqtt_settings_from_certificate(box_tls);
-    if (box_settings == NULL)
-    {
-        tb2_mqtt_trace_error("map_box_identity", ERROR_FAILURE);
-        tb2_mqtt_status_attempt_failed("identity_unavailable");
-        return ERROR_FAILURE;
-    }
-    settings_t *identity_settings = tb2_mqtt_select_identity_settings(box_settings);
-    if (!tb2_mqtt_has_original_identity(identity_settings))
-    {
-        TRACE_ERROR("TB2 MQTT upstream stage=select_upstream_identity identity_material"
-                    " settings=available ca=%s certificate=%s key=%s\r\n",
-                    identity_settings != NULL && identity_settings->internal.client_tb2.ca != NULL &&
-                            identity_settings->internal.client_tb2.ca[0] != '\0' ? "available" : "missing",
-                    identity_settings != NULL && identity_settings->internal.client_tb2.crt != NULL &&
-                            identity_settings->internal.client_tb2.crt[0] != '\0' ? "available" : "missing",
-                    identity_settings != NULL && identity_settings->internal.client_tb2.key != NULL &&
-                            identity_settings->internal.client_tb2.key[0] != '\0' ? "available" : "missing");
-        tb2_mqtt_trace_error("select_upstream_identity", ERROR_FAILURE);
-        tb2_mqtt_status_attempt_failed("upstream_identity_unavailable");
-        return ERROR_FAILURE;
-    }
-
+    if (connection_slot >= TB2_MQTT_SESSION_MAX) return ERROR_OUT_OF_RESOURCES;
     tb2_mqtt_passthrough_session_t *created = osAllocMem(sizeof(*created));
-    if (created == NULL)
-    {
-        tb2_mqtt_status_attempt_failed("out_of_memory");
-        return ERROR_OUT_OF_MEMORY;
-    }
+    if (created == NULL) return ERROR_OUT_OF_MEMORY;
     osMemset(created, 0, sizeof(*created));
-    created->box_tls = box_tls;
-    created->box_socket = box_socket;
-    created->box_settings = box_settings;
-    created->observer = observer;
-    created->control_observer = control_observer;
+    if (!osCreateMutex(&created->io_mutex))
+    { osFreeMem(created); return ERROR_OUT_OF_RESOURCES; }
+    if (!osCreateMutex(&created->ids_mutex))
+    { osDeleteMutex(&created->io_mutex); osFreeMem(created); return ERROR_OUT_OF_RESOURCES; }
+    created->box_tls = box_tls; created->box_socket = box_socket;
+    created->box_settings = settings;
+    created->observer = observer; created->control_observer = control_observer;
     created->publish_completed = publish_completed;
+    created->subscription_snapshot = subscription_snapshot;
+    created->subscription_apply = subscription_apply;
+    created->subscription_qos = subscription_qos;
     created->observer_context = observer_context;
     created->next_local_packet_id = UINT16_MAX;
-
+    created->owner = ++next_owner;
+    created->saved_slot = -1;
     error_t error = tb2_mqtt_capture_open(&created->capture, get_settings());
+    created->capture_opened = !error;
+    created->capture_failed = error != NO_ERROR;
     if (error)
     {
-        tb2_mqtt_trace_error("capture_open", error);
-        tb2_mqtt_status_attempt_failed("capture_open_failed");
-        osFreeMem(created);
-        return error;
+        osStrcpy(created->upstream_error, "capture_open_failed");
+        TRACE_WARNING("TB2 MQTT capture unavailable; Internet relay disabled, local connection retained\r\n");
     }
-    created->capture_opened = TRUE;
     tb2_mqtt_status_start();
-
-    error = httpClientInit(&created->upstream);
-    if (error)
-    {
-        tb2_mqtt_trace_error("http_client_init", error);
-    }
-    if (!error)
-    {
-        created->upstream_initialized = TRUE;
-        error = tb2_mqtt_connect_upstream(identity_settings, &created->upstream);
-    }
-    if (error)
-    {
-        tb2_mqtt_trace_error("passthrough_connect", error);
-        tb2_mqtt_passthrough_close(created, "connect_failed", FALSE);
-        return error;
-    }
-
+    tb2_mqtt_runtime_update(created);
     socketSetTimeout(box_socket, TB2_MQTT_TUNNEL_IO_TIMEOUT_MS);
-    tb2_mqtt_status_connected();
-    TRACE_DEBUG("TB2 MQTT upstream stage=passthrough_start connected=true session=%s\r\n",
-                created->capture.session_id);
     *session = created;
-    if (box_settings_out != NULL)
-        *box_settings_out = box_settings;
+    if (box_settings_out) *box_settings_out = settings;
     return NO_ERROR;
 }
-
 error_t tb2_mqtt_passthrough_forward_initial(tb2_mqtt_passthrough_session_t *session,
-                                             const uint8_t *data, size_t length)
+                                            const uint8_t *data, size_t length)
 {
-    if (session == NULL || data == NULL || length == 0)
-    {
-        return ERROR_INVALID_PARAMETER;
-    }
-    return tb2_mqtt_process_stream(session, TRUE, data, length);
+    if (session == NULL || data == NULL || length == 0) return ERROR_INVALID_PARAMETER;
+    error_t error = tb2_mqtt_process_stream(session, TRUE, data, length);
+    tb2_mqtt_runtime_update(session);
+    return error;
 }
 
 error_t tb2_mqtt_passthrough_task(tb2_mqtt_passthrough_session_t *session)
 {
-    if (session == NULL)
-    {
-        return ERROR_INVALID_PARAMETER;
-    }
-    if (!tb2_mqtt_passthrough_is_enabled())
-    {
-        return ERROR_ABORTED;
-    }
-
+    if (session == NULL) return ERROR_INVALID_PARAMETER;
     error_t error = tb2_mqtt_forward_ready(session, TRUE);
-    if (!error)
+    if (error || !session->established) return error;
+    uint32_t now = osGetSystemTime();
+    if (session->keepalive && (uint32_t)(now - session->last_box_rx) >
+        (uint32_t)session->keepalive * 1500U) return ERROR_TIMEOUT;
+
+    bool_t enabled = tb2_mqtt_passthrough_is_enabled() && !session->capture_failed && !session->privacy_failed;
+    if (!enabled && session->upstream_configured)
     {
-        error = tb2_mqtt_forward_ready(session, FALSE);
+        session->upstream_configured = FALSE;
+        tb2_mqtt_cloud_shutdown(session, FALSE, session->capture_failed ? "capture_failed" : session->privacy_failed ? "local_response_history_full" : "disabled");
     }
-    return error;
+    /* A failed credential lookup is retried at most once per second. */
+    if (enabled && !session->upstream_configured &&
+        (!session->configure_attempted || (uint32_t)(now - session->last_configure_at) >= TB2_MQTT_POLICY_CHECK_MS))
+    {
+        session->configure_attempted = TRUE;
+        session->last_configure_at = now;
+        tb2_mqtt_configure_worker(session);
+    }
+    tb2_mqtt_upstream_event_t event;
+    while (session->worker != NULL && tb2_mqtt_upstream_poll(session->worker, &event))
+    {
+        if (event.owner_serial != session->owner)
+        { tb2_mqtt_upstream_event_free(&event); continue; }
+        if (event.type == TB2_MQTT_UPSTREAM_TX_COMPLETE || event.type == TB2_MQTT_UPSTREAM_TX_FAILED)
+            tb2_mqtt_complete_write(session, &event);
+        else if (event.type == TB2_MQTT_UPSTREAM_CONNECTED && enabled)
+        {
+            session->epoch = event.epoch;
+            session->cloud_phase = TB2_MQTT_CLOUD_CONNACK;
+            session->cloud_started_at = now;
+            session->last_cloud_tx = now;
+            session->upstream_error[0] = '\0';
+            osFreeMem(session->cloud_connect); session->cloud_connect = NULL;
+            error = tb2_mqtt_build_cloud_connect(session, &session->cloud_connect,
+                &session->cloud_connect_length);
+            if (!error) error = tb2_mqtt_record_packet_ex(session, TRUE,
+                session->connect_packet, session->connect_length,
+                session->cloud_connect, session->cloud_connect_length, 1, NULL,
+                TRUE, NULL, TRUE, TRUE, "upstream_connect", 0, 0, FALSE, TRUE, 0, NULL);
+            if (error) tb2_mqtt_cloud_reset(session, "connect_packet_failed");
+        }
+        else if (event.type == TB2_MQTT_UPSTREAM_RX && enabled && event.epoch == session->epoch)
+        {
+            error = tb2_mqtt_process_stream(session, FALSE, event.data, event.length);
+            if (error) tb2_mqtt_cloud_reset(session, "upstream_protocol_error");
+        }
+        else if (event.type == TB2_MQTT_UPSTREAM_DISCONNECT)
+            tb2_mqtt_capture_cloud_disconnect(session, event.error);
+        else if (event.type == TB2_MQTT_UPSTREAM_DOWN)
+            tb2_mqtt_cloud_clear(session, enabled ? "upstream_unavailable" :
+                session->capture_failed ? "capture_failed" : "disabled");
+        tb2_mqtt_upstream_event_free(&event);
+    }
+    if (session->cloud_phase == TB2_MQTT_CLOUD_READY && session->subscriptions_dirty)
+        if (tb2_mqtt_sync_subscriptions(session))
+            tb2_mqtt_cloud_reset(session, "subscription_sync_failed");
+    if ((session->cloud_phase == TB2_MQTT_CLOUD_CONNACK ||
+         session->cloud_phase == TB2_MQTT_CLOUD_SUBACK) &&
+        (uint32_t)(now - session->cloud_started_at) >= TB2_MQTT_HANDSHAKE_TIMEOUT_MS)
+        tb2_mqtt_cloud_reset(session, "upstream_handshake_timeout");
+
+    uint32_t keepalive_ms = (uint32_t)session->keepalive * 1000U;
+    if (session->cloud_phase == TB2_MQTT_CLOUD_READY && keepalive_ms)
+    {
+        if (session->ping_pending && (uint32_t)(now - session->ping_sent_at) >= keepalive_ms)
+            tb2_mqtt_cloud_reset(session, "upstream_keepalive_timeout");
+        else if (!session->ping_pending &&
+                 (uint32_t)(now - session->last_cloud_tx) >= keepalive_ms / 2U)
+        {
+            tb2_mqtt_cloud_packet(session, 0xc0, NULL, 0, "upstream_pingreq");
+            session->ping_pending = TRUE; session->ping_sent_at = now;
+        }
+    }
+    /* Re-evaluate registered Will protection; a changed filter must not leave
+     * an old Will installed when a graceful withdrawal is still possible. */
+    if (enabled && session->epoch && (uint32_t)(now - session->last_will_check) >= TB2_MQTT_POLICY_CHECK_MS)
+    {
+        uint8_t *updated = NULL; size_t size = 0;
+        session->last_will_check = now;
+        if (!tb2_mqtt_build_cloud_connect(session, &updated, &size) &&
+            (size != session->cloud_connect_length ||
+             osMemcmp(updated, session->cloud_connect, size)))
+            tb2_mqtt_cloud_shutdown(session, TRUE, "will_policy_changed");
+        osFreeMem(updated);
+    }
+    tb2_mqtt_runtime_update(session);
+    return session->box_write_failed ? ERROR_WRITE_FAILED : NO_ERROR;
 }
 
 error_t tb2_mqtt_passthrough_reserve_local_packet_id(
@@ -2360,12 +2834,14 @@ error_t tb2_mqtt_passthrough_reserve_local_packet_id(
     if (session == NULL || packet_id == NULL)
         return ERROR_INVALID_PARAMETER;
 
+    osAcquireMutex(&session->ids_mutex);
     uint16_t reserved = 0;
     error_t error = tb2_mqtt_allocate_wire_packet_id(session, &reserved);
     if (!error)
         error = tb2_mqtt_packet_id_add(session, reserved, reserved, 1, TRUE);
     if (!error)
         *packet_id = reserved;
+    osReleaseMutex(&session->ids_mutex);
     return error;
 }
 
@@ -2374,10 +2850,12 @@ void tb2_mqtt_passthrough_release_local_packet_id(
 {
     if (session == NULL || packet_id == 0)
         return;
+    osAcquireMutex(&session->ids_mutex);
     tb2_mqtt_packet_id_entry_t *entry =
         tb2_mqtt_packet_id_find_wire(session, packet_id);
     if (entry != NULL && entry->local)
         tb2_mqtt_packet_id_remove(session, entry);
+    osReleaseMutex(&session->ids_mutex);
 }
 
 error_t tb2_mqtt_passthrough_write_local_publish(
@@ -2395,10 +2873,12 @@ error_t tb2_mqtt_passthrough_write_local_publish(
         return ERROR_INVALID_TYPE;
     if (qos == 1)
     {
+        osAcquireMutex(&session->ids_mutex);
         tb2_mqtt_packet_id_entry_t *entry =
             tb2_mqtt_packet_id_find_wire(session, packet_id);
-        if (packet_id == 0 || entry == NULL || !entry->local)
-            return ERROR_INVALID_PARAMETER;
+        bool_t valid = packet_id != 0 && entry != NULL && entry->local;
+        osReleaseMutex(&session->ids_mutex);
+        if (!valid) return ERROR_INVALID_PARAMETER;
     }
 
     const mqtt_forward_filter_result_t manual_decision = mqtt_forward_filter_evaluate(
@@ -2423,9 +2903,38 @@ void tb2_mqtt_passthrough_close(tb2_mqtt_passthrough_session_t *session,
     {
         return;
     }
-    if (session->upstream_initialized)
+    if (session->worker != NULL)
     {
-        httpClientDeinit(&session->upstream);
+        if (session->clean_disconnect)
+            tb2_mqtt_cloud_shutdown(session, FALSE, "local_disconnect");
+        tb2_mqtt_upstream_release(session->worker);
+    }
+    if (session->saved_slot >= 0)
+    {
+        tb2_mqtt_saved_session_t *saved = &saved_sessions[session->saved_slot];
+        if (saved->owner == session->owner)
+        {
+            saved->active = NULL;
+            if (!session->clean_session && session->established)
+            {
+                saved->incoming = session->blocked_qos2_box;
+                session->blocked_qos2_box = NULL;
+                /* Freshness remains governed by its existing overlay retry cache. */
+                tb2_mqtt_packet_id_entry_t *p = session->packet_ids;
+                while (p != NULL)
+                {
+                    tb2_mqtt_packet_id_entry_t *next = p->next;
+                    if (p->local) tb2_mqtt_packet_id_remove(session, p);
+                    p = next;
+                }
+                saved->outgoing = session->packet_ids;
+                session->packet_ids = NULL;
+                saved->next_id = session->next_local_packet_id;
+                saved->response_history = session->response_history;
+                mqtt_response_history_init(&session->response_history);
+            }
+            else tb2_mqtt_saved_clear(saved);
+        }
     }
 
     if (session->capture_opened)
@@ -2452,18 +2961,28 @@ void tb2_mqtt_passthrough_close(tb2_mqtt_passthrough_session_t *session,
             result_code = "capture_finalize_failed";
         }
         tb2_mqtt_rotate_completed_captures(get_settings());
-        tb2_mqtt_status_finish(success, result_code);
         TRACE_INFO("TB2 MQTT passthrough session=%s status=%s up=%llu down=%llu\r\n",
                    session->capture.session_id, result_code,
                    (unsigned long long)session->capture.bytes_box_to_upstream,
                    (unsigned long long)session->capture.bytes_upstream_to_box);
     }
+    osAcquireMutex(&mqtt_passthrough_status.mutex);
+    if (session->runtime_cloud && mqtt_passthrough_status.upstream_sessions)
+        mqtt_passthrough_status.upstream_sessions--;
+    osReleaseMutex(&mqtt_passthrough_status.mutex);
+    tb2_mqtt_status_finish(success, result_code);
     osFreeMem(session->box_stream.data);
     osFreeMem(session->upstream_stream.data);
     tb2_mqtt_qos2_free(&session->blocked_qos2_box);
     tb2_mqtt_qos2_free(&session->blocked_qos2_upstream);
-    tb2_mqtt_local_responses_free(session);
-    tb2_mqtt_packet_ids_free(session);
+    tb2_mqtt_packet_ids_clear(&session->packet_ids);
+    tb2_mqtt_packet_ids_clear(&session->cloud_ids);
+    tb2_mqtt_pending_writes_clear(session);
+    mqtt_response_history_reset(&session->response_history);
+    osFreeMem(session->connect_packet);
+    osFreeMem(session->cloud_connect);
+    osDeleteMutex(&session->ids_mutex);
+    osDeleteMutex(&session->io_mutex);
     osFreeMem(session);
 }
 
@@ -2482,6 +3001,10 @@ error_t tb2_mqtt_passthrough_write_status(HttpConnection *connection)
     {
         state = "disabled";
     }
+    else if (mqtt_passthrough_status.upstream_sessions > 0)
+    {
+        state = "connected";
+    }
     else if (mqtt_passthrough_status.active_sessions == 0 &&
              mqtt_passthrough_status.error_code[0] == '\0')
     {
@@ -2489,7 +3012,7 @@ error_t tb2_mqtt_passthrough_write_status(HttpConnection *connection)
     }
     else
     {
-        state = mqtt_passthrough_status.state;
+        state = mqtt_passthrough_status.error_code[0] ? "error" : "connecting";
     }
 
     cJSON_AddBoolToObject(json, "enabled", settings->mqtt_client_upstream.enabled);
@@ -2521,6 +3044,7 @@ error_t tb2_mqtt_passthrough_write_status(HttpConnection *connection)
     cJSON_AddNumberToObject(
         json, "nocloud_items_removed_upstream_to_box",
         (double)mqtt_passthrough_status.nocloud_items_removed_upstream_to_box);
+    cJSON_AddNumberToObject(json, "upstream_sessions", mqtt_passthrough_status.upstream_sessions);
     cJSON_AddNumberToObject(json, "last_attempt", (double)mqtt_passthrough_status.last_attempt);
     cJSON_AddNumberToObject(json, "last_success", (double)mqtt_passthrough_status.last_success);
     cJSON_AddStringToObject(json, "error_code", mqtt_passthrough_status.error_code);
