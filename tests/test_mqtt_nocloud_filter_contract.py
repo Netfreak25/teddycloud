@@ -24,6 +24,8 @@ class MqttNoCloudFilterContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         cls.ruid = (ROOT / "src/tb2_ruid.c").read_text(encoding="utf-8")
+        cls.handler = (ROOT / "src/handler.c").read_text(encoding="utf-8")
+        cls.cloud = (ROOT / "src/handler_cloud.c").read_text(encoding="utf-8")
 
     def function(self, start, end):
         start_index = self.matcher.index(start)
@@ -47,6 +49,8 @@ class MqttNoCloudFilterContractTests(unittest.TestCase):
         self.assertNotIn("load_content_json", policy)
         self.assertIn("if (!fsFileExists(json_path))", policy)
         self.assertIn("tb2_nocloud_optional_bool", policy)
+        self.assertIn("tb2_nocloud_private_source", policy)
+        self.assertIn("policy->private_source ||", policy)
         self.assertIn("policy->nocloud && !policy->cloud_override", policy)
 
         parser = self.policy
@@ -111,16 +115,19 @@ class MqttNoCloudFilterContractTests(unittest.TestCase):
         ]
         self.assertNotIn("mqtt_nocloud_filter_publish", local_publish)
 
-    def test_teddycloud_payload_is_blocked_before_topic_or_policy_lookup(self):
+    def test_teddycloud_payload_is_selective_only_for_structured_arrays(self):
         dispatcher = self.function(
             "void mqtt_nocloud_filter_publish",
             "void mqtt_nocloud_filter_result_free",
         )
         local_guard = dispatcher.index('"teddycloud_"')
-        topic_lookup = dispatcher.index("mqtt_nocloud_topic_path", local_guard)
-        self.assertLess(local_guard, topic_lookup)
-        self.assertIn("box_to_upstream &&", dispatcher[:topic_lookup])
+        self.assertIn("mqtt_nocloud_selective_private_payload_path", dispatcher)
         self.assertIn('"local_content.teddycloud_payload"', dispatcher)
+        item = self.function(
+            "static bool_t mqtt_nocloud_item_is_protected",
+            "static void mqtt_nocloud_filter_array",
+        )
+        self.assertIn("mqtt_nocloud_json_contains_private_chapter", item)
 
     def test_arrays_remove_whole_protected_items_and_keep_other_data(self):
         array_filter = self.function(
@@ -188,6 +195,19 @@ class MqttNoCloudFilterContractTests(unittest.TestCase):
         self.assertIn("cJSON_DeleteItemFromArray(json, index)", logs)
         self.assertIn("mqtt_nocloud_finish_array", logs)
         self.assertIn("mqtt_nocloud_payload_has_protected_ruid", logs)
+        self.assertIn("mqtt_nocloud_sensitive_log_source", logs)
+        self.assertIn("mqtt_nocloud_log_has_unsafe_cloud_url", logs)
+        self.assertIn("mqtt_forward_filter_evaluate", logs)
+        self.assertIn("manual_evaluated = TRUE", logs)
+        self.assertIn("manual_filter_applied = manual_evaluated", logs)
+
+    def test_v3_freshness_posts_only_cloud_eligible_items_and_validates_reply(self):
+        self.assertIn("!has_private_source", self.cloud)
+        self.assertIn("freshReqCloud.n_tonie_infos > 0", self.cloud)
+        self.assertIn("ctx.freshnessCloudUids", self.cloud)
+        self.assertIn("marked_uid == ctx->freshnessCloudUids[j]", self.handler)
+        self.assertIn("ctx->api != V3_FRESHNESS_CHECK", self.handler)
+        self.assertIn("HTTP/1.1 200 OK", self.handler)
 
     def test_invalid_structured_payloads_fail_closed_without_session_error(self):
         for function_name in (
@@ -197,9 +217,11 @@ class MqttNoCloudFilterContractTests(unittest.TestCase):
         ):
             self.assertIn(function_name, self.matcher)
         self.assertIn("mqtt_nocloud_block(result, filter_id, 0)", self.matcher)
+        packet_start = self.proxy.index("static error_t tb2_mqtt_process_packet", 1000)
         processor = self.proxy[
-            self.proxy.index("static error_t tb2_mqtt_process_packet") :
-            self.proxy.index("static error_t tb2_mqtt_process_stream")
+            packet_start : self.proxy.index(
+                "static error_t tb2_mqtt_process_stream", packet_start
+            )
         ]
         self.assertIn("rebuild_error", processor)
         self.assertIn("nocloud_result.action = MQTT_NOCLOUD_BLOCK", processor)

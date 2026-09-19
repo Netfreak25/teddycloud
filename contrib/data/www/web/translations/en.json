@@ -1225,7 +1225,7 @@
             "resetToGlobalHint": "Removes all box overrides for these MQTT filters, including hidden rules. Apply with Save; Discard undoes the change.",
             "suppress": "Suppress",
             "suppressed": "Suppressed",
-            "description": "Rules apply in both directions. Inherited rules show their effective global state.",
+            "description": "These rules control only Internet traffic between TeddyCloud and TONIES in both directions. Local processing and automatic private-content protection remain active.",
             "forward": "Forward",
             "global": "Use global",
             "inheritedStatus": "Global · {{state}}",
@@ -1242,13 +1242,20 @@
                 "suppressed": "Suppressed"
             },
             "groups": {
-                "direct": "Direct topics",
-                "logs": "Logs",
-                "metrics": "Metrics",
-                "appReply": "App Reply",
-                "settings": "Settings",
-                "playback": "Playback",
-                "appControl": "App Control"
+                "registration": "Registration and updates",
+                "settings": "Settings from TONIES",
+                "appControl": "App control and replies",
+                "telemetry": "Playback status and telemetry",
+                "diagnostics": "Diagnostics and logs",
+                "setupOther": "Setup and unknown topics"
+            },
+            "groupDescriptions": {
+                "registration": "Claim and fresh-tonies at the Internet boundary. Local state is still processed; a successful cloud claim is not faked when blocked.",
+                "settings": "settings/desired gives TONIES ownership. Blocked or unavailable requests receive the stored local state; the app-control exception does not unlock these settings.",
+                "appControl": "Cloud commands and replies. Local control remains available when a cloud command is blocked; when allowed, it additionally requires the separate local app-control exception.",
+                "telemetry": "Status is processed locally first. Rules then govern playback, volume, BI and metrics data; private content is always removed.",
+                "diagnostics": "Logs are automatically cleaned of private-content data first. Remaining sources then follow these manual rules.",
+                "setupOther": "Setup follows its rule. TeddyCloud does not invent application replies for unknown messages; required MQTT acknowledgements remain local."
             },
             "noMatches": "No matching filters"
         },

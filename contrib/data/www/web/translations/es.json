@@ -1225,7 +1225,7 @@
             "resetToGlobalHint": "Elimina todos los valores propios de la box para estos filtros MQTT, incluidas las reglas ocultas. Aplicar con Guardar; Descartar deshace el cambio.",
             "suppress": "Suprimir",
             "suppressed": "Suprimido",
-            "description": "Las reglas se aplican en ambas direcciones. Las reglas heredadas muestran su estado global efectivo.",
+            "description": "Estas reglas controlan únicamente el tráfico de Internet entre TeddyCloud y TONIES en ambas direcciones. El procesamiento local y la protección automática del contenido privado siguen activos.",
             "forward": "Reenviar",
             "global": "Usar global",
             "inheritedStatus": "Global · {{state}}",
@@ -1242,13 +1242,20 @@
                 "suppressed": "Suprimidos"
             },
             "groups": {
-                "direct": "Topics directos",
-                "logs": "Registros",
-                "metrics": "Métricas",
-                "appReply": "Respuesta de la aplicación",
-                "settings": "Ajustes",
-                "playback": "Reproducción",
-                "appControl": "Control de la aplicación"
+                "registration": "Registro y actualización",
+                "settings": "Ajustes de TONIES",
+                "appControl": "Control de la aplicación y respuestas",
+                "telemetry": "Estado de reproducción y telemetría",
+                "diagnostics": "Diagnóstico y registros",
+                "setupOther": "Configuración y topics desconocidos"
+            },
+            "groupDescriptions": {
+                "registration": "Claim y fresh-tonies en el límite de Internet. El estado local sigue procesándose; no se simula un registro cloud correcto si está bloqueado.",
+                "settings": "settings/desired da a TONIES el control. Las solicitudes bloqueadas o no disponibles reciben el estado local guardado; la excepción app-control no desbloquea estos ajustes.",
+                "appControl": "Comandos cloud y respuestas. El control local sigue disponible si el comando cloud está bloqueado; si está permitido, también requiere la excepción local app-control.",
+                "telemetry": "El estado se procesa primero localmente. Después las reglas controlan reproducción, volumen, BI y métricas; el contenido privado siempre se elimina.",
+                "diagnostics": "Primero se eliminan automáticamente de los registros los datos de contenido privado. Las fuentes restantes siguen estas reglas manuales.",
+                "setupOther": "La configuración sigue su regla. TeddyCloud no inventa respuestas para mensajes desconocidos; las confirmaciones MQTT necesarias siguen siendo locales."
             },
             "noMatches": "No hay filtros coincidentes"
         },

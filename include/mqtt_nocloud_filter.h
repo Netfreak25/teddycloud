@@ -21,6 +21,7 @@ typedef struct
     size_t payload_len;
     const char *filter_id;
     size_t removed_count;
+    bool_t manual_filter_applied;
 } mqtt_nocloud_filter_result_t;
 
 void mqtt_nocloud_filter_publish(settings_t *box_settings,

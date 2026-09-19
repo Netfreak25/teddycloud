@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "mqtt_forward_filter.h"
 #include "mqtt_nocloud_filter.h"
 #include "os_port.h"
 #include "tb2_nocloud_policy.h"
@@ -36,6 +37,23 @@ static bool_t mqtt_nocloud_payload_contains(const uint8_t *payload,
     for (size_t index = 0; index <= payload_len - needle_len; index++)
     {
         if (osMemcmp(payload + index, needle, needle_len) == 0)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static bool_t mqtt_nocloud_json_contains_private_chapter(const cJSON *item)
+{
+    if (item == NULL)
+        return FALSE;
+    if (item->string != NULL && osStrstr(item->string, "teddycloud_") != NULL)
+        return TRUE;
+    if (cJSON_IsString(item) && item->valuestring != NULL &&
+        osStrstr(item->valuestring, "teddycloud_") != NULL)
+        return TRUE;
+    for (const cJSON *child = item->child; child != NULL; child = child->next)
+    {
+        if (mqtt_nocloud_json_contains_private_chapter(child))
             return TRUE;
     }
     return FALSE;
@@ -165,6 +183,8 @@ static bool_t mqtt_nocloud_item_is_protected(
     mqtt_nocloud_context_t *context, const cJSON *item, bool_t *valid)
 {
     *valid = TRUE;
+    if (mqtt_nocloud_json_contains_private_chapter(item))
+        return TRUE;
     const cJSON *tonie = cJSON_IsObject(item) ?
                              cJSON_GetObjectItemCaseSensitive(item, "tonie") :
                              item;
@@ -287,8 +307,39 @@ static void mqtt_nocloud_filter_fresh_tonies(
 static bool_t mqtt_nocloud_payload_has_protected_ruid(
     mqtt_nocloud_context_t *context, const uint8_t *payload,
     size_t payload_len);
+static bool_t mqtt_nocloud_payload_has_safe_original_ruid(
+    mqtt_nocloud_context_t *context, const uint8_t *payload,
+    size_t payload_len);
+
+static bool_t mqtt_nocloud_sensitive_log_source(const cJSON *item)
+{
+    const cJSON *source = cJSON_IsObject(item) ?
+                              cJSON_GetObjectItemCaseSensitive(item, "source") : NULL;
+    if (!cJSON_IsString(source) || source->valuestring == NULL)
+        return FALSE;
+    return osStrcmp(source->valuestring, "littlefs") == 0 ||
+           osStrcmp(source->valuestring, "tns_fs_storage") == 0 ||
+           osStrcmp(source->valuestring, "tns_storage") == 0 ||
+           osStrcmp(source->valuestring, "tns_download_manager") == 0;
+}
+
+static bool_t mqtt_nocloud_log_has_unsafe_cloud_url(
+    mqtt_nocloud_context_t *context, const cJSON *item,
+    const char *serialized)
+{
+    const cJSON *source = cJSON_IsObject(item) ?
+                              cJSON_GetObjectItemCaseSensitive(item, "source") : NULL;
+    if (!cJSON_IsString(source) || source->valuestring == NULL ||
+        osStrcmp(source->valuestring, "tns_cloud") != 0 ||
+        osStrstr(serialized, "://") == NULL)
+        return FALSE;
+    const char *upstream = context->settings->cloud.remote_hostname_tb2;
+    return upstream == NULL || upstream[0] == '\0' ||
+           osStrstr(serialized, upstream) == NULL;
+}
 
 static void mqtt_nocloud_filter_logs(mqtt_nocloud_context_t *context,
+                                     const char *topic,
                                      const uint8_t *payload,
                                      size_t payload_len,
                                      mqtt_nocloud_filter_result_t *result)
@@ -298,6 +349,7 @@ static void mqtt_nocloud_filter_logs(mqtt_nocloud_context_t *context,
     if (cJSON_IsArray(json))
     {
         size_t removed = 0;
+        bool_t manual_evaluated = FALSE;
         int index = 0;
         while (index < cJSON_GetArraySize(json))
         {
@@ -311,6 +363,25 @@ static void mqtt_nocloud_filter_logs(mqtt_nocloud_context_t *context,
             }
             bool_t protected = mqtt_nocloud_payload_has_protected_ruid(
                 context, (const uint8_t *)serialized, osStrlen(serialized));
+            if (!protected)
+                protected = mqtt_nocloud_json_contains_private_chapter(item);
+            if (!protected && mqtt_nocloud_sensitive_log_source(item))
+                protected = !mqtt_nocloud_payload_has_safe_original_ruid(
+                    context, (const uint8_t *)serialized,
+                    osStrlen(serialized));
+            if (!protected)
+                protected = mqtt_nocloud_log_has_unsafe_cloud_url(
+                    context, item, serialized);
+            if (!protected)
+            {
+                manual_evaluated = TRUE;
+                mqtt_forward_filter_result_t decision =
+                    mqtt_forward_filter_evaluate(
+                        context->settings, MQTT_FORWARD_ROUTE_BOX_TO_TONIES,
+                        topic, (const uint8_t *)serialized,
+                        osStrlen(serialized));
+                protected = decision.action == MQTT_FORWARD_ACTION_BLOCK;
+            }
             cJSON_free(serialized);
             if (protected)
             {
@@ -320,12 +391,23 @@ static void mqtt_nocloud_filter_logs(mqtt_nocloud_context_t *context,
             }
             index++;
         }
+        result->manual_filter_applied = manual_evaluated;
         mqtt_nocloud_finish_array(json, filter_id, removed, result);
         return;
     }
     cJSON_Delete(json);
-    if (mqtt_nocloud_payload_has_protected_ruid(context, payload, payload_len))
+    if (mqtt_nocloud_payload_has_protected_ruid(context, payload, payload_len) ||
+        mqtt_nocloud_payload_contains(payload, payload_len, "teddycloud_"))
         mqtt_nocloud_block(result, filter_id, 1);
+}
+
+static bool_t mqtt_nocloud_selective_private_payload_path(const char *path)
+{
+    return path != NULL &&
+           (osStrcmp(path, "metrics/fleet") == 0 ||
+            osStrcmp(path, "metrics/events") == 0 ||
+            osStrcmp(path, "bi-events") == 0 ||
+            osStrcmp(path, "logs") == 0);
 }
 
 static bool_t mqtt_nocloud_payload_has_protected_ruid(
@@ -361,6 +443,39 @@ static bool_t mqtt_nocloud_payload_has_protected_ruid(
     return FALSE;
 }
 
+static bool_t mqtt_nocloud_payload_has_safe_original_ruid(
+    mqtt_nocloud_context_t *context, const uint8_t *payload,
+    size_t payload_len)
+{
+    bool_t found = FALSE;
+    size_t index = 0;
+    while (index < payload_len)
+    {
+        if (!isxdigit(payload[index]) ||
+            (index > 0 && isxdigit(payload[index - 1])))
+        {
+            index++;
+            continue;
+        }
+        size_t end = index;
+        while (end < payload_len && isxdigit(payload[end]))
+            end++;
+        if (end - index == TB2_RUID_HEX_LENGTH)
+        {
+            char ruid[TB2_RUID_SIZE];
+            osMemcpy(ruid, payload + index, TB2_RUID_HEX_LENGTH);
+            ruid[TB2_RUID_HEX_LENGTH] = '\0';
+            bool_t protected = FALSE;
+            if (!mqtt_nocloud_is_protected(context, ruid, &protected) ||
+                protected)
+                return FALSE;
+            found = TRUE;
+        }
+        index = end;
+    }
+    return found;
+}
+
 void mqtt_nocloud_filter_publish(settings_t *box_settings,
                                  bool_t box_to_upstream,
                                  const char *topic,
@@ -373,14 +488,14 @@ void mqtt_nocloud_filter_publish(settings_t *box_settings,
     osMemset(result, 0, sizeof(*result));
     result->action = MQTT_NOCLOUD_ALLOW;
 
+    const char *path = mqtt_nocloud_topic_path(topic);
     if (box_to_upstream &&
+        !mqtt_nocloud_selective_private_payload_path(path) &&
         mqtt_nocloud_payload_contains(payload, payload_len, "teddycloud_"))
     {
         mqtt_nocloud_block(result, "local_content.teddycloud_payload", 0);
         return;
     }
-
-    const char *path = mqtt_nocloud_topic_path(topic);
     if (path == NULL || box_settings == NULL)
         return;
 
@@ -426,7 +541,7 @@ void mqtt_nocloud_filter_publish(settings_t *box_settings,
     }
     else if (box_to_upstream && osStrcmp(path, "logs") == 0)
     {
-        mqtt_nocloud_filter_logs(&context, payload, payload_len, result);
+        mqtt_nocloud_filter_logs(&context, topic, payload, payload_len, result);
     }
     else if (!box_to_upstream && osStrcmp(path, "fresh-tonies") == 0)
     {

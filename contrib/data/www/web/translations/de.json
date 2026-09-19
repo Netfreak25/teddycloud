@@ -1225,7 +1225,7 @@
             "resetToGlobalHint": "Entfernt alle Box-Overrides dieser MQTT-Filter, auch ausgeblendete. Mit Speichern übernehmen; Verwerfen macht die Änderung rückgängig.",
             "suppress": "Unterdrücken",
             "suppressed": "Unterdrückt",
-            "description": "Regeln gelten in beide Richtungen. Geerbte Regeln zeigen ihren effektiven globalen Zustand.",
+            "description": "Diese Regeln steuern nur den Internetverkehr zwischen TeddyCloud und TONIES in beide Richtungen. Lokale Verarbeitung und automatischer Schutz privater Inhalte bleiben aktiv.",
             "forward": "Weiterleiten",
             "global": "Global übernehmen",
             "inheritedStatus": "Global · {{state}}",
@@ -1242,13 +1242,20 @@
                 "suppressed": "Unterdrückt"
             },
             "groups": {
-                "direct": "Direkte Topics",
-                "logs": "Protokolle",
-                "metrics": "Metriken",
-                "appReply": "App-Antwort",
-                "settings": "Einstellungen",
-                "playback": "Wiedergabe",
-                "appControl": "App-Steuerung"
+                "registration": "Anmeldung und Aktualisierung",
+                "settings": "Einstellungen von TONIES",
+                "appControl": "App-Steuerung und Antworten",
+                "telemetry": "Wiedergabestatus und Telemetrie",
+                "diagnostics": "Diagnose und Logs",
+                "setupOther": "Setup und unbekannte Topics"
+            },
+            "groupDescriptions": {
+                "registration": "Claim und Fresh-Tonies an der Internetgrenze. Lokale Zustände werden weiter verarbeitet; eine Cloud-Anmeldung wird bei Sperre nicht vorgetäuscht.",
+                "settings": "settings/desired gibt TONIES die Zuständigkeit. Gesperrte oder nicht erreichbare Requests erhalten den gespeicherten lokalen Stand; die App-Control-Ausnahme entsperrt diese Einstellungen nicht.",
+                "appControl": "Cloudbefehle und Antworten. Lokale Steuerung bleibt bei gesperrtem Cloudbefehl möglich; bei erlaubtem Cloudbefehl nur mit der separaten lokalen App-Control-Ausnahme.",
+                "telemetry": "Status wird zuerst lokal verarbeitet. Danach entscheiden die Regeln über Wiedergabe-, Lautstärke-, BI- und Metrikdaten; private Inhalte werden immer entfernt.",
+                "diagnostics": "Logs werden zuerst automatisch von privaten Inhaltsdaten bereinigt. Die verbleibenden Quellen folgen diesen manuellen Regeln.",
+                "setupOther": "Setup folgt seiner Regel. Für unbekannte Anwendungsnachrichten erzeugt TeddyCloud keine erfundene Antwort; notwendige MQTT-Bestätigungen bleiben lokal aktiv."
             },
             "noMatches": "Keine passenden Filter"
         },

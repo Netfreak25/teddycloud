@@ -45,6 +45,8 @@ bool_t tb2_nocloud_policy_from_content(settings_t *settings,
     {
         policy->nocloud = content->nocloud;
         policy->cloud_override = content->cloud_override;
+        policy->private_source = content->source != NULL &&
+                                 content->source[0] != '\0';
     }
     return TRUE;
 }
@@ -141,6 +143,23 @@ static bool_t tb2_nocloud_optional_bool(const cJSON *root, const char *name,
     return TRUE;
 }
 
+static bool_t tb2_nocloud_private_source(const cJSON *root,
+                                         bool_t *private_source)
+{
+    const cJSON *source = cJSON_GetObjectItemCaseSensitive(root, "source");
+    if (source == NULL || cJSON_IsNull(source))
+    {
+        *private_source = FALSE;
+        return TRUE;
+    }
+    if (!cJSON_IsString(source) || source->valuestring == NULL)
+    {
+        return FALSE;
+    }
+    *private_source = source->valuestring[0] != '\0';
+    return TRUE;
+}
+
 bool_t tb2_nocloud_policy_resolve(settings_t *settings,
                                   const char *ruid,
                                   tb2_nocloud_policy_t *policy)
@@ -187,7 +206,9 @@ bool_t tb2_nocloud_policy_resolve(settings_t *settings,
                    tb2_nocloud_optional_bool(json, "nocloud",
                                              &policy->nocloud) &&
                    tb2_nocloud_optional_bool(json, "cloud_override",
-                                             &policy->cloud_override);
+                                             &policy->cloud_override) &&
+                   tb2_nocloud_private_source(json,
+                                              &policy->private_source);
     cJSON_Delete(json);
     return valid;
 }
@@ -195,5 +216,6 @@ bool_t tb2_nocloud_policy_resolve(settings_t *settings,
 bool_t tb2_nocloud_policy_blocks_upstream(const tb2_nocloud_policy_t *policy)
 {
     return policy != NULL && policy->kind == TB2_RUID_CONTENT &&
-           policy->nocloud && !policy->cloud_override;
+           (policy->private_source ||
+            (policy->nocloud && !policy->cloud_override));
 }

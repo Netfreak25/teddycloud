@@ -202,9 +202,11 @@ class MqttForwardFilterContractTests(unittest.TestCase):
         self.assertLess(missing.index("return TRUE;"), missing.index("overlay->overlayed"))
         self.assertIn("overlay->overlayed", effective)
         self.assertLess(effective.index("overlay->overlayed"), effective.rindex("global->ptr"))
+        packet_start = self.proxy.index("static error_t tb2_mqtt_process_packet", 1000)
         processor = self.proxy[
-            self.proxy.index("static error_t tb2_mqtt_process_packet") :
-            self.proxy.index("static error_t tb2_mqtt_process_stream")
+            packet_start : self.proxy.index(
+                "static error_t tb2_mqtt_process_stream", packet_start
+            )
         ]
         compact_processor = " ".join(processor.split())
         self.assertIn(

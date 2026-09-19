@@ -277,7 +277,9 @@ req_cbr_t getCloudCbr(HttpConnection *connection, const char_t *uri, const char_
 }
 void cbrCloudResponsePassthrough(void *src_ctx, HttpClientContext *cloud_ctx)
 {
-    cbrGenericResponsePassthrough(src_ctx, cloud_ctx);
+    cbr_ctx_t *ctx = (cbr_ctx_t *)src_ctx;
+    if (ctx->api != V3_FRESHNESS_CHECK)
+        cbrGenericResponsePassthrough(src_ctx, cloud_ctx);
 }
 
 void cbrCloudHeaderPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const char *header, const char *value)
@@ -302,11 +304,15 @@ void cbrCloudHeaderPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, cons
     switch (ctx->api)
     {
     case V1_FRESHNESS_CHECK:
-    case V3_FRESHNESS_CHECK:
         if (!header || osStrcmp(header, "Content-Length") == 0) // Skip empty line at the and + contentlen
         {
             passthrough = false;
         }
+        break;
+    case V3_FRESHNESS_CHECK:
+        /* The final V3 response is rebuilt from local and validated cloud
+         * decisions. Do not commit cloud status or headers before that merge. */
+        passthrough = false;
         break;
     case V3_CHECK_OTA:
     case V3_SETUP_STATUS:
@@ -454,7 +460,8 @@ void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const 
             ctx->status = PROX_STATUS_DONE;
             TonieFreshnessCheckResponse *freshResp = (TonieFreshnessCheckResponse *)ctx->customData;
 
-            if (ctx->buffer)
+            if (ctx->buffer && httpClientContext->statusCode >= 200 &&
+                httpClientContext->statusCode < 300)
             {
                 cJSON *respJson = cJSON_ParseWithLengthOpts((const char *)ctx->buffer, ctx->bufferLen, 0, 0);
                 if (respJson)
@@ -483,7 +490,16 @@ void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const 
                                 uidStr[16] = '\0';
 
                                 uint64_t marked_uid = strtoull(uidStr, NULL, 16);
-                                bool found = false;
+                                bool requested = false;
+                                for (size_t j = 0; j < ctx->freshnessCloudUidCount; j++)
+                                {
+                                    if (marked_uid == ctx->freshnessCloudUids[j])
+                                    {
+                                        requested = true;
+                                        break;
+                                    }
+                                }
+                                bool found = !requested;
                                 for (size_t j = 0; j < freshResp->n_tonie_marked; j++)
                                 {
                                     if (marked_uid == freshResp->tonie_marked[j])
@@ -541,8 +557,10 @@ void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const 
             char *response_json = cJSON_PrintUnformatted(newRespJson);
             size_t dataLen = osStrlen(response_json);
 
-            char line[128];
-            osSnprintf(line, 128, "Content-Length: %" PRIuSIZE "\r\n\r\n", dataLen);
+            char line[192];
+            osSnprintf(line, sizeof(line),
+                       "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: %" PRIuSIZE "\r\n\r\n",
+                       dataLen);
             httpSend(ctx->connection, line, osStrlen(line), HTTP_FLAG_DELAY);
 
             httpSend(ctx->connection, response_json, dataLen, HTTP_FLAG_DELAY);

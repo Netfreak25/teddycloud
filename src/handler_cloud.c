@@ -3033,7 +3033,11 @@ void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckReques
             decision.should_mark_freshness = TRUE;
         }
 
-        bool_t forward_to_cloud = tonieInfo != NULL &&
+        bool_t has_private_source = allow_cloud_override &&
+                                    tonieInfo != NULL &&
+                                    tonieInfo->json.source != NULL &&
+                                    tonieInfo->json.source[0] != '\0';
+        bool_t forward_to_cloud = tonieInfo != NULL && !has_private_source &&
                                   (!tonieInfo->json.nocloud ||
                                    (allow_cloud_override && tonieInfo->json.cloud_override));
         if (forward_to_cloud)
@@ -3335,7 +3339,9 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
 
     process_freshness_check(client_ctx, &freshReq, &freshResp, &freshReqCloud, &freshnessCacheLen, TRUE);
     
-    if (client_ctx->settings->cloud.tb2_v3_enabled && client_ctx->settings->cloud.enableV3FreshnessCheck)
+    if (client_ctx->settings->cloud.tb2_v3_enabled &&
+        client_ctx->settings->cloud.enableV3FreshnessCheck &&
+        freshReqCloud.n_tonie_infos > 0)
     {
         cJSON *cloudReqJson = cJSON_CreateObject();
         cJSON *cloudContentObj = cJSON_CreateObject();
@@ -3361,9 +3367,15 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
         req_cbr_t cbr = getCloudCbr(connection, uri, queryString, V3_FRESHNESS_CHECK, &ctx, client_ctx);
         ctx.customData = (void *)&freshResp;
         ctx.customDataLen = freshReq.n_tonie_infos + freshnessCacheLen;
+        ctx.freshnessCloudUids = malloc(sizeof(uint64_t) * freshReqCloud.n_tonie_infos);
+        ctx.freshnessCloudUidCount = ctx.freshnessCloudUids != NULL ?
+                                         freshReqCloud.n_tonie_infos : 0;
+        for (size_t k = 0; k < ctx.freshnessCloudUidCount; k++)
+            ctx.freshnessCloudUids[k] = freshReqCloud.tonie_infos[k]->uid;
         
         if (!cloud_request_tb2_post(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, (const uint8_t *)cloud_req_str, cloud_req_len, NULL, &cbr))
         {
+            free(ctx.freshnessCloudUids);
             free(cloud_req_str);
             cJSON_Delete(cloudReqJson);
             free(fcInfos);
@@ -3374,6 +3386,7 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
             return NO_ERROR;
         }
         
+        free(ctx.freshnessCloudUids);
         free(cloud_req_str);
         cJSON_Delete(cloudReqJson);
         free(fcInfos);

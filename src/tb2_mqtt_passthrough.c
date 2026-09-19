@@ -2193,7 +2193,15 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
     };
     if (nocloud_result.action == MQTT_NOCLOUD_REWRITE)
         filter_id = nocloud_result.filter_id;
-    if (!blocked)
+    if (nocloud_result.manual_filter_applied)
+    {
+        manual_decision.action = blocked ? MQTT_FORWARD_ACTION_BLOCK :
+                                           MQTT_FORWARD_ACTION_FORWARD;
+        manual_decision.setting_id = "mqtt_client_upstream.forward.logs.*";
+        manual_decision.reason = blocked ? MQTT_FORWARD_REASON_RULE_BLOCKED :
+                                           MQTT_FORWARD_REASON_RULE_ALLOWED;
+    }
+    else if (!blocked)
     {
         manual_decision = mqtt_forward_filter_evaluate(
             session->box_settings, manual_decision.route, topic,

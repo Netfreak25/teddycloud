@@ -72,6 +72,8 @@ typedef struct
     tonie_info_t *tonieInfo;
     void *customData;
     size_t customDataLen;
+    uint64_t *freshnessCloudUids;
+    size_t freshnessCloudUidCount;
     HttpConnection *connection;
     client_ctx_t *client_ctx;
 } cbr_ctx_t;

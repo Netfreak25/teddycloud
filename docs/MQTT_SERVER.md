@@ -148,20 +148,23 @@ After local observation and response correlation, the proxy applies an
 automatic selective NoCloud policy before the manual forwarding switches. It
 therefore cannot be bypassed by a forwarding option. No additional setting is
 required. A valid 16-hex rUID is accepted case-insensitively and protected for
-the effective box overlay when its current content JSON has `nocloud=true` and
-`cloud_override=false`. The lookup reads only these two JSON fields for each
-unique rUID in the current packet; it does not load TAF headers, playlists or
-sources and it keeps no persistent cache. A missing content JSON is treated as
+the effective box overlay when its current content JSON either has a non-empty
+private `source`, or has `nocloud=true` and `cloud_override=false`. A private
+source is protected independently of `cloud_override` and all manual forwarding
+rules. The lookup reads only these policy fields for each unique rUID in the
+current packet; it does not load TAF headers or playlists and it keeps no persistent cache. A missing content JSON is treated as
 an unknown cloud Tonie. An existing but unreadable JSON or invalid policy field
 is fail-closed for that rUID. Reserved TB2 system rUIDs beginning with
 `00000AF0` are classified separately and never inherit a Tonie NoCloud policy.
 
-Independently of NoCloud, every box-to-TONIES payload is scanned as bounded
-binary data for the local chapter prefix `teddycloud_`. A match suppresses the
-whole publish with filter ID `local_content.teddycloud_payload`, even when all
-manual forwarding options are enabled. Locally generated server-to-box
-settings, controls and freshness publishes are not upstream relay traffic and
-do not enter this filter.
+Independently of NoCloud, box-to-TONIES payloads are scanned as bounded binary
+data for the private chapter prefix `teddycloud_`. On structured metrics,
+BI-event and log arrays, complete affected entries are removed while unrelated
+entries remain. On messages that cannot be separated safely, the whole publish
+is suppressed even when all manual rules are enabled. Original-cache chapters
+retain their original TONIES names and are therefore not caught by this guard.
+Locally generated server-to-box settings, controls and freshness publishes are
+not upstream relay traffic and do not enter this filter.
 
 The automatic policy applies in these directions:
 
@@ -173,6 +176,11 @@ The automatic policy applies in these directions:
   A raw log publish is suppressed when it contains an explicitly bounded,
   case-insensitive 16-hex token for a protected rUID. In a parseable log array,
   only affected entries are removed and the safe remainder is forwarded.
+  Storage, filesystem and download-manager entries require an explicit,
+  unprotected original rUID; ambiguous inventory data is suppressed. A
+  `tns_cloud` entry containing a URL is accepted only when it names the
+  configured TONIES HTTPS host. Manual log-source rules are then applied per
+  remaining array entry rather than to the array as a whole.
 - Cloud to box: protected rUIDs are removed from `fresh-tonies` single objects,
   string arrays and object arrays. TeddyCloud's locally generated freshness
   publishes bypass this relay policy.
@@ -188,6 +196,16 @@ final payload after both stages is used for the wire packet and capture.
 Local-response replay remembers the observer result, then reevaluates the
 current automatic and manual policy before rebuilding the outgoing packet.
 An earlier observer payload must not replace a later automatic privacy rewrite.
+
+V3 HTTPS freshness remains one combined `content` map. Private-source and
+effective NoCloud rUIDs are resolved locally and omitted from the TONIES POST;
+reserved system rUIDs retain their separate classification. TeddyCloud sends a
+POST only when the existing V3 freshness endpoint is enabled and at least one
+cloud-eligible item remains. It holds the box response until the cloud result is
+validated, accepts only rUIDs that were actually sent, merges them without
+duplicates into the local stale result, and returns the local result alone on a
+cloud error or invalid response. This does not alter local source-change markers,
+effective versions or playback confirmation.
 
 Suppressed QoS 0 publishes have no Internet-side copy. QoS 1 is completed with
 local `PUBACK`; QoS 2 uses independent inbound state, `PUBREC` and `PUBCOMP`.

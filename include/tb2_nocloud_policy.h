@@ -14,6 +14,7 @@ typedef struct
     bool_t metadata_exists;
     bool_t nocloud;
     bool_t cloud_override;
+    bool_t private_source;
 } tb2_nocloud_policy_t;
 
 /**
@@ -34,7 +35,7 @@ bool_t tb2_nocloud_policy_resolve(settings_t *settings,
                                   const char *ruid,
                                   tb2_nocloud_policy_t *policy);
 
-/** True only for normal content explicitly protected from upstream access. */
+/** True for normal content protected by NoCloud or a configured private source. */
 bool_t tb2_nocloud_policy_blocks_upstream(const tb2_nocloud_policy_t *policy);
 
 #endif

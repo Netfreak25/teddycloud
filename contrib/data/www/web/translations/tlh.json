@@ -256,7 +256,7 @@
             "resetToGlobalHint": "Hoch MQTT box DuHmey teq. pol yIwIv; qIl yIwIvchugh, choH qIl.",
             "suppress": "bot",
             "suppressed": "botlu'",
-            "description": "cha' lurghmeyDaq Qap Hoch chut. Hoch chut Dotlh potlh 'ang Hoch DuH.",
+            "description": "TeddyCloud TONIES je Internet Qum neH SeH chutvam. Daq processing private content Qan taH.",
             "forward": "lI'",
             "global": "Hoch DuH lo'",
             "inheritedStatus": "Hoch · {{state}}",
@@ -273,13 +273,20 @@
                 "suppressed": "botlu'"
             },
             "groups": {
-                "direct": "jabbI'ID pongmey",
-                "logs": "QonoSmey",
-                "metrics": "juvta'mey",
-                "appReply": "App jang",
-                "settings": "DuHmey",
-                "playback": "wab much",
-                "appControl": "App SeH"
+                "registration": "muvmoH chu'moH je",
+                "settings": "TONIES DuHmey",
+                "appControl": "App SeH jang je",
+                "telemetry": "wab much Dotlh juvta'mey je",
+                "diagnostics": "nuD QonoSmey je",
+                "setupOther": "cher jabbI'IDmey nov je"
+            },
+            "groupDescriptions": {
+                "registration": "Internet HeHDaq claim fresh-tonies je SeH. Daq Dotlh processing taH; cloud claim Qap ngebbe'.",
+                "settings": "settings/desired chaw'lu'chugh DuHmey SeH TONIES. request botlu'chugh Daq jang lo'; app-control exception DuHmeyvam poSmoHbe'.",
+                "appControl": "Cloud ra'mey jangmey je SeH. Cloud ra' botlu'chugh Daq SeH chaw'lu'; chaw'lu'chugh Daq app-control exception poQ.",
+                "telemetry": "Dotlh wa'DIch Daq processing. ghIq wab much, volume, BI, metrics je SeH; private content teqtaH.",
+                "diagnostics": "Private content De' QonoSmeyvo' wa'DIch teq. ghIq ratlhbogh source chutmeyvam pab.",
+                "setupOther": "Setup chutDaj pab. jabbI'ID novvaD application jang ngebbe' TeddyCloud; MQTT protocol jangmey Daq taH."
             },
             "noMatches": "chut tu'lu'be'"
         },
