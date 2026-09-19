@@ -231,17 +231,15 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
         self.assertIn("this.idListeners = this.idListeners.filter", handler)
         self.assertIn("return () => handler.removeIdListener(idListener)", switch_field)
 
-    def test_local_control_dependency_covers_all_tb2_settings(self) -> None:
-        dependency = next(
-            item
-            for item in self.layout["dependencies"]
-            if item["master"] == "mqtt_client_upstream.local_control_enabled"
-        )
-        self.assertEqual(["toniebox2."], dependency["dependentPrefixes"])
-        self.assertEqual(
-            {("mqtt_client_upstream.enabled", True)},
-            {(item["setting"], item["value"]) for item in dependency["appliesWhen"]},
-        )
+    def test_device_access_is_specific_and_does_not_lock_all_tb2_options(self) -> None:
+        self.assertFalse(any("toniebox2." in item.get("dependentPrefixes", [])
+                             for item in self.layout["dependencies"]))
+        authority = (ROOT / "teddycloud_web/src/utils/tb2SettingsAuthority.ts").read_text(encoding="utf-8")
+        fields = authority[authority.index("const DEVICE_SETTINGS"):
+                           authority.index("export const isTb2DeviceSetting")]
+        self.assertEqual(10, fields.count('"toniebox2.'))
+        self.assertNotIn("cache", fields)
+        self.assertIn('setting.readOnlyReason !== "tonies_settings"', authority)
 
 
 if __name__ == "__main__":

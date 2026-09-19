@@ -20,9 +20,15 @@ const compiled = ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
 const exports = {};
+const authority = {};
+vm.runInNewContext(ts.transpileModule(
+    fs.readFileSync(new URL('src/utils/tb2SettingsAuthority.ts', web), 'utf8'),
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } },
+).outputText, { exports: authority });
 vm.runInNewContext(compiled, {
     exports, console,
     require: name => {
+        if (name.endsWith('/tb2SettingsAuthority')) return authority;
         if (name === 'i18next') return { t: key => key };
         if (name.endsWith('/TeddyCloudApi')) return { TeddyCloudApi: class { constructor() { return api; } } };
         if (name.endsWith('/defaultApiConfig')) return { defaultAPIConfig: () => ({}) };

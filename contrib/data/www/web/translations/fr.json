@@ -1168,6 +1168,17 @@
             "v3Endpoints": "Transfert des endpoints TB2 v3",
             "unclassified": "Non classé"
         },
+        "cloudAuthority": {
+            "locked": "Ces paramètres proviennent de TONIES. Désactivez la transmission de settings/desired pour les modifier localement. Les valeurs globales restent modifiables.",
+            "state": {
+                "local": "Géré localement",
+                "waiting": "En attente d'une valeur de paramètre de TONIES",
+                "received": "Reçu de TONIES ; pas encore confirmé par la box",
+                "confirmed": "Confirmé par la box"
+            },
+            "requestBlocked": "TONIES gère les paramètres, mais settings/request est bloqué. La box ne peut pas demander les paramètres actuels du cloud.",
+            "confirmBlocked": "TONIES gère les paramètres, mais settings/confirm est bloqué. Les confirmations de la box ne parviendront pas à TONIES."
+        },
         "mqttForwarding": {
             "disabledGlobally": "Les filtres MQTT manuels sont désactivés globalement. Les règles individuelles restent enregistrées et modifiables. NoCloud et la protection du contenu local restent actifs.",
             "overrideHint": "Désactivé : hériter de la valeur globale. Activé : utiliser une valeur propre à cette box.",

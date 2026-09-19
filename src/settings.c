@@ -7,6 +7,7 @@
 #include "version.h"
 #include "debug.h"
 #include "settings.h"
+#include "mqtt_settings.h"
 #include "mutex_manager.h"
 #include "tls_adapter.h"
 
@@ -1999,6 +2000,11 @@ error_t settings_save()
     return err;
 }
 
+error_t settings_save_overlays_locked(void)
+{
+    return settings_save_ovl(true);
+}
+
 error_t settings_apply_sni_detected_generation(uint8_t settingsId,
                                                settings_box_generation generation,
                                                bool_t *changed)
@@ -2133,6 +2139,11 @@ static error_t settings_save_ovl(bool overlay)
                 {
                     overlayPrefix = custom_asprintf("");
                 }
+                if (overlayPrefix == NULL)
+                {
+                    fsCloseFile(file);
+                    return ERROR_OUT_OF_MEMORY;
+                }
 
                 switch (opt->type)
                 {
@@ -2156,20 +2167,35 @@ static error_t settings_save_ovl(bool overlay)
                     buffer = custom_asprintf("");
                     break;
                 }
-                if (buffer)
+                error_t write_error = buffer == NULL ? ERROR_OUT_OF_MEMORY : NO_ERROR;
+                if (buffer != NULL)
                 {
                     if (osStrlen(buffer) > 0)
                     {
-                        fsWriteFile(file, buffer, osStrlen(buffer));
+                        write_error = fsWriteFile(file, buffer, osStrlen(buffer));
                     }
                     osFreeMem(buffer);
                 }
                 osFreeMem(overlayPrefix);
+                if (write_error != NO_ERROR)
+                {
+                    TRACE_ERROR("Failed to write settings to %s: %s\r\n",
+                                config_path, error2text(write_error));
+                    fsCloseFile(file);
+                    return write_error;
+                }
             }
             pos++;
         }
     }
+    error_t flush_error = fsFlushFile(file);
     fsCloseFile(file);
+    if (flush_error != NO_ERROR)
+    {
+        TRACE_ERROR("Failed to flush settings to %s: %s\r\n",
+                    config_path, error2text(flush_error));
+        return flush_error;
+    }
     Settings_Overlay[0].internal.config_changed = false;
 
     return NO_ERROR;
@@ -2227,6 +2253,10 @@ static error_t settings_load_ovl(bool overlay)
             settings_prepare_certificate_layout_migration();
             settings_generate_internal_dirs(get_settings());
             err = settings_load_certs_id(0);
+        }
+        if (err == NO_ERROR && overlay)
+        {
+            mqtt_settings_reapply_overlays_locked();
         }
         return err;
     }
@@ -2519,6 +2549,11 @@ static error_t settings_load_ovl(bool overlay)
         {
             settings_last_load = stat.modified;
         }
+    }
+
+    if (overlay)
+    {
+        mqtt_settings_reapply_overlays_locked();
     }
 
     return NO_ERROR;

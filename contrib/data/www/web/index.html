@@ -1,95 +1,198 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#000000" />
-    <meta name="description" content="TeddyCloud Admin" />
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="theme-color" content="#000000" />
+        <meta name="description" content="TeddyCloud Admin" />
 
-    <link rel="manifest" href="/web/manifest.json" />
+        <link rel="manifest" href="/web/manifest.json" />
 
-    <link
-      rel="icon"
-      type="image/png"
-      href="/web/favicon-96x96.png"
-      sizes="96x96"
-    />
-    <link rel="icon" type="image/svg+xml" href="/web/favicon.svg" />
-    <link rel="shortcut icon" href="/web/favicon.ico" />
+        <link rel="icon" type="image/png" href="/web/favicon-96x96.png" sizes="96x96" />
+        <link rel="icon" type="image/svg+xml" href="/web/favicon.svg" />
+        <link rel="shortcut icon" href="/web/favicon.ico" />
 
-    <link
-      rel="apple-touch-icon"
-      sizes="120x120"
-      href="/web/apple-touch-icon-120x120.png"
-    />
-    <link
-      rel="apple-touch-icon"
-      sizes="152x152"
-      href="/web/apple-touch-icon-152x152.png"
-    />
-    <link
-      rel="apple-touch-icon"
-      sizes="167x167"
-      href="/web/apple-touch-icon-167x167.png"
-    />
-    <link
-      rel="apple-touch-icon"
-      sizes="180x180"
-      href="/web/apple-touch-icon.png"
-    />
+        <link rel="apple-touch-icon" sizes="120x120" href="/web/apple-touch-icon-120x120.png" />
+        <link rel="apple-touch-icon" sizes="152x152" href="/web/apple-touch-icon-152x152.png" />
+        <link rel="apple-touch-icon" sizes="167x167" href="/web/apple-touch-icon-167x167.png" />
+        <link rel="apple-touch-icon" sizes="180x180" href="/web/apple-touch-icon.png" />
 
-    <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="mobile-web-app-capable" content="yes" />
 
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta
-      name="apple-mobile-web-app-status-bar-style"
-      content="black-translucent"
-    />
-    <meta name="apple-mobile-web-app-title" content="TeddyCloud" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+        <meta name="apple-mobile-web-app-title" content="TeddyCloud" />
 
-    <title>TeddyCloud</title>
+        <title>TeddyCloud</title>
+
+    <style>
+      :root {
+        --tc-dev-banner-height: 30px;
+      }
+
+      body.tc-dev-environment {
+        padding-top: var(--tc-dev-banner-height);
+      }
+
+      #tc-dev-environment-banner {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 2147483000;
+        box-sizing: border-box;
+        height: var(--tc-dev-banner-height);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 4px 12px;
+        overflow: hidden;
+        background: linear-gradient(
+          90deg,
+          rgba(132, 24, 32, 0.94),
+          rgba(196, 54, 63, 0.92)
+        );
+        border-bottom: 1px solid rgba(255, 255, 255, 0.22);
+        box-shadow: 0 2px 12px rgba(132, 24, 32, 0.28);
+        color: #fff5f5;
+        font:
+          600 12px/1.25 system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        text-align: center;
+      }
+
+      .tc-dev-environment-label {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      #tc-dev-environment-commit {
+        flex: 0 0 auto;
+        padding: 1px 6px;
+        border: 1px solid rgba(255, 255, 255, 0.28);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.15);
+        color: #ffffff;
+        font:
+          700 12px/1.25 ui-monospace,
+          SFMono-Regular,
+          Consolas,
+          "Liberation Mono",
+          monospace;
+      }
+
+      @media (max-width: 640px) {
+        :root {
+          --tc-dev-banner-height: 36px;
+        }
+
+        #tc-dev-environment-banner {
+          padding: 4px 8px;
+          font-size: 11px;
+        }
+
+        #tc-dev-environment-commit {
+          font-size: 11px;
+        }
+      }
+    </style>
 
     <script>
-      (async () => {
-        try {
-          const res = await fetch("/web/web_version.json?ts=" + Date.now(), {
-            cache: "no-store",
-          });
-          if (!res.ok) {
-            console.error(
-              "error loading web_version.json:",
-              res.status,
-              res.statusText,
-            );
+      (() => {
+        const shortCommitUrl =
+          "/api/settings/get/internal.version.git_sha_short";
+        const fullCommitUrl = "/api/settings/get/internal.version.git_sha";
+        const unknownCommit = "unbekannt";
+
+        const fetchSetting = async (url) => {
+          const response = await fetch(url, { cache: "no-store" });
+          if (!response.ok) {
+            throw new Error(`${response.status} ${response.statusText}`);
+          }
+          return (await response.text()).trim();
+        };
+
+        const updateBanner = async () => {
+          const commitElement = document.getElementById(
+            "tc-dev-environment-commit",
+          );
+          if (!commitElement) {
             return;
           }
-          const v = await res.json();
-          const current = v.web_gitSha;
-          const local = localStorage.getItem("web_gitSha");
-
-          if (local && local !== current) {
-            localStorage.setItem("web_gitSha", current);
-            const url = new URL(window.location.href);
-            url.searchParams.set("v", current);
-            window.location.replace(url.toString());
-            console.log("New version detected, reloaded page.");
-          } else {
-            localStorage.setItem("web_gitSha", current);
+          const shortSha = await fetchSetting(shortCommitUrl).catch(() => "");
+          const fullSha = await fetchSetting(fullCommitUrl).catch(() => "");
+          commitElement.textContent =
+            shortSha || fullSha.slice(0, 7) || unknownCommit;
+          if (fullSha) {
+            commitElement.title = `Build: ${fullSha}`;
           }
-        } catch (e) {
-          console.error("Error checking version:", e);
+        };
+
+        const startBanner = () => {
+          updateBanner().catch((error) => {
+            console.error("Error loading TeddyCloud dev commit:", error);
+          });
+        };
+
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", startBanner, {
+            once: true,
+          });
+        } else {
+          startBanner();
         }
       })();
     </script>
-    <script
-      type="module"
-      crossorigin
-      src="/web/assets/index-C4fh02VX.js"
-    ></script>
-    <link rel="stylesheet" crossorigin href="/web/assets/index-CTPesxOB.css" />
-  </head>
-  <body>
-    <noscript>You need to enable JavaScript to run this app.</noscript>
-    <div id="root"></div>
-  </body>
+
+        <script>
+            (async () => {
+                try {
+                    const res = await fetch("/web/web_version.json?ts=" + Date.now(), {
+                        cache: "no-store",
+                    });
+                    if (!res.ok) {
+                        console.error(
+                            "error loading web_version.json:",
+                            res.status,
+                            res.statusText,
+                        );
+                        return;
+                    }
+                    const v = await res.json();
+                    const current = v.web_gitSha;
+                    const local = localStorage.getItem("web_gitSha");
+
+                    if (local && local !== current) {
+                        localStorage.setItem("web_gitSha", current);
+                        const url = new URL(window.location.href);
+                        url.searchParams.set("v", current);
+                        window.location.replace(url.toString());
+                        console.log("New version detected, reloaded page.");
+                    } else {
+                        localStorage.setItem("web_gitSha", current);
+                    }
+                } catch (e) {
+                    console.error("Error checking version:", e);
+                }
+            })();
+        </script>
+      <script type="module" crossorigin src="/web/assets/index-Dwt8lBe4.js"></script>
+      <link rel="stylesheet" crossorigin href="/web/assets/index-CTPesxOB.css">
+    </head>
+  <body class="tc-dev-environment">
+    <div id="tc-dev-environment-banner" role="status" aria-live="polite">
+      <span class="tc-dev-environment-label"
+        >TeddyCloud DEV-Umgebung | Commit:</span
+      >
+      <code id="tc-dev-environment-commit">lädt</code>
+    </div>
+        <noscript>You need to enable JavaScript to run this app.</noscript>
+        <div id="root"></div>
+    </body>
 </html>

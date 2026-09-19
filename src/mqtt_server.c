@@ -11,6 +11,8 @@
 #include "debug.h"
 #include "settings.h"
 #include "mqtt_server.h"
+#include "mqtt_settings.h"
+#include "mqtt_forward_filter.h"
 #include "tls.h"
 #include "rand.h"
 #include "tls_adapter.h"
@@ -86,6 +88,7 @@ typedef struct {
     uint8_t fresh_tonie_attempts;
     uint32_t fresh_tonie_sent_at;
     bool_t observer_local_reply_matched;
+    mqtt_settings_sent_t settings_sent;
 } MqttClientConnection;
 
 typedef struct {
@@ -111,25 +114,6 @@ typedef struct {
     bool_t waiting_for_subscription_logged;
     char reason[MQTT_FRESH_TONIES_REASON_MAX];
 } MqttFreshToniesPublishState;
-
-typedef enum {
-    MQTT_TB2_SETTING_MAX_VOLUME = 0,
-    MQTT_TB2_SETTING_BEDTIME_MAX_VOLUME,
-    MQTT_TB2_SETTING_MAX_HEADPHONE_VOLUME,
-    MQTT_TB2_SETTING_BEDTIME_MAX_HEADPHONE_VOLUME,
-    MQTT_TB2_SETTING_LIGHTRING_BRIGHTNESS,
-    MQTT_TB2_SETTING_BEDTIME_LIGHTRING_BRIGHTNESS,
-    MQTT_TB2_SETTING_SCRUBBING_ENABLED,
-    MQTT_TB2_SETTING_SKIPPING_ENABLED,
-    MQTT_TB2_SETTING_SKIPPING_DIRECTION,
-    MQTT_TB2_SETTING_AGE_MODE,
-    MQTT_TB2_SETTING_COUNT
-} MqttToniebox2SettingId;
-
-typedef struct {
-    const char *json_name;
-    const char *setting_name;
-} MqttToniebox2SettingDescriptor;
 
 typedef enum {
     MQTT_MSG_ANY = 0,
@@ -171,18 +155,9 @@ static void mqtt_mark_fresh_tonies_pending(settings_t *settings, const char *rea
 static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn);
 static bool_t mqtt_handle_fresh_tonies_puback(MqttClientConnection *conn,
                                               uint16_t packet_id);
-static const MqttToniebox2SettingDescriptor toniebox2_settings_descriptors[MQTT_TB2_SETTING_COUNT] = {
-    [MQTT_TB2_SETTING_MAX_VOLUME] = {"max_volume", "toniebox2.max_volume"},
-    [MQTT_TB2_SETTING_BEDTIME_MAX_VOLUME] = {"bedtime_max_volume", "toniebox2.bedtime_max_volume"},
-    [MQTT_TB2_SETTING_MAX_HEADPHONE_VOLUME] = {"max_headphone_volume", "toniebox2.max_headphone_volume"},
-    [MQTT_TB2_SETTING_BEDTIME_MAX_HEADPHONE_VOLUME] = {"bedtime_max_headphone_volume", "toniebox2.bedtime_max_headphone_volume"},
-    [MQTT_TB2_SETTING_LIGHTRING_BRIGHTNESS] = {"lightring_brightness", "toniebox2.lightring_brightness"},
-    [MQTT_TB2_SETTING_BEDTIME_LIGHTRING_BRIGHTNESS] = {"bedtime_lightring_brightness", "toniebox2.bedtime_lightring_brightness"},
-    [MQTT_TB2_SETTING_SCRUBBING_ENABLED] = {"scrubbing_enabled", "toniebox2.scrubbing_enabled"},
-    [MQTT_TB2_SETTING_SKIPPING_ENABLED] = {"skipping_enabled", "toniebox2.slap_enabled"},
-    [MQTT_TB2_SETTING_SKIPPING_DIRECTION] = {"skipping_direction", "toniebox2.slap_back_left"},
-    [MQTT_TB2_SETTING_AGE_MODE] = {"age_mode", "toniebox2.baby_mode"},
-};
+static void mqtt_update_settings_authority(MqttClientConnection *conn);
+// Share the existing ten-field mapping with snapshot projection and the API.
+#define toniebox2_settings_descriptors mqtt_settings_descriptors
 
 static int mqtt_connection_slot(MqttClientConnection *conn)
 {
@@ -379,6 +354,7 @@ static void mqtt_connection_close(MqttClientConnection *conn, const char *reason
     conn->box_common_name[0] = '\0';
     conn->box_topic_id[0] = '\0';
     conn->observer_local_reply_matched = FALSE;
+    osMemset(&conn->settings_sent, 0, sizeof(conn->settings_sent));
     if (closed_overlay_id > 0 && closed_overlay_id < MAX_OVERLAYS)
     {
         osMemset(&app_control_stl_state[closed_overlay_id], 0,
@@ -820,9 +796,10 @@ static bool_t mqtt_toniebox2_settings_store_state(settings_t *settings,
     return ok;
 }
 
-static uint64_t mqtt_toniebox2_settings_next_revision(const uint64_t revisions[MQTT_TB2_SETTING_COUNT])
+static uint64_t mqtt_toniebox2_settings_next_revision(settings_t *settings,
+    const uint64_t revisions[MQTT_TB2_SETTING_COUNT])
 {
-    uint64_t max_revision = 0;
+    uint64_t max_revision = mqtt_settings_revision_floor(settings);
     for (size_t i = 0; i < MQTT_TB2_SETTING_COUNT; i++)
     {
         if (revisions[i] > max_revision)
@@ -831,12 +808,30 @@ static uint64_t mqtt_toniebox2_settings_next_revision(const uint64_t revisions[M
         }
     }
 
+    if (max_revision >= (uint64_t)MQTT_JSON_SAFE_INTEGER_MAX - MQTT_TB2_SETTING_COUNT)
+    {
+        TRACE_ERROR("MQTT settings revision range exhausted overlay=%u\r\n",
+                    (unsigned)settings->internal.overlayNumber);
+        return 0;
+    }
     uint64_t candidate = ((uint64_t)time(NULL)) * MQTT_MILLISECONDS_PER_SECOND;
     if (candidate <= max_revision)
     {
         candidate = max_revision + 1;
     }
     return candidate;
+}
+
+static cJSON *mqtt_setting_json_value(settings_t *settings, size_t index)
+{
+    uint64_t value = mqtt_toniebox2_setting_current_value(settings, index);
+    if (index == MQTT_TB2_SETTING_SKIPPING_DIRECTION)
+        return cJSON_CreateString(mqtt_toniebox2_skipping_direction(settings));
+    if (index == MQTT_TB2_SETTING_AGE_MODE)
+        return cJSON_CreateString(mqtt_toniebox2_age_mode(settings));
+    if (index >= MQTT_TB2_SETTING_SCRUBBING_ENABLED)
+        return cJSON_CreateBool(value != 0);
+    return cJSON_CreateNumber((double)value);
 }
 
 static size_t mqtt_toniebox2_settings_pending_count(const uint64_t pending[MQTT_TB2_SETTING_COUNT])
@@ -854,6 +849,8 @@ static size_t mqtt_toniebox2_settings_pending_count(const uint64_t pending[MQTT_
 
 static bool_t mqtt_toniebox2_settings_mark_pending(settings_t *settings, const char *setting_name, size_t *marked_count)
 {
+    if (mqtt_settings_cloud_managed(settings))
+        return FALSE;
     uint64_t revisions[MQTT_TB2_SETTING_COUNT];
     uint64_t pending[MQTT_TB2_SETTING_COUNT];
     uint64_t values[MQTT_TB2_SETTING_COUNT];
@@ -867,7 +864,10 @@ static bool_t mqtt_toniebox2_settings_mark_pending(settings_t *settings, const c
         return FALSE;
     }
 
-    uint64_t next_revision = mqtt_toniebox2_settings_next_revision(revisions);
+    uint64_t next_revision = mqtt_toniebox2_settings_next_revision(settings, revisions);
+    if (next_revision == 0)
+        return FALSE;
+    cJSON *snapshot = mqtt_settings_snapshot_copy(settings);
     size_t marked = 0;
     for (size_t i = 0; i < MQTT_TB2_SETTING_COUNT; i++)
     {
@@ -877,6 +877,17 @@ static bool_t mqtt_toniebox2_settings_mark_pending(settings_t *settings, const c
         }
 
         uint64_t current_value = mqtt_toniebox2_setting_current_value(settings, i);
+        if (snapshot != NULL && revisions[i] == 0)
+        {
+            cJSON *baseline = cJSON_GetObjectItemCaseSensitive(snapshot,
+                toniebox2_settings_descriptors[i].json_name);
+            cJSON *current = mqtt_setting_json_value(settings, i);
+            bool_t unchanged = current != NULL && cJSON_Compare(baseline, current, TRUE);
+            cJSON_Delete(current);
+            // Projection and a request are not a new local edit.
+            if (unchanged || (mark_all && baseline == NULL))
+                continue;
+        }
         if (revisions[i] == 0 || values[i] != current_value)
         {
             revisions[i] = next_revision++;
@@ -885,6 +896,8 @@ static bool_t mqtt_toniebox2_settings_mark_pending(settings_t *settings, const c
             marked++;
         }
     }
+
+    cJSON_Delete(snapshot);
 
     size_t pending_count = mqtt_toniebox2_settings_pending_count(pending);
     if (marked_count != NULL)
@@ -918,6 +931,15 @@ static void mqtt_toniebox2_settings_ensure_pending_state(settings_t *settings)
         return;
     }
 
+    cJSON *snapshot = mqtt_settings_snapshot_copy(settings);
+    if (snapshot != NULL)
+    {
+        cJSON_Delete(snapshot);
+        settings_set_bool_id("internal.toniebox2SettingsDesiredPending", false,
+                             settings->internal.overlayNumber);
+        return;
+    }
+
     size_t marked = 0;
     mqtt_toniebox2_settings_mark_pending(settings, NULL, &marked);
     if (marked > 0)
@@ -942,6 +964,50 @@ static char *mqtt_build_settings_desired_payload(settings_t *settings)
     if (settings == NULL)
     {
         return NULL;
+    }
+
+    cJSON *snapshot = mqtt_settings_snapshot_copy(settings);
+    if (snapshot != NULL)
+    {
+        if (!mqtt_settings_cloud_managed(settings))
+        {
+            uint64_t revisions[MQTT_TB2_SETTING_COUNT];
+            mqtt_copy_u64_settings_array(settings, "internal.toniebox2SettingsDesiredRevisions", revisions);
+            cJSON *history = cJSON_GetObjectItemCaseSensitive(snapshot, "settings_history");
+            for (size_t i = 0; i < MQTT_TB2_SETTING_COUNT; i++)
+            {
+                if (revisions[i] == 0)
+                    continue;
+                const char *name = toniebox2_settings_descriptors[i].json_name;
+                cJSON *value = mqtt_setting_json_value(settings, i);
+                cJSON *revision = cJSON_CreateNumber((double)revisions[i]);
+                if (value == NULL || revision == NULL)
+                {
+                    cJSON_Delete(value);
+                    cJSON_Delete(revision);
+                    cJSON_Delete(snapshot);
+                    return NULL;
+                }
+                cJSON_DeleteItemFromObjectCaseSensitive(snapshot, name);
+                cJSON_DeleteItemFromObjectCaseSensitive(history, name);
+                if (!cJSON_AddItemToObject(snapshot, name, value))
+                {
+                    cJSON_Delete(value);
+                    cJSON_Delete(revision);
+                    cJSON_Delete(snapshot);
+                    return NULL;
+                }
+                if (!cJSON_AddItemToObject(history, name, revision))
+                {
+                    cJSON_Delete(revision);
+                    cJSON_Delete(snapshot);
+                    return NULL;
+                }
+            }
+        }
+        char *rendered = cJSON_PrintUnformatted(snapshot);
+        cJSON_Delete(snapshot);
+        return rendered;
     }
 
     char *payload = osAllocMem(MQTT_SETTINGS_DESIRED_PAYLOAD_SIZE);
@@ -1536,14 +1602,22 @@ static bool_t mqtt_is_toniebox2_overlay(settings_t *settings)
     return settings != NULL && settings->internal.config_used && settings->toniebox.boxGeneration == GENERATION_TB2;
 }
 
-static bool_t mqtt_publish_settings_desired_to_connection(MqttClientConnection *conn, bool_t track_pending_attempt)
+static bool_t mqtt_publish_settings_response(MqttClientConnection *conn,
+    bool_t track_pending_attempt, bool_t request_response)
 {
-    if (!mqtt_connection_local_control_allowed(conn))
+    if (conn == NULL || !conn->active || !conn->box_connection ||
+        conn->client_ctx.settings == NULL)
     {
         return FALSE;
     }
 
     settings_t *settings = conn->client_ctx.settings;
+    bool_t cloud_managed = mqtt_settings_cloud_managed(settings);
+    mqtt_update_settings_authority(conn);
+    if (cloud_managed && !request_response)
+        return FALSE;
+    if (!cloud_managed && request_response)
+        mqtt_toniebox2_settings_mark_pending(settings, NULL, NULL);
     char topic[128];
     if (!mqtt_toniebox2_settings_desired_topic(conn, topic, sizeof(topic)))
     {
@@ -1557,11 +1631,43 @@ static bool_t mqtt_publish_settings_desired_to_connection(MqttClientConnection *
         return FALSE;
     }
 
+    cJSON *sent = cJSON_Parse(settings_payload);
+    cJSON *snapshot = mqtt_settings_snapshot_copy(settings);
+    if (sent == NULL || osStrlen(settings_payload) > MQTT_SETTINGS_SNAPSHOT_LIMIT)
+    {
+        cJSON_Delete(sent);
+        cJSON_Delete(snapshot);
+        osFreeMem(settings_payload);
+        return FALSE;
+    }
     bool_t published = mqtt_connection_publish(conn, topic, settings_payload,
-                                                "local_settings_desired");
+        cloud_managed ? (snapshot != NULL ? "cloud_settings_fallback" :
+                                            "local_settings_fallback") : "local_settings_desired");
+    if (published && sent != NULL)
+    {
+        cJSON *history = cJSON_GetObjectItemCaseSensitive(sent, "settings_history");
+        cJSON *cloud_history = cJSON_GetObjectItemCaseSensitive(snapshot, "settings_history");
+        for (size_t i = 0; i < MQTT_TB2_SETTING_COUNT; i++)
+        {
+            const char *name = toniebox2_settings_descriptors[i].json_name;
+            uint64_t revision, cloud_revision;
+            if (mqtt_settings_json_revision(cJSON_GetObjectItemCaseSensitive(history, name), &revision) &&
+                !(mqtt_settings_json_revision(cJSON_GetObjectItemCaseSensitive(cloud_history, name), &cloud_revision) &&
+                  cloud_revision == revision))
+            {
+                mqtt_settings_sent_record(&conn->settings_sent, i, revision);
+                mqtt_settings_local_sent(settings, i);
+            }
+        }
+        TRACE_INFO("MQTT settings response sent overlay=%u owner=%s snapshot=%s\r\n",
+            (unsigned)settings->internal.overlayNumber,
+            cloud_managed ? "tonies" : "local", snapshot != NULL ? "yes" : "no");
+    }
+    cJSON_Delete(sent);
+    cJSON_Delete(snapshot);
     osFreeMem(settings_payload);
 
-    if (published && track_pending_attempt && settings->internal.toniebox2SettingsDesiredPending)
+    if (published && !cloud_managed && track_pending_attempt && settings->internal.toniebox2SettingsDesiredPending)
     {
         uint32_t attempts = settings->internal.toniebox2SettingsDesiredAttempts + 1;
         uint32_t now = (uint32_t)time(NULL);
@@ -1577,6 +1683,11 @@ static bool_t mqtt_publish_settings_desired_to_connection(MqttClientConnection *
     }
 
     return published;
+}
+
+static bool_t mqtt_publish_settings_desired_to_connection(MqttClientConnection *conn, bool_t track_pending_attempt)
+{
+    return mqtt_publish_settings_response(conn, track_pending_attempt, FALSE);
 }
 
 static bool_t mqtt_publish_pending_settings_desired_to_connection(MqttClientConnection *conn, bool_t require_subscription, bool_t force)
@@ -1628,6 +1739,38 @@ static void mqtt_clear_settings_desired_pending(settings_t *settings)
     settings_set_bool_id("internal.toniebox2SettingsDesiredPending", false, settings->internal.overlayNumber);
     settings_set_unsigned_id("internal.toniebox2SettingsDesiredAttempts", 0, settings->internal.overlayNumber);
     settings_set_unsigned_id("internal.toniebox2SettingsDesiredLastAttempt", 0, settings->internal.overlayNumber);
+}
+
+static void mqtt_update_settings_authority(MqttClientConnection *conn)
+{
+    settings_t *settings = conn->client_ctx.settings;
+    bool_t cloud = mqtt_settings_cloud_managed(settings);
+    if (cloud && (!conn->settings_sent.authority_known || !conn->settings_sent.cloud_managed))
+    {
+        // Re-entering Cloud management must not revive a pre-Cloud local wish
+        // when control is later handed back, even before a new Desired arrives.
+        cJSON *snapshot = mqtt_settings_snapshot_copy(settings);
+        cJSON *history = cJSON_GetObjectItemCaseSensitive(snapshot, "settings_history");
+        if (history != NULL)
+        {
+            uint64_t revisions[MQTT_TB2_SETTING_COUNT], pending[MQTT_TB2_SETTING_COUNT], values[MQTT_TB2_SETTING_COUNT];
+            mqtt_toniebox2_settings_load_state(settings, revisions, pending, values);
+            for (size_t i = 0; i < MQTT_TB2_SETTING_COUNT; i++)
+            {
+                if (!mqtt_settings_json_revision(cJSON_GetObjectItemCaseSensitive(history,
+                        toniebox2_settings_descriptors[i].json_name), NULL))
+                    continue;
+                revisions[i] = 0;
+                pending[i] = 0;
+                values[i] = mqtt_toniebox2_setting_current_value(settings, i);
+            }
+            mqtt_toniebox2_settings_store_state(settings, revisions, pending, values);
+            if (mqtt_toniebox2_settings_pending_count(pending) == 0)
+                mqtt_clear_settings_desired_pending(settings);
+        }
+        cJSON_Delete(snapshot);
+    }
+    mqtt_settings_sent_authority(&conn->settings_sent, cloud, osGetSystemTime());
 }
 
 static bool_t mqtt_get_json_bool(cJSON *json, const char *name, bool *value)
@@ -1726,11 +1869,13 @@ static size_t mqtt_count_legacy_toniebox2_confirm_values(cJSON *json)
     return seen;
 }
 
-static void mqtt_ack_toniebox2_settings_history(settings_t *settings, cJSON *history,
+static void mqtt_ack_toniebox2_settings_history(MqttClientConnection *conn, cJSON *history,
                                                 bool_t remove_acked,
                                                 size_t *acked, size_t *missing,
                                                 size_t *stale, size_t *remaining)
 {
+    settings_t *settings = conn->client_ctx.settings;
+    mqtt_update_settings_authority(conn);
     uint64_t revisions[MQTT_TB2_SETTING_COUNT];
     uint64_t pending[MQTT_TB2_SETTING_COUNT];
     uint64_t values[MQTT_TB2_SETTING_COUNT];
@@ -1741,13 +1886,14 @@ static void mqtt_ack_toniebox2_settings_history(settings_t *settings, cJSON *his
     *stale = 0;
     for (size_t i = 0; i < MQTT_TB2_SETTING_COUNT; i++)
     {
-        if (pending[i] == 0)
+        if (!conn->settings_sent.valid[i])
         {
             continue;
         }
 
         uint64_t confirmed_revision = 0;
-        if (!mqtt_get_json_u64(history, toniebox2_settings_descriptors[i].json_name, &confirmed_revision))
+        if (!mqtt_settings_json_revision(cJSON_GetObjectItemCaseSensitive(history,
+                toniebox2_settings_descriptors[i].json_name), &confirmed_revision))
         {
             (*missing)++;
             TRACE_INFO("MQTT settings confirm missing field for %s overlay=%u field=%s expected=%" PRIu64 "\r\n",
@@ -1758,9 +1904,11 @@ static void mqtt_ack_toniebox2_settings_history(settings_t *settings, cJSON *his
             continue;
         }
 
-        if (confirmed_revision == revisions[i])
+        if (mqtt_settings_sent_match(&conn->settings_sent, i, confirmed_revision, osGetSystemTime()))
         {
-            pending[i] = 0;
+            if (confirmed_revision == revisions[i])
+                pending[i] = 0;
+            conn->settings_sent.valid[i] = FALSE;
             (*acked)++;
             if (remove_acked)
             {
@@ -1964,7 +2112,8 @@ static error_t mqtt_process_settings_confirm(MqttClientConnection *conn,
 
     if (cJSON_IsObject(history))
     {
-        mqtt_ack_toniebox2_settings_history(settings, history, prepare_forward,
+        mqtt_settings_confirm_cloud(settings, history);
+        mqtt_ack_toniebox2_settings_history(conn, history, prepare_forward,
                                             &acked, &missing, &stale, &remaining);
         TRACE_INFO("MQTT settings confirm for %s overlay=%u: acked=%" PRIuSIZE " missing=%" PRIuSIZE " stale=%" PRIuSIZE " remaining=%" PRIuSIZE "\r\n",
                    settings->commonName,
@@ -2511,7 +2660,7 @@ static error_t handle_mqtt_publish_settings_request(MqttClientConnection *conn, 
 
     TRACE_INFO("Settings request from mac=%s\r\n", mac);
     bool_t track_pending_attempt = conn->client_ctx.settings != NULL && conn->client_ctx.settings->internal.toniebox2SettingsDesiredPending;
-    mqtt_publish_settings_desired_to_connection(conn, track_pending_attempt);
+    mqtt_publish_settings_response(conn, track_pending_attempt, TRUE);
     mqtt_server_publish_fresh_tonies(&conn->client_ctx);
     return NO_ERROR;
 }
@@ -3174,6 +3323,62 @@ static const MqttHandlerEntry mqtt_passthrough_observer_handlers[] = {
     {MQTT_MSG_PUBLISH, "toniebox/+/volume/state", &handle_mqtt_publish_volume_state},
 };
 
+/** Settings identity is connection-bound, never selected by an incoming topic. */
+static bool_t mqtt_settings_topic_matches(MqttClientConnection *conn,
+    const char *topic, const char *suffix)
+{
+    char topic_id[32];
+    return conn != NULL && conn->box_connection && conn->box_overlay_id != 0 &&
+        conn->client_ctx.settings != NULL &&
+        conn->client_ctx.settings->internal.overlayNumber == conn->box_overlay_id &&
+        mqtt_extract_toniebox_topic_common_name(topic, suffix, topic_id, sizeof(topic_id)) &&
+        osStrcasecmp(conn->box_common_name, topic_id) == 0;
+}
+
+static void mqtt_passthrough_publish_completed(void *context, bool_t box_to_upstream,
+    const char *topic, const uint8_t *payload, size_t payload_len)
+{
+    MqttClientConnection *conn = context;
+    if (box_to_upstream || !mqtt_settings_topic_matches(conn, topic, "/settings/desired"))
+        return;
+    settings_t *settings = conn->client_ctx.settings;
+    mqtt_update_settings_authority(conn);
+    // Even an old revision rejected for persistence was delivered by TONIES:
+    // if it collides, its confirmation must not be claimed as a local one.
+    cJSON *json = payload_len <= MQTT_SETTINGS_SNAPSHOT_LIMIT ?
+        cJSON_ParseWithLength((const char *)payload, payload_len) : NULL;
+    cJSON *history = cJSON_GetObjectItemCaseSensitive(json, "settings_history");
+    for (size_t i = 0; i < MQTT_TB2_SETTING_COUNT; i++)
+    {
+        uint64_t revision;
+        if (mqtt_settings_json_revision(cJSON_GetObjectItemCaseSensitive(history,
+                toniebox2_settings_descriptors[i].json_name), &revision))
+            mqtt_settings_sent_cloud(&conn->settings_sent, i, revision);
+    }
+    cJSON_Delete(json);
+    uint16_t accepted_mask = 0;
+    error_t error = mqtt_settings_accept_cloud(settings, payload, payload_len, &accepted_mask);
+    if (accepted_mask != 0)
+    {
+        uint64_t revisions[MQTT_TB2_SETTING_COUNT], pending[MQTT_TB2_SETTING_COUNT], values[MQTT_TB2_SETTING_COUNT];
+        mqtt_toniebox2_settings_load_state(settings, revisions, pending, values);
+        for (size_t i = 0; i < MQTT_TB2_SETTING_COUNT; i++)
+        {
+            if ((accepted_mask & (1U << i)) == 0)
+                continue;
+            revisions[i] = 0;
+            pending[i] = 0;
+            values[i] = mqtt_toniebox2_setting_current_value(settings, i);
+        }
+        mqtt_toniebox2_settings_store_state(settings, revisions, pending, values);
+        if (mqtt_toniebox2_settings_pending_count(pending) == 0)
+            mqtt_clear_settings_desired_pending(settings);
+    }
+    if (error)
+        TRACE_WARNING("MQTT TONIES settings import failed overlay=%u error=%s code=%d (forwarding completed)\r\n",
+            (unsigned)settings->internal.overlayNumber, error2text(error), (int)error);
+}
+
 static error_t mqtt_passthrough_observe_publish(
     void *context, bool_t box_to_upstream, const char *topic,
     const uint8_t *payload, size_t payload_len, uint8_t qos,
@@ -3203,6 +3408,43 @@ static error_t mqtt_passthrough_observe_publish(
     {
         return NO_ERROR;
     }
+    if (mqtt_topic_match("toniebox/+/settings/request", topic))
+    {
+        if (!mqtt_settings_topic_matches(conn, topic, "/settings/request"))
+            return NO_ERROR;
+        mqtt_forward_filter_result_t route = mqtt_forward_filter_evaluate(
+            conn->client_ctx.settings, MQTT_FORWARD_ROUTE_BOX_TO_TONIES, topic, payload, payload_len);
+        if (mqtt_settings_cloud_managed(conn->client_ctx.settings) &&
+            route.action == MQTT_FORWARD_ACTION_FORWARD)
+            return NO_ERROR;
+        // Reuse bounded QoS replay for a locally answered request. If forwarding
+        // is allowed, the stored replacement is byte-identical to the request.
+        uint8_t *replay = NULL;
+        if (qos > 0)
+        {
+            replay = osAllocMem(payload_len > 0 ? payload_len : 1);
+            if (replay == NULL)
+                return ERROR_OUT_OF_MEMORY;
+            osMemcpy(replay, payload, payload_len);
+        }
+        if (!mqtt_publish_settings_response(conn, TRUE, TRUE))
+        {
+            osFreeMem(replay);
+            return ERROR_WRITE_FAILED;
+        }
+        result->locally_processed = TRUE;
+        result->capture_action = "local_settings_request";
+        if (qos > 0)
+        {
+            result->action = TB2_MQTT_OBSERVER_REWRITE;
+            result->payload = replay;
+            result->payload_len = payload_len;
+        }
+        return NO_ERROR;
+    }
+    if (mqtt_topic_match("toniebox/+/settings/confirm", topic) &&
+        !mqtt_settings_topic_matches(conn, topic, "/settings/confirm"))
+        return NO_ERROR;
     mqtt_connection_update_context(conn, topic);
 
     if (mqtt_topic_match("toniebox/+/settings/confirm", topic))
@@ -3311,6 +3553,8 @@ void mqtt_server_task()
         MqttClientConnection *conn = &connections[i];
         if (conn->active)
         {
+            if (conn->box_connection && conn->client_ctx.settings != NULL)
+                mqtt_update_settings_authority(conn);
             if (!conn->established)
             {
                 systime_t elapsed = osGetSystemTime() - conn->accepted_at;
@@ -3378,6 +3622,7 @@ void mqtt_server_task()
                                                                &conn->passthrough, &handled,
                                                                mqtt_passthrough_observe_publish,
                                                                mqtt_passthrough_observe_control,
+                                                               mqtt_passthrough_publish_completed,
                                                                conn,
                                                                &passthrough_box_settings);
                             if (!error && handled)
@@ -3719,7 +3964,7 @@ void mqtt_server_mark_toniebox2_setting_changed(uint8_t overlay_id, const char *
         for (uint8_t i = 1; i < MAX_OVERLAYS; i++)
         {
             settings_t *settings = get_settings_id(i);
-            if (mqtt_is_toniebox2_overlay(settings))
+            if (mqtt_is_toniebox2_overlay(settings) && !mqtt_settings_cloud_managed(settings))
             {
                 if (mqtt_mark_toniebox2_settings_pending(i, setting_name))
                 {
@@ -3731,7 +3976,7 @@ void mqtt_server_mark_toniebox2_setting_changed(uint8_t overlay_id, const char *
     }
 
     settings_t *settings = get_settings_id(overlay_id);
-    if (mqtt_is_toniebox2_overlay(settings))
+    if (mqtt_is_toniebox2_overlay(settings) && !mqtt_settings_cloud_managed(settings))
     {
         if (mqtt_mark_toniebox2_settings_pending(overlay_id, setting_name))
         {

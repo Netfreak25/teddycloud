@@ -1168,6 +1168,17 @@
             "v3Endpoints": "Weiterleitung der TB2-v3-Endpunkte",
             "unclassified": "Nicht zugeordnet"
         },
+        "cloudAuthority": {
+            "locked": "Diese Einstellungen werden von TONIES übernommen. Zum lokalen Bearbeiten die Weiterleitung von settings/desired deaktivieren. Globale Vorgaben bleiben bearbeitbar.",
+            "state": {
+                "local": "Lokal verwaltet",
+                "waiting": "Wartet auf einen Einstellungswert von TONIES",
+                "received": "Von TONIES empfangen; noch nicht von der Box bestätigt",
+                "confirmed": "Von der Box bestätigt"
+            },
+            "requestBlocked": "TONIES verwaltet die Einstellungen, aber settings/request ist gesperrt. Die Box kann keine aktuellen Cloud-Einstellungen anfordern.",
+            "confirmBlocked": "TONIES verwaltet die Einstellungen, aber settings/confirm ist gesperrt. Bestätigungen der Box erreichen TONIES nicht."
+        },
         "mqttForwarding": {
             "disabledGlobally": "Manuelle MQTT-Filter sind global ausgeschaltet. Einzelwerte bleiben gespeichert und bearbeitbar. NoCloud- und lokale Inhaltsschutzregeln bleiben aktiv.",
             "overrideHint": "Aus: globalen Wert übernehmen. An: eigenen Filterwert für diese Box verwenden.",

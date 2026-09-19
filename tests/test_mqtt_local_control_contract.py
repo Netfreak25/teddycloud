@@ -184,17 +184,47 @@ class MqttLocalControlContractTests(unittest.TestCase):
         self.assertIn("tb2_mqtt_local_responses_free(session);", close)
 
     def test_web_save_order_and_tb2_dependency_are_explicit(self):
-        enabled = self.web_handler.index("localControlChange?.value === true")
-        parallel = self.web_handler.index("await Promise.all", enabled)
-        disabled = self.web_handler.index("localControlChange?.value === false", parallel)
-        self.assertLess(enabled, parallel)
-        self.assertLess(parallel, disabled)
-        dependency = next(
-            item
-            for item in self.layout["dependencies"]
-            if item["master"] == "mqtt_client_upstream.local_control_enabled"
-        )
-        self.assertEqual(["toniebox2."], dependency["dependentPrefixes"])
+        enabled = self.web_handler.index("localControl?.value === true")
+        fields = self.web_handler.index("for (const setting of changes)", enabled)
+        disabled = self.web_handler.index("localControl?.value === false", fields)
+        self.assertLess(enabled, fields)
+        self.assertLess(fields, disabled)
+        self.assertIn("getTb2SettingAccess", self.web_handler)
+        self.assertFalse(any("toniebox2." in item.get("dependentPrefixes", [])
+                             for item in self.layout["dependencies"]))
+
+    def test_settings_import_runs_only_after_final_publish_was_forwarded(self):
+        process = self.proxy[self.proxy.index("static error_t tb2_mqtt_process_packet"):
+                             self.proxy.index("static error_t tb2_mqtt_process_stream")]
+        callback = process.index("session->publish_completed(session->observer_context")
+        self.assertIn("if (!error && !blocked && session->publish_completed != NULL)", process)
+        self.assertGreater(callback, process.rindex("tb2_mqtt_record_packet_ex", 0, callback))
+        self.assertLess(callback, process.index("osFreeMem(observer_result.payload)", callback))
+        self.assertIn("topic, filtered_payload, filtered_payload_len", process[callback:callback+230])
+
+    def test_settings_ownership_does_not_use_app_control_exception(self):
+        sender = self.server[self.server.index("static bool_t mqtt_publish_settings_response"):
+                             self.server.index("static bool_t mqtt_publish_pending_settings_desired")]
+        self.assertIn("cloud_managed && !request_response", sender)
+        self.assertNotIn("mqtt_connection_local_control_allowed", sender)
+        self.assertLess(sender.index("mqtt_connection_publish(conn"),
+                        sender.index("mqtt_settings_sent_record"))
+        self.assertLess(sender.index("if (published && sent != NULL)"),
+                        sender.index("mqtt_settings_local_sent"))
+        observer = self.server[self.server.index("static error_t mqtt_passthrough_observe_publish"):
+                               self.server.index("static void mqtt_passthrough_observe_control")]
+        request = observer[observer.index('"toniebox/+/settings/request"'):
+                           observer.index('"toniebox/+/settings/confirm"')]
+        self.assertIn("mqtt_forward_filter_evaluate", request)
+        self.assertIn("mqtt_publish_settings_response", request)
+        self.assertNotIn("fresh", request)
+
+    def test_confirm_requires_actual_sent_revision_without_erasing_newer_pending(self):
+        acknowledge = self.server[self.server.index("static void mqtt_ack_toniebox2_settings_history"):
+                                  self.server.index("static bool_t mqtt_get_json_uint32")]
+        self.assertIn("mqtt_settings_sent_match", acknowledge)
+        self.assertIn("if (confirmed_revision == revisions[i])", acknowledge)
+        self.assertIn("conn->settings_sent.valid[i] = FALSE", acknowledge)
 
     def test_tb1_audio_id_switches_do_not_affect_tb2(self):
         self.assertIn(

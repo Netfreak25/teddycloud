@@ -732,6 +732,9 @@ void settings_deinit();
  */
 error_t settings_save();
 
+/** Persist only box overlays. Caller must already hold MUTEX_SETTINGS. */
+error_t settings_save_overlays_locked(void);
+
 /**
  * @brief Loads settings from a persistent storage (like a file or database).
  *

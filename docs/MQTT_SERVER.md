@@ -42,7 +42,7 @@ packet-aware TB2 ICI upstream MITM:
 | Setting | Default | Purpose |
 |---------|---------|---------|
 | `mqtt_client_upstream.enabled` | `false` | Enables packet-aware upstream forwarding, observation, filtering and capture as one global mode. |
-| `mqtt_client_upstream.local_control_enabled` | `false` | Allows local `settings/desired` and `app-control/*` publishes while the proxy is active. The value can be overridden per TB2 overlay. |
+| `mqtt_client_upstream.local_control_enabled` | `false` | Allows local `app-control/*` publishes while the proxy is active. Permanent device settings use the separate ownership rules below. The value can be overridden per TB2 overlay. |
 | `mqtt_client_upstream.port` | `8883` | Tonies ICI upstream MQTT port. |
 | `mqtt_client_upstream.hostname` | `ici.tonie.cloud` | Tonies ICI upstream hostname. |
 | `mqtt_client_upstream.capture_dir` | `data/diagnostics/tb2-mqtt-passthrough` | Local session capture directory. |
@@ -196,11 +196,11 @@ processes claims and the passive status paths for settings confirms, setup,
 battery/events/fleet/headphones metrics, playback, volume, and existing
 app-reply status handlers even when the publish is suppressed. A direct local
 MQTT connection retains the normal local-control behavior. On a proxy
-connection, local settings and app controls are permitted only when the
+connection, local app controls are permitted only when the
 effective global or overlay value of
-`mqtt_client_upstream.local_control_enabled` is true. Pending settings remain
-queued while it is false and are sent without reconnecting after it becomes
-true. Local `fresh-tonies` delivery is independent of this switch.
+`mqtt_client_upstream.local_control_enabled` is true. Permanent device settings
+are controlled by effective Desired forwarding, not this exception switch.
+Local `fresh-tonies` delivery is independent of both settings decisions.
 
 Matching responses to local proxy commands are handled before the automatic
 NoCloud/payload protection and manual forwarding filters. Matching local
@@ -211,16 +211,17 @@ local ping. A `bedtime-state` reply is local only while a local STL command is
 pending and within the 30-second correlation window. Alarm replies and all
 unmatched, invalid or stale responses remain transparent. Correlations that
 were already pending continue to be consumed after the switch is disabled and
-are discarded when the MQTT connection ends. Cloud-to-box publishes are logged
-and captured only; TeddyCloud never executes them. For QoS 1 and QoS 2, the
+are discarded when the MQTT connection ends. Cloud commands are not executed
+locally; successfully delivered Cloud Desireds are additionally stored without
+emitting a second command. For QoS 1 and QoS 2, the
 proxy remembers a bounded set of local consume/rewrite decisions. A duplicate
 PUBLISH therefore reuses the original decision before correlation runs again
 and cannot leak to TONIES after the first packet cleared the pending action.
 
 The Internet-filter boundary does not yet make the box session independent of
-TONIES. Upstream failures can still close that session, and proxy-mode
-`settings/request` handling and settings ownership retain their existing
-behavior. CONNECT/CONNACK, subscriptions, keepalive and ACK packets are not
+TONIES. Upstream failures can still close that session. Proxy-mode
+`settings/request` ownership is described below. CONNECT/CONNACK,
+subscriptions, keepalive and ACK packets are not
 manual PUBLISH-filter categories. Required ACKs for locally suppressed packets
 and existing local freshness ACK consumption are unchanged. No new application
 responses are fabricated for unknown topics. Native originalcache routing,
@@ -496,10 +497,10 @@ sent after a box publishes `settings/request`, after a relevant subscription is
 seen while settings are pending, or when `mqtt_server_mark_toniebox2_setting_changed()`
 finds an active subscribed box connection.
 
-For proxy connections this delivery, including its retry pump, is paused unless
-the effective `mqtt_client_upstream.local_control_enabled` value is true. The
-pending revisions are retained and become eligible immediately when the switch
-is enabled. Direct local MQTT connections do not consult this setting.
+Local changes and retries are suppressed while TONIES owns permanent settings.
+Turning off upstream or blocking Desired permits local management independently
+of the app-control exception. A blocked Request can receive the snapshot-based
+replacement described below, without creating local Cloud revisions.
 
 The `<box_cn>` segment is built per active connection from its observed MQTT
 topic ID. It is not taken directly from the persisted overlay `commonName`.
@@ -508,8 +509,72 @@ topic ID. It is not taken directly from the persisted overlay `commonName`.
 supported `toniebox2.*` option changes, only that corresponding JSON field gets
 a new monotone revision and is marked pending. The revision is based on Unix
 time in milliseconds and is advanced locally if multiple changes happen in the
-same second. Unsupported/static fields remain at revision `0` until their
-semantics are confirmed.
+same second, and exceeds all known Cloud revisions. Without a Cloud snapshot,
+unsupported/static fallback fields retain revision `0`. With a snapshot their
+actual Cloud values and revisions are preserved, not replaced by those defaults.
+
+### TONIES-owned settings and durable snapshots
+
+Ownership uses the Step-1 forwarding evaluator for `settings/desired` plus the
+global ICI-upstream switch. Box overrides and manual-filter bypass apply exactly
+as on the relay. The local-control exception never unlocks these device fields.
+
+| Effective policy | Response to a box settings request |
+|---|---|
+| Upstream off or Desired blocked | TC answers using local values over its available Cloud baseline. |
+| Desired and Request forwarded | TONIES answers; no competing local Desired. |
+| Desired forwarded, Request blocked | TC answers once from its stored Cloud snapshot, or the existing local builder if none is available. |
+| Confirm blocked | TC still processes the confirmation locally; no forwarding exception. |
+
+Only the existing ten device settings are projected: volume/headphone limits,
+bedtime limits, ring brightness, scrubbing, skipping, skipping direction and age
+mode. Cache and library options are unrelated. An incoming topic must match the
+connection's bound box; it cannot choose another overlay.
+
+`mqtt_settings` records a Desired only after the relay has written its final
+permitted payload successfully. It stores one bounded snapshot at
+`<configdirfull>/mqtt-settings/<stable-overlay-id>.json`, containing
+`schemaVersion: 1`, `overlay`, and `desired` with `settings_history`. Input and
+serialized snapshot limits are each 64 KiB. Unknown version-paired settings,
+arrays and null values are retained. Missing fields remain unchanged; older
+revisions, equal revisions with conflicting values, invalid values and unsafe
+JSON integers are not imported. A repeated identical pair is idempotent.
+
+Snapshot updates use a same-directory temporary file, checked writes and flush,
+then rename without a copy/truncate fallback. A dedicated mutex serializes
+snapshot work; lock order when both are needed is SETTINGS then MQTT_SETTINGS.
+After publication, typed setters project supported fields as explicit box
+overrides, followed by one overlay-config save. Projection invokes no local
+Pending/Publish hook. Normal overlay reloads restore it only while Cloud
+management is active; disabling Cloud management retains the values and makes
+them editable. The ordinary config writer is not a new atomic storage system:
+this does not promise whole-configuration power-loss safety. Import/save errors
+are visible in logs and do not undo a successful Cloud forwarding operation.
+
+Cloud revisions never become local Pending revisions. Accepted Cloud fields
+supersede stale local wishes. Later local edits replace only their corresponding
+fields on the stored baseline, with new JSON-safe revisions. Exhaustion is
+reported rather than wrapping. A per-connection ten-field sent ledger is populated
+only after actual local delivery. Confirms match that ledger, not merely an
+overlay's unsent Pending array. An old local confirm cannot clear a newer wish;
+known Cloud collisions remain transparent. After an ownership change, previous
+local entries expire within 30 seconds; disconnect discards them. Unchanged
+snapshot replies do not create local Pending entries. A TLS write is receipt,
+not proof that the box applied the setting.
+
+The settings API exposes `readOnly`, `readOnlyReason: "tonies_settings"` and
+`cloudSettingsState: "local" | "waiting" | "received" | "confirmed"` for those
+ten fields. Confirmation is runtime evidence, not restored as confirmed after
+a restart. Box Set and Reset are rejected with HTTP 409 while Cloud-managed;
+global defaults remain editable. Unknown explicit overlays return 404 instead
+of mutating globals. Config-write failures return an error, not success.
+
+Capture retains the original received packet and Step-1 decisions. Local
+request responses use `cloud_settings_fallback` or `local_settings_fallback`;
+locally handled requests use `local_settings_request` and bounded QoS replay
+to avoid answering a retransmission again. Ordinary local changes keep
+`local_settings_desired`. Receipt, rejection and confirmation logs contain field
+names and overlay identity, not new full-payload dumps.
 
 Current desired fields:
 
@@ -763,8 +828,8 @@ inactive. Playback and chapter selection are disabled when the box is offline,
 the exact capability is absent, or a running proxy does not permit local
 control. Volume uses the same availability gates, but remains usable with the
 unconfirmed level 2 fallback so an absolute command can resynchronize the box.
-All `toniebox2.*` settings that produce
-`settings/desired` are disabled by the same effective setting. Bedtime state is
+The ten permanent device settings are independently locked by TONIES ownership;
+cache/library settings remain editable subject to their own dependencies. Bedtime state is
 shown, but its control stays disabled until the STL schema is confirmed.
 
 Observed reply channel:
@@ -910,7 +975,8 @@ as `BatteryPercent`, `BatteryRaw`, `BatteryCurrent`, `BatteryStatus`,
 | `src/handler_cloud.c` | Content mapping changes can proactively mark rUIDs for V3 freshness and call the overlay publisher. |
 | `src/handler.c` | TAP streaming callbacks call the overlay publisher when freshness state changes outside an MQTT connection context. |
 | `src/mqtt_server.c` | Certificate-mapped and trusted-topic-mapped active connections update `internal.online` and `internal.last_connection`. |
-| `src/mqtt_server.c` | Subscribe/request/background handlers publish pending settings and coalesced freshness data to the active connection. Proxy settings delivery obeys the effective local-control setting; `settings/confirm` clears and consumes only matching local revisions. |
+| `src/mqtt_server.c` | Subscribe/request/background handlers publish locally owned settings; a sent-connection ledger correlates local confirms. Freshness delivery remains independent. |
+| `src/mqtt_settings.c` | Central ownership, bounded Cloud snapshots, typed projection, strict revisions and confirmation evidence. |
 | `src/mqtt_server.c` | App-control helpers build typed playback, volume and ping commands; experimental `stl` remains raw JSON until its schema is confirmed. Proxy commands obey the effective local-control setting and replies require exact local correlation. |
 | `src/mqtt_server.c` | `claim`, `app-reply/bedtime-state`, battery/headphone metrics and `playback/state` publishes update semantic TB2 runtime state and box events. `claim/<ruid>` also records Last Played from the topic rUID. |
 

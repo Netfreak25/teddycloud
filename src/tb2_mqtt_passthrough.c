@@ -142,6 +142,7 @@ struct tb2_mqtt_passthrough_session
     settings_t *box_settings;
     tb2_mqtt_publish_observer_t observer;
     tb2_mqtt_control_observer_t control_observer;
+    tb2_mqtt_publish_completed_t publish_completed;
     void *observer_context;
     tb2_mqtt_stream_t box_stream;
     tb2_mqtt_stream_t upstream_stream;
@@ -2109,6 +2110,9 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
             type, topic, !blocked, filter_id, FALSE, TRUE, NULL,
             packet_id, packet_id, blocked, FALSE, 0, &manual_decision);
     }
+    if (!error && !blocked && session->publish_completed != NULL)
+        session->publish_completed(session->observer_context, box_to_upstream,
+                                   topic, filtered_payload, filtered_payload_len);
     osFreeMem(wire_packet);
     osFreeMem(rebuilt_packet);
     osFreeMem(observer_result.payload);
@@ -2229,6 +2233,7 @@ error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
                                    bool_t *handled,
                                    tb2_mqtt_publish_observer_t observer,
                                    tb2_mqtt_control_observer_t control_observer,
+                                   tb2_mqtt_publish_completed_t publish_completed,
                                    void *observer_context,
                                    settings_t **box_settings_out)
 {
@@ -2278,6 +2283,7 @@ error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
     created->box_settings = box_settings;
     created->observer = observer;
     created->control_observer = control_observer;
+    created->publish_completed = publish_completed;
     created->observer_context = observer_context;
     created->next_local_packet_id = UINT16_MAX;
 

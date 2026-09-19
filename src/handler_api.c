@@ -31,6 +31,7 @@
 #include "cache.h"
 #include "content_playlist.h"
 #include "mqtt_server.h"
+#include "mqtt_settings.h"
 #include "mutex_manager.h"
 #include "toniebox_state.h"
 #include "v3_local_content.h"
@@ -217,6 +218,71 @@ static void api_trigger_toniebox2_settings_desired(const char *item, const char 
     }
 
     mqtt_server_mark_toniebox2_setting_changed(get_overlay_id(overlay), item);
+}
+
+static bool_t api_settings_resolve_overlay(const char *overlay, uint8_t *settings_id)
+{
+    *settings_id = get_overlay_id(overlay);
+    return overlay == NULL || overlay[0] == '\0' ||
+           (*settings_id != 0 && get_settings_id(*settings_id)->internal.config_used);
+}
+
+static error_t api_settings_error(HttpConnection *connection, uint_t status,
+                                  const char *message)
+{
+    httpPrepareHeader(connection, "text/plain; charset=utf-8", osStrlen(message));
+    connection->response.statusCode = status;
+    /* The response helper does not modify or free the buffer when freeAfter is false. */
+    return httpWriteResponseString(connection, (char_t *)message, false);
+}
+
+/** Keep cloud ownership checks, device writes and policy transitions atomic.
+ * Unrelated and global setters retain their existing locking/reload paths. */
+static uint_t api_settings_write(const char *item, const char *value,
+                                 const char *overlay, bool_t reset)
+{
+    const int cloud_field = mqtt_settings_field_index(item);
+    const bool_t desired_policy = !osStrcmp(item, "mqtt_client_upstream.forward.settings.desired");
+    const bool_t lock_box_settings = overlay != NULL && overlay[0] != '\0' &&
+                                    (cloud_field >= 0 || desired_policy);
+    if (lock_box_settings)
+        mutex_lock(MUTEX_SETTINGS);
+
+    uint_t status = 400;
+    uint8_t settings_id = 0;
+    if (!api_settings_resolve_overlay(overlay, &settings_id))
+    {
+        status = 404;
+    }
+    else
+    {
+        setting_item_t *option = settings_get_by_name_ovl(item, overlay);
+        if (option == NULL)
+        {
+            status = 404;
+        }
+        else if (settings_id != 0 && cloud_field >= 0 &&
+                 mqtt_settings_cloud_managed(get_settings_id(settings_id)))
+        {
+            status = 409;
+        }
+        else
+        {
+            bool success = reset
+                               ? settings_reset_id(item, settings_id)
+                               : settings_set_by_string_id(item, value, settings_id);
+            if (success)
+            {
+                if (lock_box_settings && desired_policy)
+                    mqtt_settings_reapply_overlays_locked();
+                status = 200;
+            }
+        }
+    }
+
+    if (lock_box_settings)
+        mutex_unlock(MUTEX_SETTINGS);
+    return status;
 }
 
 /* sanitizes the path - needs two additional characters in worst case, so make sure 'path' has enough space */
@@ -453,6 +519,15 @@ error_t handleApiGetIndex(HttpConnection *connection, const char_t *uri, const c
             isNoLevel = true;
         }
     }
+    mutex_lock(MUTEX_SETTINGS);
+    uint8_t settings_id = 0;
+    if (!api_settings_resolve_overlay(overlay, &settings_id))
+    {
+        mutex_unlock(MUTEX_SETTINGS);
+        cJSON_Delete(json);
+        return api_settings_error(connection, 404, "ERROR: unknown overlay");
+    }
+    settings_t *scope = get_settings_id(settings_id);
     for (size_t pos = 0; pos < settings_get_size(); pos++)
     {
         setting_item_t *opt = settings_get_ovl(pos, overlay);
@@ -467,7 +542,7 @@ error_t handleApiGetIndex(HttpConnection *connection, const char_t *uri, const c
             continue;
         }
 
-        settings_level user_level = get_settings_ovl(overlay)->core.settings_level;
+        settings_level user_level = scope->core.settings_level;
         if (!isNoLevel && opt->level > user_level)
         {
             continue;
@@ -485,7 +560,19 @@ error_t handleApiGetIndex(HttpConnection *connection, const char_t *uri, const c
                  !osStrcmp(opt->option_name,
                            "toniebox2.cacheTonieplayToLibraryV3"))
         {
-            read_only = !get_settings_ovl(overlay)->cloud.cacheContentV3;
+            read_only = !scope->cloud.cacheContentV3;
+        }
+        int cloud_field = mqtt_settings_field_index(opt->option_name);
+        if (cloud_field >= 0)
+        {
+            bool cloud_managed = settings_id != 0 && mqtt_settings_cloud_managed(scope);
+            if (cloud_managed)
+            {
+                read_only = TRUE;
+                cJSON_AddStringToObject(jsonEntry, "readOnlyReason", "tonies_settings");
+            }
+            cJSON_AddStringToObject(jsonEntry, "cloudSettingsState",
+                settings_id == 0 ? "local" : mqtt_settings_field_state(scope, (size_t)cloud_field));
         }
         cJSON_AddBoolToObject(jsonEntry, "readOnly", read_only);
         cJSON_AddNumberToObject(jsonEntry, "level", opt->level);
@@ -539,6 +626,7 @@ error_t handleApiGetIndex(HttpConnection *connection, const char_t *uri, const c
 
         cJSON_AddItemToArray(jsonArray, jsonEntry);
     }
+    mutex_unlock(MUTEX_SETTINGS);
 
     char *jsonString = cJSON_PrintUnformatted(json);
     cJSON_Delete(json);
@@ -761,6 +849,7 @@ error_t handleApiTrigger(HttpConnection *connection, const char_t *uri, const ch
 {
     const char *item = &uri[5];
     char response[256];
+    uint_t status = 200;
 
     osSprintf(response, "FAILED");
 
@@ -787,11 +876,22 @@ error_t handleApiTrigger(HttpConnection *connection, const char_t *uri, const ch
     else if (!strcmp(item, "triggerWriteConfig"))
     {
         TRACE_INFO("Triggered WriteConfig\r\n");
-        osSprintf(response, "OK");
-        settings_save();
+        error_t save_error = settings_save();
+        if (save_error == NO_ERROR)
+        {
+            osStrcpy(response, "OK");
+        }
+        else
+        {
+            TRACE_ERROR("Could not write settings: %s\r\n", error2text(save_error));
+            osSnprintf(response, sizeof(response), "ERROR: could not write settings (%s)",
+                       error2text(save_error));
+            status = 500;
+        }
     }
 
     httpInitResponseHeader(connection);
+    connection->response.statusCode = status;
     connection->response.contentType = "text/plain";
     connection->response.contentLength = osStrlen(response);
 
@@ -812,6 +912,9 @@ error_t handleApiSettingsGet(HttpConnection *connection, const char_t *uri, cons
     {
         TRACE_DEBUG("got overlay '%s'\r\n", overlay);
     }
+    uint8_t settings_id = 0;
+    if (!api_settings_resolve_overlay(overlay, &settings_id))
+        return api_settings_error(connection, 404, "ERROR: unknown overlay");
     setting_item_t *opt = settings_get_by_name_ovl(item, overlay);
 
     if (opt == NULL)
@@ -889,7 +992,7 @@ error_t handleApiSettingsSet(HttpConnection *connection, const char_t *uri, cons
             TRACE_DEBUG("got overlay '%s'\r\n", overlay);
         }
 
-        bool success = false;
+        uint_t status = 400;
         bool isTb2Hostname = !osStrcmp(item, "core.server_cert_tb2.hostname") ||
                              !osStrcmp(item, "mqtt_server.hostname");
         char hostnameValidation[128] = {0};
@@ -899,15 +1002,15 @@ error_t handleApiSettingsSet(HttpConnection *connection, const char_t *uri, cons
                 !cert_tb2_hostname_is_valid(data, hostnameValidation,
                                             sizeof(hostnameValidation)))
             {
-                success = false;
+                status = 400;
             }
             else
             {
-                success = settings_set_by_string_ovl(item, data, overlay);
+                status = api_settings_write(item, data, overlay, FALSE);
             }
         }
 
-        if (success)
+        if (status == 200)
         {
             api_trigger_toniebox2_settings_desired(item, overlay);
             const char *status = !osStrcmp(item, "core.server_cert_tb2.hostname")
@@ -919,6 +1022,14 @@ error_t handleApiSettingsSet(HttpConnection *connection, const char_t *uri, cons
                 osSnprintf(response, sizeof(response), "OK: %s", status);
             else
                 osStrcpy(response, "OK");
+        }
+        else if (status == 409)
+        {
+            osStrcpy(response, "ERROR: tonies_settings");
+        }
+        else if (status == 404)
+        {
+            osStrcpy(response, "ERROR: unknown overlay or setting");
         }
         else if (hostnameValidation[0] != '\0')
         {
@@ -934,7 +1045,7 @@ error_t handleApiSettingsSet(HttpConnection *connection, const char_t *uri, cons
         }
 
         httpPrepareHeader(connection, "text/plain; charset=utf-8", 0);
-        connection->response.statusCode = success ? 200 : 400;
+        connection->response.statusCode = status;
         return httpWriteResponseString(connection, response, false);
     }
 
@@ -953,41 +1064,25 @@ error_t handleApiSettingsReset(HttpConnection *connection, const char_t *uri, co
     {
         TRACE_DEBUG("got overlay '%s'\r\n", overlay);
     }
-    setting_item_t *opt = settings_get_by_name_ovl(item, overlay);
-    bool success = false;
-
-    if (opt)
+    uint_t status = api_settings_write(item, NULL, overlay, TRUE);
+    if (status == 200)
     {
-        uint8_t settingsId = get_overlay_id(overlay);
-        if (opt->overlayed || settingsId == 0)
-        {
-            success = settings_reset_id(item, settingsId);
-            if (settingsId == 0)
-            {
-                TRACE_INFO("Setting: '%s' reset to default\r\n", item);
-            }
-            else
-            {
-                TRACE_INFO("Setting: '%s' overlay removed\r\n", item);
-            }
-        }
-        else
-        {
-            TRACE_WARNING("Setting '%s' is not overlayed\r\n", item);
-        }
-    }
-    else
-    {
-        TRACE_ERROR("Setting '%s' is unknown\r\n", item);
-    }
-
-    if (success)
-    {
+        TRACE_INFO("Setting '%s' %s\r\n", item,
+                   overlay[0] == '\0' ? "reset to default" : "overlay removed");
         api_trigger_toniebox2_settings_desired(item, overlay);
         osStrcpy(response, "OK");
     }
+    else if (status == 409)
+    {
+        osStrcpy(response, "ERROR: tonies_settings");
+    }
+    else if (status == 404)
+    {
+        osStrcpy(response, "ERROR: unknown overlay or setting");
+    }
 
     httpPrepareHeader(connection, "text/plain; charset=utf-8", osStrlen(response));
+    connection->response.statusCode = status;
     return httpWriteResponseString(connection, response, false);
 }
 

@@ -1168,6 +1168,17 @@
             "v3Endpoints": "Reenvío de endpoints TB2 v3",
             "unclassified": "Sin clasificar"
         },
+        "cloudAuthority": {
+            "locked": "Estos ajustes se toman de TONIES. Desactiva el reenvío de settings/desired para editarlos localmente. Los valores globales siguen siendo editables.",
+            "state": {
+                "local": "Gestionado localmente",
+                "waiting": "Esperando un valor de ajuste de TONIES",
+                "received": "Recibido de TONIES; aún no confirmado por la caja",
+                "confirmed": "Confirmado por la caja"
+            },
+            "requestBlocked": "TONIES gestiona los ajustes, pero settings/request está bloqueado. La caja no puede solicitar los ajustes actuales de la nube.",
+            "confirmBlocked": "TONIES gestiona los ajustes, pero settings/confirm está bloqueado. Las confirmaciones de la caja no llegarán a TONIES."
+        },
         "mqttForwarding": {
             "disabledGlobally": "Los filtros MQTT manuales están desactivados globalmente. Las reglas individuales se conservan y siguen siendo editables. NoCloud y la protección del contenido local siguen activos.",
             "overrideHint": "Desactivado: heredar el valor global. Activado: usar un valor de filtro propio de esta box.",

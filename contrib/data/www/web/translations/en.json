@@ -1168,6 +1168,17 @@
             "v3Endpoints": "TB2 v3 endpoint forwarding",
             "unclassified": "Unclassified"
         },
+        "cloudAuthority": {
+            "locked": "These settings are taken from TONIES. Disable settings/desired forwarding to edit them locally. Global defaults remain editable.",
+            "state": {
+                "local": "Managed locally",
+                "waiting": "Waiting for a setting value from TONIES",
+                "received": "Received from TONIES; not yet confirmed by the box",
+                "confirmed": "Confirmed by the box"
+            },
+            "requestBlocked": "TONIES manages the settings, but settings/request is blocked. The box cannot request current cloud settings.",
+            "confirmBlocked": "TONIES manages the settings, but settings/confirm is blocked. Box confirmations will not reach TONIES."
+        },
         "mqttForwarding": {
             "disabledGlobally": "Manual MQTT filters are disabled globally. Individual rules remain saved and editable. NoCloud and local content protection remain active.",
             "overrideHint": "Off: inherit the global value. On: use a filter value specific to this box.",

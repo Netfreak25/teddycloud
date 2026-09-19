@@ -199,6 +199,17 @@
             "v3Endpoints": "TB2 v3 HeHmey",
             "unclassified": "Segh Hutlh"
         },
+        "cloudAuthority": {
+            "locked": "DuHmey SeH TONIES. naDev bIchoHmeH, settings/desired yIbot. Hoch DuHmey DachoHlaH.",
+            "state": {
+                "local": "naDev SeHlu'",
+                "waiting": "TONIES DuH loS",
+                "received": "TONIES DuH Hevta'; wej 'ol box",
+                "confirmed": "'olta' box"
+            },
+            "requestBlocked": "DuHmey SeH TONIES, 'ach settings/request botlu'. Cloud DuHmey poQlaHbe' box.",
+            "confirmBlocked": "DuHmey SeH TONIES, 'ach settings/confirm botlu'. box jangghach Hevbe' TONIES."
+        },
         "mqttForwarding": {
             "disabledGlobally": "MQTT chutmey chu'Ha'lu'. DuHmey poltaH. NoCloud QaptaH.",
             "overrideHint": "chu'Ha': Hoch DuH lo'. chu': box DuH lo'.",

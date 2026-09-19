@@ -30,6 +30,9 @@ typedef error_t (*tb2_mqtt_publish_observer_t)(
     void *context, bool_t box_to_upstream, const char *topic,
     const uint8_t *payload, size_t payload_len, uint8_t qos,
     tb2_mqtt_observer_result_t *result);
+/** Called only after an incoming publish's final payload was fully forwarded. */
+typedef void (*tb2_mqtt_publish_completed_t)(void *context, bool_t box_to_upstream,
+    const char *topic, const uint8_t *payload, size_t payload_len);
 typedef enum
 {
     TB2_MQTT_CONTROL_SUBSCRIBE,
@@ -52,6 +55,7 @@ error_t tb2_mqtt_passthrough_start(struct _TlsContext *box_tls,
                                    bool_t *handled,
                                    tb2_mqtt_publish_observer_t observer,
                                    tb2_mqtt_control_observer_t control_observer,
+                                   tb2_mqtt_publish_completed_t publish_completed,
                                    void *observer_context,
                                    settings_t **box_settings_out);
 error_t tb2_mqtt_passthrough_forward_initial(tb2_mqtt_passthrough_session_t *session,
