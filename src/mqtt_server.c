@@ -13,6 +13,8 @@
 #include "mqtt_server.h"
 #include "mqtt_settings.h"
 #include "mqtt_forward_filter.h"
+#include "mqtt_app_control.h"
+#include "mutex_manager.h"
 #include "tls.h"
 #include "rand.h"
 #include "tls_adapter.h"
@@ -33,7 +35,6 @@ uint_t tcpWaitForEvents(Socket *socket, uint_t eventMask, systime_t timeout);
 #define MQTT_SETTINGS_DESIRED_PAYLOAD_SIZE 2048
 #define MQTT_SETTINGS_DESIRED_MAX_ATTEMPTS 3
 #define MQTT_SETTINGS_DESIRED_RETRY_INTERVAL_SEC 5
-#define MQTT_APP_CONTROL_REPLY_WINDOW_SEC 30
 #define MQTT_MILLISECONDS_PER_SECOND 1000ULL
 #define MQTT_JSON_SAFE_INTEGER_MAX 9007199254740991.0
 #define MQTT_LOG_INLINE_PAYLOAD_SIZE 256
@@ -89,21 +90,8 @@ typedef struct {
     uint32_t fresh_tonie_sent_at;
     bool_t observer_local_reply_matched;
     mqtt_settings_sent_t settings_sent;
+    mqtt_app_control_state_t app_control;
 } MqttClientConnection;
-
-typedef struct {
-    bool_t valid;
-    uint32_t sent_at;
-    uint32_t sequence;
-    uint32_t payload_hash;
-} MqttAppControlStlState;
-
-typedef struct {
-    bool_t valid;
-    uint32_t sequence;
-    systime_t sent_at;
-    char request_id[TBS_TB2_REQUEST_ID_MAX];
-} MqttAppControlPingState;
 
 typedef struct {
     bool_t pending;
@@ -146,8 +134,8 @@ typedef struct {
 
 static Socket *serverSocket = NULL;
 static MqttClientConnection connections[MQTT_MAX_CONNECTIONS];
-static MqttAppControlStlState app_control_stl_state[MAX_OVERLAYS];
-static MqttAppControlPingState app_control_ping_state[MAX_OVERLAYS];
+// Process lifetime, deliberately not reset by connection close or listener reload.
+static uint64_t app_control_ping_sequence;
 static MqttFreshToniesPublishState fresh_tonies_publish_state[MAX_OVERLAYS];
 
 static MqttFreshToniesPublishState *mqtt_fresh_tonies_publish_state(settings_t *settings);
@@ -213,7 +201,7 @@ static uint8_t mqtt_connection_overlay_id(MqttClientConnection *conn)
     return 0;
 }
 
-static bool_t mqtt_connection_local_control_allowed(MqttClientConnection *conn)
+static bool_t mqtt_connection_local_control_allowed(MqttClientConnection *conn, const char *topic)
 {
     if (conn == NULL || !conn->active || !conn->box_connection ||
         conn->client_ctx.settings == NULL)
@@ -221,8 +209,13 @@ static bool_t mqtt_connection_local_control_allowed(MqttClientConnection *conn)
         return FALSE;
     }
 
-    return conn->passthrough == NULL ||
-           conn->client_ctx.settings->mqtt_client_upstream.local_control_enabled;
+    if (conn->passthrough == NULL || !tb2_mqtt_passthrough_is_enabled() ||
+        conn->client_ctx.settings->mqtt_client_upstream.local_control_enabled)
+        return TRUE;
+
+    mqtt_forward_filter_result_t decision = mqtt_forward_filter_evaluate(
+        conn->client_ctx.settings, MQTT_FORWARD_ROUTE_TONIES_TO_BOX, topic, NULL, 0);
+    return decision.action == MQTT_FORWARD_ACTION_BLOCK;
 }
 
 static settings_t *mqtt_connection_certificate_settings(MqttClientConnection *conn,
@@ -300,14 +293,13 @@ static void mqtt_fresh_tonies_reset_connection(MqttClientConnection *conn)
     conn->fresh_tonie_sent_at = 0;
 }
 
-static void mqtt_connection_close(MqttClientConnection *conn, const char *reason)
+// Caller holds MUTEX_MQTT_APP_CONTROL, including the app-publish error path.
+static void mqtt_connection_close_locked(MqttClientConnection *conn, const char *reason)
 {
     if (conn == NULL)
     {
         return;
     }
-
-    uint8_t closed_overlay_id = conn->box_overlay_id;
 
     if (reason != NULL && reason[0] != '\0')
     {
@@ -355,13 +347,14 @@ static void mqtt_connection_close(MqttClientConnection *conn, const char *reason
     conn->box_topic_id[0] = '\0';
     conn->observer_local_reply_matched = FALSE;
     osMemset(&conn->settings_sent, 0, sizeof(conn->settings_sent));
-    if (closed_overlay_id > 0 && closed_overlay_id < MAX_OVERLAYS)
-    {
-        osMemset(&app_control_stl_state[closed_overlay_id], 0,
-                 sizeof(app_control_stl_state[closed_overlay_id]));
-        osMemset(&app_control_ping_state[closed_overlay_id], 0,
-                 sizeof(app_control_ping_state[closed_overlay_id]));
-    }
+    mqtt_app_control_reset(&conn->app_control);
+}
+
+static void mqtt_connection_close(MqttClientConnection *conn, const char *reason)
+{
+    mutex_lock(MUTEX_MQTT_APP_CONTROL);
+    mqtt_connection_close_locked(conn, reason);
+    mutex_unlock(MUTEX_MQTT_APP_CONTROL);
 }
 
 static void mqtt_connection_replace_existing_box_sessions(MqttClientConnection *current)
@@ -667,9 +660,9 @@ void mqtt_server_init() {
         return;
     }
 
+    mutex_lock(MUTEX_MQTT_APP_CONTROL);
     osMemset(connections, 0, sizeof(connections));
-    osMemset(app_control_stl_state, 0, sizeof(app_control_stl_state));
-    osMemset(app_control_ping_state, 0, sizeof(app_control_ping_state));
+    mutex_unlock(MUTEX_MQTT_APP_CONTROL);
     osMemset(fresh_tonies_publish_state, 0,
              sizeof(fresh_tonies_publish_state));
 }
@@ -1270,20 +1263,6 @@ static bool_t mqtt_validate_json_payload(const char *payload, const char *label)
     return TRUE;
 }
 
-static uint32_t mqtt_payload_hash(const char *payload)
-{
-    uint32_t hash = 2166136261u;
-    const uint8_t *p = (const uint8_t *)payload;
-
-    while (p != NULL && *p != '\0')
-    {
-        hash ^= *p++;
-        hash *= 16777619u;
-    }
-
-    return hash;
-}
-
 static bool_t mqtt_should_log_full_payload(size_t payload_len)
 {
     settings_t *settings = get_settings();
@@ -1379,12 +1358,12 @@ static bool_t mqtt_build_publish_packet(const char *topic, const char *payload,
     return TRUE;
 }
 
-static bool_t mqtt_connection_publish_packet(MqttClientConnection *conn,
+static bool_t mqtt_connection_publish_packet_internal(MqttClientConnection *conn,
                                              const char *topic,
                                              const char *payload, uint8_t qos,
                                              bool_t duplicate,
                                              uint16_t *packet_id,
-                                             const char *capture_action)
+                                             const char *capture_action, bool_t app_control_locked)
 {
     if (conn == NULL || !conn->active || topic == NULL || payload == NULL ||
         packet_id == NULL)
@@ -1462,7 +1441,10 @@ static bool_t mqtt_connection_publish_packet(MqttClientConnection *conn,
                       written,
                       error2text(error));
         osFreeMem(packet);
-        mqtt_connection_close(conn, "publish write failed");
+        if (app_control_locked)
+            mqtt_connection_close_locked(conn, "publish write failed");
+        else
+            mqtt_connection_close(conn, "publish write failed");
         return FALSE;
     }
 
@@ -1474,6 +1456,15 @@ static bool_t mqtt_connection_publish_packet(MqttClientConnection *conn,
 
     osFreeMem(packet);
     return TRUE;
+}
+
+static bool_t mqtt_connection_publish_packet(MqttClientConnection *conn,
+                                        const char *topic, const char *payload,
+                                        uint8_t qos, bool_t duplicate,
+                                        uint16_t *packet_id, const char *capture_action)
+{
+    return mqtt_connection_publish_packet_internal(conn, topic, payload, qos,
+        duplicate, packet_id, capture_action, FALSE);
 }
 
 static bool_t mqtt_connection_publish(MqttClientConnection *conn,
@@ -2759,45 +2750,23 @@ static error_t handle_mqtt_publish_app_reply_bedtime_state(MqttClientConnection 
         }
     }
 
-    uint32_t now = (uint32_t)time(NULL);
-    uint32_t overlay_id = settings->internal.overlayNumber;
-    uint32_t age = 0;
-    uint32_t sequence = 0;
-    uint32_t payload_hash = 0;
-    const char *correlation = "none";
-    if (overlay_id < MAX_OVERLAYS)
-    {
-        MqttAppControlStlState *last_stl = &app_control_stl_state[overlay_id];
-        if (last_stl->valid)
-        {
-            age = now >= last_stl->sent_at ? now - last_stl->sent_at : 0;
-            sequence = last_stl->sequence;
-            payload_hash = last_stl->payload_hash;
-            correlation = age <= MQTT_APP_CONTROL_REPLY_WINDOW_SEC ? "matched" : "stale";
-            if (age <= MQTT_APP_CONTROL_REPLY_WINDOW_SEC)
-            {
-                conn->observer_local_reply_matched = TRUE;
-                last_stl->valid = FALSE;
-            }
-            else
-            {
-                last_stl->valid = FALSE;
-            }
-        }
-    }
+    tbs_toniebox2_bedtime_state_changed(&conn->client_ctx);
 
-    TRACE_INFO("MQTT bedtime-state for %s: state=%s duration=%s defaultDuration=%s until=%s stlReply=%s age=%u seq=%u hash=%08" PRIX32 "\r\n",
+    mutex_lock(MUTEX_MQTT_APP_CONTROL);
+    bool_t matched = mqtt_app_control_match_bedtime(&conn->app_control, json,
+                                                    osGetSystemTime());
+    const char *correlation = matched ? "stl_heuristic" :
+        conn->app_control.stl.ambiguous ? "ambiguous" : "unmatched";
+    conn->observer_local_reply_matched = matched;
+    mutex_unlock(MUTEX_MQTT_APP_CONTROL);
+
+    TRACE_INFO("MQTT bedtime-state for %s: state=%s duration=%s defaultDuration=%s until=%s stlReply=%s\r\n",
                settings->commonName,
                stl_state,
                duration_text,
                default_duration_text,
                until_text,
-               correlation,
-               (unsigned)age,
-               (unsigned)sequence,
-               payload_hash);
-
-    tbs_toniebox2_bedtime_state_changed(&conn->client_ctx);
+               correlation);
 
     cJSON_Delete(json);
     return NO_ERROR;
@@ -2981,34 +2950,18 @@ static error_t handle_mqtt_publish_volume_state(MqttClientConnection *conn, Mqtt
     return NO_ERROR;
 }
 
-static bool_t mqtt_match_app_control_ping(uint8_t overlay_id, const char *request_id, uint32_t *round_trip_ms)
+static bool_t mqtt_match_app_control_ping(MqttClientConnection *conn, const char *request_id, uint32_t *round_trip_ms)
 {
-    if (overlay_id >= MAX_OVERLAYS || request_id == NULL || round_trip_ms == NULL)
-    {
+    if (conn == NULL)
         return FALSE;
-    }
-
-    MqttAppControlPingState *state = &app_control_ping_state[overlay_id];
-    if (!state->valid)
-    {
-        return FALSE;
-    }
-
-    uint32_t elapsed_ms = (uint32_t)(osGetSystemTime() - state->sent_at);
-    if (elapsed_ms > MQTT_APP_CONTROL_REPLY_WINDOW_SEC *
-                         MQTT_MILLISECONDS_PER_SECOND)
-    {
-        state->valid = FALSE;
-        return FALSE;
-    }
-    if (osStrcmp(state->request_id, request_id) != 0)
-    {
-        return FALSE;
-    }
-
-    *round_trip_ms = elapsed_ms;
-    state->valid = FALSE;
-    return TRUE;
+    mutex_lock(MUTEX_MQTT_APP_CONTROL);
+    bool_t matched = mqtt_app_control_match_pong(&conn->app_control, request_id,
+                                                 osGetSystemTime(), round_trip_ms);
+    TRACE_DEBUG("MQTT pong correlation=%s box=%s\r\n", matched ? "exact_pong" :
+        conn->app_control.ping.ambiguous ? "ambiguous" : "unmatched",
+        mqtt_connection_common_name(conn));
+    mutex_unlock(MUTEX_MQTT_APP_CONTROL);
+    return matched;
 }
 
 static error_t handle_mqtt_publish_app_reply_pong(MqttClientConnection *conn, MqttMessageType type, const char *topic,
@@ -3036,13 +2989,12 @@ static error_t handle_mqtt_publish_app_reply_pong(MqttClientConnection *conn, Mq
     }
 
     uint32_t round_trip_ms = 0;
-    bool_t round_trip_ms_valid = mqtt_match_app_control_ping(conn->client_ctx.settings->internal.overlayNumber,
-                                                             request_id->valuestring, &round_trip_ms);
+    bool_t round_trip_ms_valid = mqtt_match_app_control_ping(conn, request_id->valuestring, &round_trip_ms);
+    tbs_toniebox2_pong(&conn->client_ctx, request_id->valuestring, round_trip_ms_valid, round_trip_ms);
     if (round_trip_ms_valid)
     {
         conn->observer_local_reply_matched = TRUE;
     }
-    tbs_toniebox2_pong(&conn->client_ctx, request_id->valuestring, round_trip_ms_valid, round_trip_ms);
     TRACE_INFO("MQTT pong for %s overlay=%u requestId=%s roundTripMs=%s%u\r\n",
                conn->client_ctx.settings->commonName,
                (unsigned)conn->client_ctx.settings->internal.overlayNumber,
@@ -3339,6 +3291,27 @@ static void mqtt_passthrough_publish_completed(void *context, bool_t box_to_upst
     const char *topic, const uint8_t *payload, size_t payload_len)
 {
     MqttClientConnection *conn = context;
+    if (!box_to_upstream && conn != NULL)
+    {
+        static const char *commands[] = {"ping", "stl", "sleep"};
+        for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
+        {
+            char suffix[48];
+            osSnprintf(suffix, sizeof(suffix), "/app-control/%s", commands[i]);
+            if (!mqtt_settings_topic_matches(conn, topic, suffix))
+                continue;
+            cJSON *json = payload_len <= MQTT_MAX_PACKET_SIZE ?
+                cJSON_ParseWithLength((const char *)payload, payload_len) : NULL;
+            mutex_lock(MUTEX_MQTT_APP_CONTROL);
+            mqtt_app_control_cloud_delivered(&conn->app_control, commands[i], json,
+                                              osGetSystemTime());
+            mutex_unlock(MUTEX_MQTT_APP_CONTROL);
+            cJSON_Delete(json);
+            TRACE_DEBUG("MQTT cloud app-control/%s delivered box=%s; reply correlation updated\r\n",
+                        commands[i], mqtt_connection_common_name(conn));
+            return;
+        }
+    }
     if (box_to_upstream || !mqtt_settings_topic_matches(conn, topic, "/settings/desired"))
         return;
     settings_t *settings = conn->client_ctx.settings;
@@ -3553,6 +3526,9 @@ void mqtt_server_task()
         MqttClientConnection *conn = &connections[i];
         if (conn->active)
         {
+            mutex_lock(MUTEX_MQTT_APP_CONTROL);
+            mqtt_app_control_expire(&conn->app_control, osGetSystemTime());
+            mutex_unlock(MUTEX_MQTT_APP_CONTROL);
             if (conn->box_connection && conn->client_ctx.settings != NULL)
                 mqtt_update_settings_authority(conn);
             if (!conn->established)
@@ -3582,9 +3558,11 @@ void mqtt_server_task()
                                          error == ERROR_END_OF_STREAM ? "completed" :
                                          error == ERROR_WRITE_FAILED ? "capture_or_write_failed" :
                                          "stream_failed";
+                    mutex_lock(MUTEX_MQTT_APP_CONTROL);
                     tb2_mqtt_passthrough_close(conn->passthrough, result, clean);
                     conn->passthrough = NULL;
-                    mqtt_connection_close(conn, result);
+                    mqtt_connection_close_locked(conn, result);
+                    mutex_unlock(MUTEX_MQTT_APP_CONTROL);
                 }
                 else if (conn->active)
                 {
@@ -3830,6 +3808,7 @@ void mqtt_server_task()
 
             if (conn != NULL)
             {
+                mutex_lock(MUTEX_MQTT_APP_CONTROL);
                 osMemset(conn, 0, sizeof(MqttClientConnection));
                 conn->socket = clientSocket;
                 conn->active = true;
@@ -3844,6 +3823,7 @@ void mqtt_server_task()
                 conn->client_ctx.settingsNoOverlay = conn->client_ctx.settings;
                 conn->client_ctx.state = get_toniebox_state();
                 conn->client_ctx.mqtt_connection = conn;
+                mutex_unlock(MUTEX_MQTT_APP_CONTROL);
 
                 conn->tlsContext = tlsInit();
                 if (conn->tlsContext == NULL)
@@ -3990,25 +3970,59 @@ void mqtt_server_mark_toniebox2_settings_changed(uint8_t overlay_id)
     mqtt_server_mark_toniebox2_setting_changed(overlay_id, NULL);
 }
 
-static void mqtt_record_app_control_stl(uint8_t overlay_id, const char *payload)
+static mqtt_control_availability_t mqtt_connection_control_availability(
+    MqttClientConnection *conn, settings_t *settings, const char *command)
 {
-    if (overlay_id >= MAX_OVERLAYS || payload == NULL)
-    {
-        return;
-    }
-
-    MqttAppControlStlState *state = &app_control_stl_state[overlay_id];
-    state->valid = TRUE;
-    state->sent_at = (uint32_t)time(NULL);
-    state->sequence++;
-    if (state->sequence == 0)
-    {
-        state->sequence = 1;
-    }
-    state->payload_hash = mqtt_payload_hash(payload);
+    char topic[128];
+    if (!mqtt_connection_matches_box_overlay(conn, settings))
+        return MQTT_CONTROL_OFFLINE;
+    if (!mqtt_app_control_topic(conn, command, topic, sizeof(topic)) ||
+        !mqtt_connection_has_sub(conn, topic))
+        return MQTT_CONTROL_NOT_SUBSCRIBED;
+    return mqtt_connection_local_control_allowed(conn, topic) ?
+        MQTT_CONTROL_ALLOWED : MQTT_CONTROL_CLOUD_CONTROLLED;
 }
 
-static bool_t mqtt_server_publish_app_control_for_overlay(uint8_t overlay_id, const char *command, const char *payload_json, bool_t record_stl)
+static mqtt_control_availability_t mqtt_control_availability_locked(
+    settings_t *settings, const char *command)
+{
+    mqtt_control_availability_t result = MQTT_CONTROL_OFFLINE;
+    if (!mqtt_is_toniebox2_overlay(settings) || command == NULL)
+        return result;
+    for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
+    {
+        mqtt_control_availability_t current = mqtt_connection_control_availability(
+            &connections[i], settings, command);
+        if (current == MQTT_CONTROL_ALLOWED)
+            return current;
+        // A subscribed but cloud-owned connection is more specific than an
+        // unrelated offline/unsubscribed slot. Any eligible connection wins.
+        if (current > result)
+            result = current;
+    }
+    return result;
+}
+
+mqtt_control_availability_t mqtt_server_control_availability(uint8_t overlay_id, const char *command)
+{
+    mutex_lock(MUTEX_MQTT_APP_CONTROL);
+    mqtt_control_availability_t result = mqtt_control_availability_locked(get_settings_id(overlay_id), command);
+    mutex_unlock(MUTEX_MQTT_APP_CONTROL);
+    return result;
+}
+
+const char *mqtt_server_control_reason(mqtt_control_availability_t availability)
+{
+    switch (availability)
+    {
+    case MQTT_CONTROL_OFFLINE: return "offline";
+    case MQTT_CONTROL_NOT_SUBSCRIBED: return "not_subscribed";
+    case MQTT_CONTROL_CLOUD_CONTROLLED: return "cloud_controlled";
+    default: return NULL;
+    }
+}
+
+static bool_t mqtt_server_publish_app_control_for_overlay(uint8_t overlay_id, const char *command, const char *payload_json)
 {
     settings_t *settings = get_settings_id(overlay_id);
     if (!mqtt_is_toniebox2_overlay(settings))
@@ -4020,35 +4034,47 @@ static bool_t mqtt_server_publish_app_control_for_overlay(uint8_t overlay_id, co
         return FALSE;
     }
 
+    cJSON *payload = cJSON_Parse(payload_json);
+    if (payload == NULL)
+        return FALSE;
+    mutex_lock(MUTEX_MQTT_APP_CONTROL);
     bool_t published = FALSE;
+    mqtt_control_availability_t availability = mqtt_control_availability_locked(settings, command);
     for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
     {
         MqttClientConnection *conn = &connections[i];
         char topic[128];
-        if (mqtt_connection_matches_box_overlay(conn, settings) &&
-            mqtt_app_control_topic(conn, command, topic, sizeof(topic)) &&
-            mqtt_connection_has_sub(conn, topic))
+        if (mqtt_connection_control_availability(conn, settings, command) == MQTT_CONTROL_ALLOWED &&
+            mqtt_app_control_topic(conn, command, topic, sizeof(topic)))
         {
-            if (mqtt_connection_local_control_allowed(conn) &&
-                mqtt_connection_publish(conn, topic, payload_json,
-                                        "local_app_control"))
+            uint16_t packet_id = 0;
+            if (mqtt_connection_publish_packet_internal(conn, topic, payload_json,
+                    0, FALSE, &packet_id, "local_app_control", TRUE))
             {
                 published = TRUE;
+                // Replies and close wait for this successful-write commit.
+                if (osStrcmp(command, "stl") == 0)
+                    mqtt_app_control_local_stl_sent(&conn->app_control, payload, osGetSystemTime());
+                else if (osStrcmp(command, "ping") == 0)
+                {
+                    cJSON *request_id = cJSON_GetObjectItemCaseSensitive(payload, "requestId");
+                    mqtt_app_control_local_ping_sent(&conn->app_control,
+                        cJSON_GetStringValue(request_id), osGetSystemTime());
+                }
             }
         }
     }
+    mutex_unlock(MUTEX_MQTT_APP_CONTROL);
+    cJSON_Delete(payload);
 
     if (published)
     {
-        if (record_stl)
-        {
-            mqtt_record_app_control_stl(settings->internal.overlayNumber, payload_json);
-        }
         TRACE_INFO("MQTT app-control/%s sent for %s\r\n", command, settings->commonName);
     }
     else
     {
-        TRACE_INFO("MQTT app-control/%s not sent for %s, no subscribed box connection active\r\n", command, settings->commonName);
+        TRACE_INFO("MQTT app-control/%s not sent for %s reason=%s\r\n", command, settings->commonName,
+                   availability == MQTT_CONTROL_ALLOWED ? "write_failed" : mqtt_server_control_reason(availability));
     }
 
     return published;
@@ -4056,26 +4082,7 @@ static bool_t mqtt_server_publish_app_control_for_overlay(uint8_t overlay_id, co
 
 static bool_t mqtt_server_has_app_control_subscription(uint8_t overlay_id, const char *command)
 {
-    settings_t *settings = get_settings_id(overlay_id);
-    if (!mqtt_is_toniebox2_overlay(settings))
-    {
-        return FALSE;
-    }
-
-    for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
-    {
-        MqttClientConnection *conn = &connections[i];
-        char topic[128];
-        if (mqtt_connection_matches_box_overlay(conn, settings) &&
-            mqtt_connection_local_control_allowed(conn) &&
-            mqtt_app_control_topic(conn, command, topic, sizeof(topic)) &&
-            mqtt_connection_has_sub(conn, topic))
-        {
-            return TRUE;
-        }
-    }
-
-    return FALSE;
+    return mqtt_server_control_availability(overlay_id, command) == MQTT_CONTROL_ALLOWED;
 }
 
 bool_t mqtt_server_has_playback_control(uint8_t overlay_id)
@@ -4152,7 +4159,7 @@ bool_t mqtt_server_publish_playback_for_overlay(uint8_t overlay_id, mqtt_server_
 
     char payload[48];
     osSnprintf(payload, sizeof(payload), "{\"action\":\"%s\"}", action_name);
-    bool_t published = mqtt_server_publish_app_control_for_overlay(overlay_id, "playback", payload, FALSE);
+    bool_t published = mqtt_server_publish_app_control_for_overlay(overlay_id, "playback", payload);
     if (published && action == MQTT_SERVER_PLAYBACK_PAUSE)
     {
         mqtt_server_record_playback_command_state(overlay_id, TBS_TB2_PLAYBACK_STATUS_PAUSED);
@@ -4175,7 +4182,7 @@ bool_t mqtt_server_publish_playback_position_for_overlay(uint8_t overlay_id, uin
     osSnprintf(payload, sizeof(payload),
                "{\"action\":\"setPosition\",\"chapter\":%" PRIu32 ",\"ms\":%" PRIu32 "}",
                chapter, position_ms);
-    return mqtt_server_publish_app_control_for_overlay(overlay_id, "playback", payload, FALSE);
+    return mqtt_server_publish_app_control_for_overlay(overlay_id, "playback", payload);
 }
 
 bool_t mqtt_server_publish_volume_for_overlay(uint8_t overlay_id, uint32_t level)
@@ -4187,7 +4194,7 @@ bool_t mqtt_server_publish_volume_for_overlay(uint8_t overlay_id, uint32_t level
 
     char payload[32];
     osSnprintf(payload, sizeof(payload), "{\"level\":%" PRIu32 "}", level);
-    return mqtt_server_publish_app_control_for_overlay(overlay_id, "volume", payload, FALSE);
+    return mqtt_server_publish_app_control_for_overlay(overlay_id, "volume", payload);
 }
 
 bool_t mqtt_server_publish_ping_for_overlay(uint8_t overlay_id, char *request_id, size_t request_id_size)
@@ -4197,38 +4204,36 @@ bool_t mqtt_server_publish_ping_for_overlay(uint8_t overlay_id, char *request_id
         return FALSE;
     }
 
-    MqttAppControlPingState *state = &app_control_ping_state[overlay_id];
-    uint32_t sequence = state->sequence + 1;
-    if (sequence == 0)
+    mutex_lock(MUTEX_MQTT_APP_CONTROL);
+    if (app_control_ping_sequence == UINT64_MAX)
     {
-        sequence = 1;
+        mutex_unlock(MUTEX_MQTT_APP_CONTROL);
+        request_id[0] = '\0';
+        return FALSE;
     }
+    uint64_t sequence = ++app_control_ping_sequence;
+    mutex_unlock(MUTEX_MQTT_APP_CONTROL);
 
-    osSnprintf(request_id, request_id_size, "teddycloud-%" PRIu32, sequence);
+    osSnprintf(request_id, request_id_size, "teddycloud-%" PRIu64, sequence);
     char payload[96];
     osSnprintf(payload, sizeof(payload), "{\"requestId\":\"%s\"}", request_id);
-    if (!mqtt_server_publish_app_control_for_overlay(overlay_id, "ping", payload, FALSE))
+    if (!mqtt_server_publish_app_control_for_overlay(overlay_id, "ping", payload))
     {
         request_id[0] = '\0';
         return FALSE;
     }
 
-    state->valid = TRUE;
-    state->sequence = sequence;
-    state->sent_at = osGetSystemTime();
-    osStrncpy(state->request_id, request_id, sizeof(state->request_id) - 1);
-    state->request_id[sizeof(state->request_id) - 1] = '\0';
     return TRUE;
 }
 
 bool_t mqtt_server_publish_app_control_stl_for_overlay(uint8_t overlay_id, const char *payload_json)
 {
-    return mqtt_server_publish_app_control_for_overlay(overlay_id, "stl", payload_json, TRUE);
+    return mqtt_server_publish_app_control_for_overlay(overlay_id, "stl", payload_json);
 }
 
 bool_t mqtt_server_publish_app_control_sleep_for_overlay(uint8_t overlay_id)
 {
-    return mqtt_server_publish_app_control_for_overlay(overlay_id, "sleep", "{}", FALSE);
+    return mqtt_server_publish_app_control_for_overlay(overlay_id, "sleep", "{}");
 }
 
 static void mqtt_uid_to_ruid(uint64_t uid, char ruid[17])

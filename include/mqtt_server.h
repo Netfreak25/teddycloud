@@ -12,6 +12,18 @@ typedef enum
     MQTT_SERVER_PLAYBACK_RESTART,
 } mqtt_server_playback_action_t;
 
+typedef enum
+{
+    MQTT_CONTROL_ALLOWED,
+    MQTT_CONTROL_OFFLINE,
+    MQTT_CONTROL_NOT_SUBSCRIBED,
+    MQTT_CONTROL_CLOUD_CONTROLLED,
+} mqtt_control_availability_t;
+
+/** Same effective command policy used by capabilities and actual senders. */
+mqtt_control_availability_t mqtt_server_control_availability(uint8_t overlay_id, const char *command);
+const char *mqtt_server_control_reason(mqtt_control_availability_t availability);
+
 void mqtt_server_init();
 error_t mqtt_server_reload_certificate();
 void mqtt_server_task();

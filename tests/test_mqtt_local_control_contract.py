@@ -13,6 +13,8 @@ class MqttLocalControlContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.server = (ROOT / "src/mqtt_server.c").read_text(encoding="utf-8")
+        cls.app_control = (ROOT / "src/mqtt_app_control.c").read_text(encoding="utf-8")
+        cls.app_control_header = (ROOT / "include/mqtt_app_control.h").read_text(encoding="utf-8")
         cls.proxy = (ROOT / "src/tb2_mqtt_passthrough.c").read_text(encoding="utf-8")
         cls.settings = (ROOT / "src/settings.c").read_text(encoding="utf-8")
         cls.handler_cloud = (ROOT / "src/handler_cloud.c").read_text(encoding="utf-8")
@@ -71,7 +73,10 @@ class MqttLocalControlContractTests(unittest.TestCase):
             "conn->client_ctx.settings->mqtt_client_upstream.local_control_enabled",
             gate,
         )
-        self.assertIn("mqtt_connection_local_control_allowed(conn)", self.server)
+        self.assertIn("!tb2_mqtt_passthrough_is_enabled()", gate)
+        self.assertIn("MQTT_FORWARD_ROUTE_TONIES_TO_BOX", gate)
+        self.assertIn("decision.action == MQTT_FORWARD_ACTION_BLOCK", gate)
+        self.assertIn("mqtt_connection_local_control_allowed(conn, topic)", self.server)
 
     def test_local_settings_and_controls_use_capture_actions(self):
         self.assertIn('"local_settings_desired"', self.server)
@@ -132,21 +137,57 @@ class MqttLocalControlContractTests(unittest.TestCase):
 
     def test_only_correlated_app_replies_are_consumed(self):
         self.assertIn("mqtt_match_app_control_ping", self.server)
-        self.assertIn("MQTT_APP_CONTROL_REPLY_WINDOW_SEC", self.server)
+        self.assertIn("MQTT_APP_CONTROL_REPLY_WINDOW_MS 30000U", self.app_control_header)
         self.assertIn("observer_local_reply_matched = TRUE", self.server)
         self.assertIn('"local_control.app_reply"', self.server)
         self.assertIn("does not match a local pending action", self.server)
 
     def test_app_control_pending_markers_expire(self):
-        self.assertIn(
-            "elapsed_ms > MQTT_APP_CONTROL_REPLY_WINDOW_SEC *",
-            self.server,
-        )
-        self.assertIn("last_stl->valid = FALSE;", self.server)
+        self.assertIn("(uint32_t)(now - sent_at) > MQTT_APP_CONTROL_REPLY_WINDOW_MS", self.app_control)
+        self.assertIn("mqtt_app_control_expire(state, now)", self.app_control)
+        self.assertIn("mqtt_app_control_reset(&conn->app_control)", self.server)
+        self.assertNotIn("app_control_ping_state[MAX_OVERLAYS]", self.server)
+        self.assertNotIn("app_control_stl_state[MAX_OVERLAYS]", self.server)
+
+    def test_send_commit_and_close_share_app_control_lock(self):
+        publisher = self.server[
+            self.server.index("static bool_t mqtt_server_publish_app_control_for_overlay"):
+            self.server.index("static bool_t mqtt_server_has_app_control_subscription")
+        ]
+        self.assertLess(publisher.index("mutex_lock(MUTEX_MQTT_APP_CONTROL)"),
+                        publisher.index("mqtt_connection_publish_packet_internal("))
+        self.assertLess(publisher.index("mqtt_connection_publish_packet_internal("),
+                        publisher.index("mqtt_app_control_local_ping_sent("))
+        self.assertLess(publisher.index("mqtt_app_control_local_stl_sent("),
+                        publisher.index("mutex_unlock(MUTEX_MQTT_APP_CONTROL)"))
+        writer = self.server[
+            self.server.index("static bool_t mqtt_connection_publish_packet_internal"):
+            self.server.index("static bool_t mqtt_connection_publish_packet(")
+        ]
+        self.assertIn('if (app_control_locked)\n            mqtt_connection_close_locked(conn, "publish write failed");', writer)
+        self.assertIn("mqtt_connection_close_locked(conn, reason)", self.server)
+        self.assertIn("mutex_lock(MUTEX_MQTT_APP_CONTROL);\n                    tb2_mqtt_passthrough_close", self.server)
+
+    def test_cloud_commands_only_affect_correlation_after_successful_delivery(self):
+        complete = self.server[
+            self.server.index("static void mqtt_passthrough_publish_completed"):
+            self.server.index("static error_t mqtt_passthrough_observe_publish")
+        ]
+        self.assertIn("if (!box_to_upstream && conn != NULL)", complete)
+        self.assertIn("mqtt_settings_topic_matches(conn, topic, suffix)", complete)
+        self.assertIn("mqtt_app_control_cloud_delivered", complete)
+        self.assertNotIn("mqtt_connection_publish(", complete)
+        self.assertIn('commands[] = {"ping", "stl", "sleep"}', complete)
+        bedtime = self.server[
+            self.server.index("static error_t handle_mqtt_publish_app_reply_bedtime_state"):
+            self.server.index("static error_t handle_mqtt_publish_metrics_battery")
+        ]
+        self.assertLess(bedtime.index("tbs_toniebox2_bedtime_state_changed"),
+                        bedtime.index("mqtt_app_control_match_bedtime"))
 
     def test_app_control_accepts_matching_wildcard_subscriptions(self):
         publisher = self.server[
-            self.server.index("static bool_t mqtt_server_publish_app_control_for_overlay") :
+            self.server.index("static mqtt_control_availability_t mqtt_connection_control_availability") :
             self.server.index("bool_t mqtt_server_has_playback_control")
         ]
         self.assertIn("mqtt_connection_has_sub(conn, topic)", publisher)
@@ -246,15 +287,15 @@ class MqttLocalControlContractTests(unittest.TestCase):
             self.server,
         )
         self.assertIn(
-            'mqtt_server_publish_app_control_for_overlay(overlay_id, "sleep", "{}", FALSE)',
+            'mqtt_server_publish_app_control_for_overlay(overlay_id, "sleep", "{}")',
             self.server,
         )
         self.assertIn(
-            'cJSON_AddBoolToObject(controls, "bedtime", mqtt_server_has_bedtime_control(overlay_id))',
+            'api_add_toniebox_control(controls, control_reasons, overlay_id, "bedtime", "stl")',
             self.handler_api,
         )
         self.assertIn(
-            'cJSON_AddBoolToObject(controls, "sleep", mqtt_server_has_sleep_control(overlay_id))',
+            'api_add_toniebox_control(controls, control_reasons, overlay_id, "sleep", "sleep")',
             self.handler_api,
         )
 
@@ -379,8 +420,8 @@ class MqttLocalControlContractTests(unittest.TestCase):
         ]
 
         self.assertIn("json->child != NULL", shutdown)
-        self.assertIn("mqtt_server_has_sleep_control", shutdown)
-        self.assertIn("mqtt_server_has_bedtime_control", shutdown)
+        self.assertIn('mqtt_server_control_availability(overlay_id, "sleep")', shutdown)
+        self.assertIn('mqtt_server_control_availability(overlay_id, "stl")', shutdown)
         self.assertIn("API_TB2_BEDTIME_DURATION_MIN", shutdown)
         self.assertIn('{\\"state\\":\\"on\\",\\"duration\\":%u}', shutdown)
         self.assertIn("mqtt_server_publish_app_control_sleep_for_overlay", shutdown)

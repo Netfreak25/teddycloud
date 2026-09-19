@@ -1861,7 +1861,7 @@
             },
             "mqtt_client_upstream__local_control_enabled": {
                 "label": "Autoriser le contrôle TeddyCloud pendant l'upstream ICI",
-                "description": "Autoriser TeddyCloud à envoyer des réglages TB2 et des commandes d'application locales lorsque le proxy ICI est actif"
+                "description": "Autoriser des commandes locales supplémentaires de l'application même lorsque les commandes cloud correspondantes sont autorisées. Les réglages persistants de la TB2 gérés par TONIES restent verrouillés localement."
             },
             "mqtt_client_upstream__port": {
                 "label": "Port du serveur MQTT",
@@ -2885,6 +2885,11 @@
             "chapters": "Chapitres",
             "commandFailed": "Échec de la commande Toniebox",
             "commandFailedDetails": "La commande n'a pas pu être envoyée",
+            "controlReasons": {
+                "cloud_controlled": "Cette commande est gérée par TONIES. Autorisez des commandes locales supplémentaires de l'application ou désactivez le transfert de cette commande cloud.",
+                "offline": "La Toniebox n'est pas connectée à TeddyCloud.",
+                "not_subscribed": "La Toniebox ne s'est pas encore abonnée à ce canal de commande."
+            },
             "customContent": "Contenu personnalisé",
             "editPlaylist": "Modifier",
             "playlistTypes": {

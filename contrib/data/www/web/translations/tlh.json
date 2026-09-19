@@ -297,7 +297,7 @@
             },
             "mqtt_client_upstream__local_control_enabled": {
                 "label": "ICI labtaHvIS TeddyCloud SeH chaw'",
-                "description": "ICI proxy QaptaHvIS TB2 DuHmey app SeH je ngeH TeddyCloud"
+                "description": "SeHlaH TONIES; SeHlaH je TeddyCloud 'e' chaw'. TB2 DuHmey SeHtaHchugh TONIES, DuHmeyvam choHlaHbe' TeddyCloud."
             },
             "mqtt_server__enabled": {
                 "label": "MQTT De'wI' QotlhHa'"
@@ -359,6 +359,11 @@
             "chapterDuration": "poH {{time}}",
             "chapterTitle": "'ay' {{number}} pong",
             "chapters": "'ay'mey",
+            "controlReasons": {
+                "cloud_controlled": "SeHtaH TONIES. SeHlaH je TeddyCloud 'e' yIchaw' pagh Cloud SeH QumwI' yIchu'Ha'.",
+                "offline": "TeddyCloud rarbe' Toniebox.",
+                "not_subscribed": "SeH QumwI'vam Hevbe'taH Toniebox."
+            },
             "customContent": "De' le'",
             "editPlaylist": "choH",
             "minutes": "tup",

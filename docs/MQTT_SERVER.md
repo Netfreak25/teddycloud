@@ -42,7 +42,7 @@ packet-aware TB2 ICI upstream MITM:
 | Setting | Default | Purpose |
 |---------|---------|---------|
 | `mqtt_client_upstream.enabled` | `false` | Enables packet-aware upstream forwarding, observation, filtering and capture as one global mode. |
-| `mqtt_client_upstream.local_control_enabled` | `false` | Allows local `app-control/*` publishes while the proxy is active. Permanent device settings use the separate ownership rules below. The value can be overridden per TB2 overlay. |
+| `mqtt_client_upstream.local_control_enabled` | `false` | Allows local `app-control/*` publishes alongside permitted TONIES commands. A command blocked at the Internet boundary remains locally usable without this exception. Permanent device settings use the separate ownership rules below. The value can be overridden per TB2 overlay. |
 | `mqtt_client_upstream.port` | `8883` | Tonies ICI upstream MQTT port. |
 | `mqtt_client_upstream.hostname` | `ici.tonie.cloud` | Tonies ICI upstream hostname. |
 | `mqtt_client_upstream.capture_dir` | `data/diagnostics/tb2-mqtt-passthrough` | Local session capture directory. |
@@ -196,9 +196,10 @@ processes claims and the passive status paths for settings confirms, setup,
 battery/events/fleet/headphones metrics, playback, volume, and existing
 app-reply status handlers even when the publish is suppressed. A direct local
 MQTT connection retains the normal local-control behavior. On a proxy
-connection, local app controls are permitted only when the
-effective global or overlay value of
-`mqtt_client_upstream.local_control_enabled` is true. Permanent device settings
+connection, permission is evaluated separately for each `app-control/*` topic:
+a command blocked from TONIES remains locally usable, while a command permitted
+from TONIES additionally requires the effective global or overlay value of
+`mqtt_client_upstream.local_control_enabled` for local use. Permanent device settings
 are controlled by effective Desired forwarding, not this exception switch.
 Local `fresh-tonies` delivery is independent of both settings decisions.
 
@@ -206,9 +207,10 @@ Matching responses to local proxy commands are handled before the automatic
 NoCloud/payload protection and manual forwarding filters. Matching local
 `settings/confirm` revisions are removed from the payload; an entirely local
 confirm is consumed, while unknown or cloud-owned fields are rebuilt and sent
-to TONIES. A `pong` is local only when its `requestId` exactly matches the last
-local ping. A `bedtime-state` reply is local only while a local STL command is
-pending and within the 30-second correlation window. Alarm replies and all
+to TONIES. A `pong` is local only when its `requestId` exactly matches the
+unexpired local ping on that connection. A `bedtime-state` reply also needs a
+matching pending STL operation, not just a nearby timestamp. Both use a
+30-second correlation window; details and ambiguity handling are below. Alarm replies and all
 unmatched, invalid or stale responses remain transparent. Correlations that
 were already pending continue to be consumed after the switch is disabled and
 are discarded when the MQTT connection ends. Cloud commands are not executed
@@ -365,7 +367,7 @@ The implementation currently has these fixed limits:
 | `MQTT_CONNECTION_ESTABLISH_TIMEOUT_MS` | `15000` | Maximum time from TCP accept to completed MQTT CONNECT/CONNACK or transparent initial forwarding. |
 | `MQTT_SETTINGS_DESIRED_MAX_ATTEMPTS` | `3` | Maximum pending settings publishes before waiting for confirm. |
 | `MQTT_SETTINGS_DESIRED_RETRY_INTERVAL_SEC` | `5` | Retry interval for pending settings publishes. |
-| `MQTT_APP_CONTROL_REPLY_WINDOW_SEC` | `30` | Time window used to correlate an `app-control/stl` publish with a later bedtime-state reply. |
+| `MQTT_APP_CONTROL_REPLY_WINDOW_MS` | `30000` | Monotonic time window for connection-local ping and STL reply correlation. |
 
 ## Connection Mapping
 
@@ -683,9 +685,9 @@ or TLS write errors close the connection while preserving that pending state.
 
 ### Outgoing `app-control/*`
 
-The internal server has experimental support for selected TB2 app-control
-commands. This is implemented only in `src/mqtt_server.c`; it is not part of
-the external MQTT client in `src/mqtt.c`.
+The internal server supports selected TB2 app-control commands through
+`src/mqtt_server.c`, with the bounded reply matcher in `src/mqtt_app_control.c`.
+This is not part of the external MQTT client in `src/mqtt.c`.
 
 Observed box subscriptions:
 
@@ -715,14 +717,29 @@ overlay/common name and whose subscriptions match the target topic using normal
 MQTT wildcard semantics. Topic-name mapping alone is not enough for these
 commands.
 
-With an active proxy, the effective
-`mqtt_client_upstream.local_control_enabled` value must additionally be true.
-Every local proxy publish passes through the packet-aware writer so QoS-0
-controls are captured as `local_app_control`. Disabling the switch prevents new
-commands but does not invalidate an already pending ping or STL correlation;
-its matching reply is still consumed until the 30-second correlation window
-expires. Expired markers are cleared and unmatched replies continue to TONIES
-unchanged.
+Permissions are calculated per command from the existing Internet filter,
+using the actual TONIES-to-box route rather than the reply or status topic:
+
+| Connection and forwarding decision | Local command |
+|------------------------------------|---------------|
+| Direct TeddyCloud MQTT connection, without an active ICI proxy | Allowed. |
+| Active ICI proxy; this command is blocked from TONIES | Allowed without the local-control exception. |
+| Active ICI proxy; this command is allowed from TONIES | Requires effective `mqtt_client_upstream.local_control_enabled=true`. |
+
+The manual filter master being off bypasses individual rules: cloud commands
+are then allowed and local commands require the exception. Effective global
+values and box overrides are read for every decision, so changes apply without
+reconnecting. An active, correctly mapped connection and matching subscription
+remain mandatory. Permanent Settings ownership is not changed by this policy.
+
+Every permitted local publish goes directly to the box through the packet-aware
+writer, never to TONIES, and QoS-0 controls remain captured as `local_app_control`.
+The policy does not suppress permitted TONIES commands when the local exception
+is enabled. Disabling a permission prevents new local sends but does not discard
+already sent ping/STL correlations before their 30-second deadline. Connection
+closure does discard them. Playback and volume reports still undergo ordinary
+local status processing followed by NoCloud and manual forwarding filters; they
+are not consumed as command acknowledgements.
 
 The confirmed playback payloads are generated only by the server. Resume/play
 uses `{"action":"start"}`; `{"action":"play"}` is never sent. Chapter numbers
@@ -742,6 +759,15 @@ subscription capabilities, semantic playback/volume/battery/headphone/bedtime
 state, pong correlation data and bounded setup/event/fleet/alarm diagnostic
 snapshots. Every semantic state carries `valid` and `updatedAt`; invalid MQTT
 payloads do not overwrite the previous valid state.
+
+`runtime.controls` remains the authoritative set of booleans for playback,
+volume, ping, bedtime and sleep. Optional `runtime.controlReasons` explains a
+denied control with `cloud_controlled`, `offline` or `not_subscribed`; allowed
+controls do not need a reason. The HTTP command preflight and final MQTT sender
+use the same policy, so WebUI availability is not an independent permission
+calculation. Older clients can ignore the additive reasons. The WebUI retains
+its previous generic explanation when a backend omits a reason or returns an
+unknown one.
 
 The validated command endpoints are:
 
@@ -781,7 +807,13 @@ protocol range for alarm volume or a list of tone IDs. The WebUI uses 0 through
 box into its sleep state.
 
 Invalid input returns `400`, an unknown overlay returns `404`, and a non-TB2,
-offline or not-subscribed box returns `409`.
+offline, not-subscribed or cloud-controlled box command returns `409`. The error
+message distinguishes these denials from a failed local publish without changing
+the endpoint or command payload format. A shutdown checks sleep and, only when
+bedtime first needs enabling, STL permission before its first publish; it does
+not bypass either command's policy. If only the initial STL publish succeeds,
+the error reports that partial send rather than claiming shutdown succeeded.
+Successful sends do not by themselves prove that the box applied the command.
 
 TB2 volume control uses twelve discrete levels and has no mute level. The
 server preserves the reported or requested level unchanged across the HTTP API,
@@ -825,12 +857,14 @@ metadata only when the current playback rUID changes. The existing
 `internal.last_ruid`/`internal.last_ruid_time` Last Played state remains visible
 after stop, `tonie:null` and offline transitions, while Now Playing becomes
 inactive. Playback and chapter selection are disabled when the box is offline,
-the exact capability is absent, or a running proxy does not permit local
-control. Volume uses the same availability gates, but remains usable with the
+the exact capability is absent, or this command is cloud-controlled without a
+local exception. The backend-provided reason explains the disabled control.
+Volume uses the same availability gates, but remains usable with the
 unconfirmed level 2 fallback so an absolute command can resynchronize the box.
 The ten permanent device settings are independently locked by TONIES ownership;
-cache/library settings remain editable subject to their own dependencies. Bedtime state is
-shown, but its control stays disabled until the STL schema is confirmed.
+cache/library settings remain editable subject to their own dependencies.
+Bedtime and sleep controls use their respective backend capabilities; shutdown
+also checks the bedtime capability when that first step is required.
 
 Observed reply channel:
 
@@ -852,10 +886,43 @@ preceded by a local `app-control/stl` command. Parsed values are emitted through
 the existing box-event path as `BedtimeState`, `BedtimeDuration`,
 `BedtimeDefaultDuration` and `BedtimeUntil`.
 
-For `app-control/stl`, the server keeps only a local timestamp, sequence number
-and payload hash. Replies are logged as matched when they arrive within the
-configured correlation window. No sequence or correlation field is injected into
-the MQTT payload.
+Reply correlation keeps one pending ping and one pending STL operation per
+MQTT connection. Entries are created only after a successful local write,
+expire after 30 seconds of monotonic time and are discarded on connection close.
+A new ping replaces the previous ping; a matching pong consumes its entry once.
+A delivered TONIES ping using the same `requestId` makes that correlation
+ambiguous, so its reply is not locally consumed.
+
+STL has no confirmed request ID. Only a simple local command containing
+`state` and optionally `duration` is eligible for the conservative matcher.
+The reply must contain only an `stl` object, with no duplicate or unknown fields;
+its allowed fields are `state`, `duration`, `defaultDuration` and `until`.
+`on` and `active` describe the same enabled state. An enabled reply must match
+the requested integer duration exactly; an off reply must match an off command.
+Extended commands, for example those containing an alarm, do not gain an
+invented confirmation rule.
+
+Overlapping local STL operations or successfully delivered TONIES STL/sleep
+commands make STL attribution ambiguous within the same window. This also
+applies when a local STL follows a recent cloud operation. Blocked or failed
+cloud sends do not create such conflicts. A local sleep does not erase the
+preceding local STL correlation, because the existing shutdown sequence sends
+both. No new protocol field is injected. Even this constrained match remains a
+heuristic: an indistinguishable unsolicited state announcement cannot be proven
+to originate from the command.
+
+All replies first update the existing local status representation. Exact pong
+and constrained STL matches are then consumed before upstream filters;
+ambiguous, late, extended and unknown replies follow ordinary NoCloud/manual
+filtering, rather than being unconditionally forwarded. Playback/volume state
+and alarm replies are not consumed by this correlation. Diagnostic reasons
+distinguish `exact_pong`, `stl_heuristic` and `ambiguous`, while existing
+`local_control.app_reply` capture filter IDs remain compatible. Original captured
+packets and bounded QoS replay handling are retained.
+
+A dedicated mutex protects the app-control send/correlation/close lifecycle.
+It does not make all TLS operations or the general MQTT relay thread-safe and
+does not add a queue, retry service or offline-autonomous MQTT session.
 
 ### Incoming `playback/state`
 
@@ -977,7 +1044,8 @@ as `BatteryPercent`, `BatteryRaw`, `BatteryCurrent`, `BatteryStatus`,
 | `src/mqtt_server.c` | Certificate-mapped and trusted-topic-mapped active connections update `internal.online` and `internal.last_connection`. |
 | `src/mqtt_server.c` | Subscribe/request/background handlers publish locally owned settings; a sent-connection ledger correlates local confirms. Freshness delivery remains independent. |
 | `src/mqtt_settings.c` | Central ownership, bounded Cloud snapshots, typed projection, strict revisions and confirmation evidence. |
-| `src/mqtt_server.c` | App-control helpers build typed playback, volume and ping commands; experimental `stl` remains raw JSON until its schema is confirmed. Proxy commands obey the effective local-control setting and replies require exact local correlation. |
+| `src/mqtt_app_control.c` | Small connection-local, monotonic 30-second ping/STL correlation with conservative collision handling. The caller records completed sends and serializes access. |
+| `src/mqtt_server.c` | App-control helpers apply per-command Internet ownership and the local exception, publish only to the box, and maintain bounded connection-local reply correlation. Settings ownership and Freshness remain separate. |
 | `src/mqtt_server.c` | `claim`, `app-reply/bedtime-state`, battery/headphone metrics and `playback/state` publishes update semantic TB2 runtime state and box events. `claim/<ruid>` also records Last Played from the topic rUID. |
 
 ## Source Occurrence Map
