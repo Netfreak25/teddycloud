@@ -309,6 +309,18 @@ error_t queryPrepare(const char *queryString, const char **rootPath, char *overl
                 return ERROR_FAILURE;
             }
         }
+        else if (!osStrcmp(special, "plugins"))
+        {
+            /* Use the configured plugin root for the existing file APIs. */
+            *rootPath = settings_get_string_ovl("internal.pluginsdirfull", overlay);
+            if (*rootPath == NULL || (*rootPath)[0] == '\0' || !fsDirExists(*rootPath))
+            {
+                /* Never fall back to the content directory for an invalid plugin root. */
+                TRACE_ERROR("internal.pluginsdirfull not set to a valid path: '%s'\r\n",
+                            *rootPath != NULL ? *rootPath : "(null)");
+                return ERROR_FAILURE;
+            }
+        }
         else if (!osStrcmp(special, "custom_img"))
         {
             const char *wwwDir = settings_get_string_ovl("internal.wwwdirfull", overlay);
@@ -1098,8 +1110,9 @@ error_t handleApiFileIndexV2(HttpConnection *connection, const char_t *uri, cons
     bool_t isNativeCollectionDetail = api_is_native_collection_detail_path(
         nativeCollectionsPath, pathAbsolute);
 
-    /* Fast path for custom_img: skip TAF parsing and content.json - images need only name, date, size, isDir */
-    bool_t isCustomImg = (osStrcmp(special, "custom_img") == 0);
+    /* Images and plugins need basic file info, not audio metadata. */
+    bool_t skipContentMetadata = !osStrcmp(special, "custom_img") ||
+                                !osStrcmp(special, "plugins");
 
     while (true)
     {
@@ -1134,9 +1147,9 @@ error_t handleApiFileIndexV2(HttpConnection *connection, const char_t *uri, cons
         cJSON_AddNumberToObject(jsonEntry, "size", entry.size);
         cJSON_AddBoolToObject(jsonEntry, "isDir", isDir);
 
-        if (isCustomImg)
+        if (skipContentMetadata)
         {
-            /* custom_img: no TAF, no content.json - just basic file info */
+            /* Do not parse TAF data or load content.json for these files. */
             osFreeMem(filePathAbsolute);
             cJSON_AddItemToArray(jsonArray, jsonEntry);
             continue;
