@@ -15,7 +15,6 @@
 #endif
 #define PATH_LEN PATH_MAX
 
-error_t fsCheckFilePath(const char_t *path);
 void fsFixPath(char_t *path);
 FsFile *fsOpenFileEx(const char_t *path, char *mode);
 error_t fsCompareFiles(const char_t *source_path, const char_t *target_path, size_t *diff_position);
