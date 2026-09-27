@@ -1,5 +1,13 @@
+#ifdef _WIN32
+/* Keep Win32 error definitions separate from Cyclone error codes. */
+#define _WINERROR_
+#include <windows.h>
+#endif
 
 #include "fs_ext.h"
+
+#include <sys/stat.h>
+#include "path.h"
 
 #include <errno.h>           // for errno
 #include <stdint.h>          // for uint8_t
@@ -12,6 +20,56 @@
 #include "os_port.h"         // for osStrlen
 
 #define FILE_COPY_BUFFER_SIZE 4096 // You can adjust this buffer size as needed
+
+/* Check one entry without following links; callers must check its parent components too. */
+error_t fsCheckFilePath(const char_t *path)
+{
+#ifdef _WIN32
+    const char_t *filename = pathGetFilename(path);
+    size_t size = osStrlen(filename);
+    size_t stem = strcspn(filename, ".");
+
+    /* Win32 strips trailing dots/spaces and interprets reserved device names. */
+    if (!size || filename[size - 1] == '.' || filename[size - 1] == ' ' ||
+        (stem == 3 && (!osStrncasecmp(filename, "CON", 3) || !osStrncasecmp(filename, "PRN", 3) ||
+                       !osStrncasecmp(filename, "AUX", 3) || !osStrncasecmp(filename, "NUL", 3))) ||
+        (stem == 4 && (!osStrncasecmp(filename, "COM", 3) || !osStrncasecmp(filename, "LPT", 3))))
+        return ERROR_INVALID_PATH;
+
+    /* UTF-8 needs no more UTF-16 units than input bytes; avoid an HTTP-specific buffer limit. */
+    size_t length = osStrlen(path) + 1;
+    WCHAR *wpath = osAllocMem(length * sizeof(WCHAR));
+    if (!wpath)
+        return ERROR_OUT_OF_MEMORY;
+    error_t error = NO_ERROR;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wpath, length))
+        error = ERROR_INVALID_PATH;
+    else
+    {
+        /* Reject reparse points even when the link target does not exist. */
+        DWORD attributes = GetFileAttributesW(wpath);
+        if (attributes == INVALID_FILE_ATTRIBUTES)
+        {
+            struct _stat fileStat;
+            error = _wstat(wpath, &fileStat) && errno == ENOENT ? ERROR_FILE_NOT_FOUND : ERROR_FAILURE;
+        }
+        else if (attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+            error = ERROR_INVALID_PATH;
+    }
+    osFreeMem(wpath);
+    return error;
+#else
+    /* Preserve the difference between a missing leaf and a non-directory parent. */
+    struct stat fileStat;
+    if (lstat(path, &fileStat))
+    {
+        if (errno == ENOENT)
+            return ERROR_FILE_NOT_FOUND;
+        return errno == ENOTDIR ? ERROR_DIRECTORY_NOT_FOUND : ERROR_FAILURE;
+    }
+    return S_ISREG(fileStat.st_mode) || S_ISDIR(fileStat.st_mode) ? NO_ERROR : ERROR_INVALID_PATH;
+#endif
+}
 
 void fsFixPath(char_t *path)
 {
