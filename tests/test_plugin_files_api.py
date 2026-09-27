@@ -221,7 +221,8 @@ class PluginFilesTest(unittest.TestCase):
         self.assertEqual(self.request("POST", "move", body)[0], 500)
         self.assertEqual((self.folder / "source").read_bytes(), b"source")
         self.assertEqual((self.folder / "target").read_bytes(), b"target")
-        self.assertEqual(self.request("POST", "move", body + "&source=/")[0], 400)
+        for extra in ("&source=/", "&target=/", "&overlay=box"):
+            self.assertEqual(self.request("POST", "move", body + extra)[0], 400)
 
     def test_directory_activation_and_recovery(self):
         for name, payload in (("active", b"old"), ("stage", bytes(range(256)))):
@@ -301,18 +302,33 @@ class PluginFilesTest(unittest.TestCase):
         self.assertEqual(list(self.folder.iterdir()), [])
 
     def test_segmented_body(self):
-        body = (self.path + "/segmented").encode()
-        with socket.create_connection(("127.0.0.1", self.server.port), REQUEST_TIMEOUT) as sock:
-            headers = (f"POST {API}/mkdir HTTP/1.1\r\nHost: localhost\r\n"
-                       f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n").encode()
-            sock.sendall(headers + body[:4])
-            time.sleep(0.05)
-            sock.sendall(body[4:])
-            response = http.client.HTTPResponse(sock)
-            response.begin()
-            self.assertEqual(response.status, 200)
-            response.read()
-        self.assertTrue((self.folder / "segmented").is_dir())
+        (self.folder / "file").write_bytes(b"delete-me")
+        for operation, name in (("mkdir", "segmented"), ("delete", "file"), ("rmdir", "segmented")):
+            body = (self.path + "/" + name).encode()
+            with socket.create_connection(("127.0.0.1", self.server.port), REQUEST_TIMEOUT) as sock:
+                headers = (f"POST {API}/{operation} HTTP/1.1\r\nHost: localhost\r\n"
+                           f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n").encode()
+                # Separate TCP writes exercise complete-body handling in all three callers.
+                sock.sendall(headers + body[:4])
+                time.sleep(0.05)
+                sock.sendall(body[4:])
+                response = http.client.HTTPResponse(sock)
+                response.begin()
+                self.assertEqual(response.status, 200)
+                response.read()
+            self.assertEqual((self.folder / name).exists(), operation == "mkdir")
+
+    def test_invalid_path_bodies_do_not_modify_storage(self):
+        (self.folder / "file").write_bytes(b"keep")
+        (self.folder / "directory").mkdir()
+        for operation, name in (("mkdir", "new"), ("delete", "file"), ("rmdir", "directory")):
+            for body in (b"/" + b"x" * 300, (self.path + "/" + name).encode() + b"\x00suffix"):
+                with self.subTest(operation=operation, body_length=len(body)):
+                    self.assertEqual(self.request("POST", operation, body)[0], 400)
+            # A rejected truncated path must not create or remove its valid prefix.
+            self.assertFalse((self.folder / "new").exists())
+            self.assertEqual((self.folder / "file").read_bytes(), b"keep")
+            self.assertTrue((self.folder / "directory").is_dir())
 
     def test_legacy_storage_is_separate(self):
         for selector, folder in (("", "content/default"), ("?special=library", "library")):

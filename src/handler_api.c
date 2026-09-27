@@ -242,6 +242,21 @@ static bool pluginFileParameter(const char *query, const char *key, char *path, 
     return found;
 }
 
+/* Keep legacy reads unchanged while plugin paths require complete, unambiguous bodies. */
+static error_t fileReadPath(HttpConnection *connection, const char *uri, char *path,
+                            size_t pathSize, size_t *size)
+{
+    if (!isPluginFileRequest(uri))
+        return httpReceive(connection, path, pathSize - 3, size, 0x00);
+
+    /* Preserve the existing spare bytes for sanitizePath and reject embedded NULs. */
+    error_t error = parsePostData(connection, path, pathSize - 2);
+    *size = osStrlen(path);
+    if (error != NO_ERROR || *size != connection->request.contentLength)
+        return ERROR_INVALID_REQUEST;
+    return NO_ERROR;
+}
+
 static error_t fileQueryPrepare(const char *uri, const char *queryString, const char **rootPath,
                                char *overlay, size_t overlay_size, settings_t **settings)
 {
@@ -367,15 +382,16 @@ error_t handleApiPluginFiles(HttpConnection *connection, const char_t *uri,
     {
         const char *path;
         const char *method;
+        bool pathQuery;
         error_t (*handler)(HttpConnection *, const char_t *, const char_t *, client_ctx_t *);
     } routes[] = {
-        {PLUGIN_FILES_URI "/index", "GET", handleApiFileIndexV2},
-        {PLUGIN_FILES_URI "/read", "GET", handleApiPluginFileRead},
-        {PLUGIN_FILES_URI "/upload", "POST", handleApiFileUpload},
-        {PLUGIN_FILES_URI "/mkdir", "POST", handleApiDirectoryCreate},
-        {PLUGIN_FILES_URI "/move", "POST", handleApiFileMove},
-        {PLUGIN_FILES_URI "/delete", "POST", handleApiFileDelete},
-        {PLUGIN_FILES_URI "/rmdir", "POST", handleApiDirectoryDelete},
+        {PLUGIN_FILES_URI "/index", "GET", true, handleApiFileIndexV2},
+        {PLUGIN_FILES_URI "/read", "GET", true, handleApiPluginFileRead},
+        {PLUGIN_FILES_URI "/upload", "POST", true, handleApiFileUpload},
+        {PLUGIN_FILES_URI "/mkdir", "POST", false, handleApiDirectoryCreate},
+        {PLUGIN_FILES_URI "/move", "POST", false, handleApiFileMove},
+        {PLUGIN_FILES_URI "/delete", "POST", false, handleApiFileDelete},
+        {PLUGIN_FILES_URI "/rmdir", "POST", false, handleApiDirectoryDelete},
     };
 
     /* Reject root selectors and all unrelated query parameters before dispatch. */
@@ -385,9 +401,7 @@ error_t handleApiPluginFiles(HttpConnection *connection, const char_t *uri,
             continue;
         if (osStrcmp(connection->request.method, routes[i].method))
             return pluginFileError(connection, 405);
-        if (*queryString && ((routes[i].handler != handleApiFileIndexV2 &&
-                             routes[i].handler != handleApiPluginFileRead &&
-                             routes[i].handler != handleApiFileUpload) || osStrncmp(queryString, "path=", 5) || osStrchr(queryString, '&')))
+        if (*queryString && (!routes[i].pathQuery || osStrncmp(queryString, "path=", 5) || osStrchr(queryString, '&')))
             return pluginFileError(connection, 400);
 
         /* Missing plugin storage must never fall back to content or library. */
@@ -838,7 +852,8 @@ error_t handleApiFileIndexV2(HttpConnection *connection, const char_t *uri, cons
     const char *rootPath = NULL;
 
     osStrcpy(special, "");
-    queryGet(queryString, "special", special, sizeof(special));
+    if (!isPluginFileRequest(uri))
+        queryGet(queryString, "special", special, sizeof(special));
 
     if (fileQueryPrepare(uri, queryString, &rootPath, overlay, sizeof(overlay), &client_ctx->settings) != NO_ERROR)
     {
@@ -847,10 +862,7 @@ error_t handleApiFileIndexV2(HttpConnection *connection, const char_t *uri, cons
 
     char path[128];
 
-    if (!queryGet(queryString, "path", path, sizeof(path)))
-    {
-        osStrcpy(path, "/");
-    }
+    osStrcpy(path, "/");
 
     /* Plugin requests must be validated before path normalization. */
     if (isPluginFileRequest(uri))
@@ -860,6 +872,10 @@ error_t handleApiFileIndexV2(HttpConnection *connection, const char_t *uri, cons
         uint_t statusCode = pluginFilePath(rootPath, path, true, false);
         if (statusCode != 200)
             return pluginFileError(connection, statusCode);
+    }
+    else
+    {
+        queryGet(queryString, "path", path, sizeof(path));
     }
 
     /* first canonicalize path, then merge to prevent directory traversal bugs */
@@ -1874,18 +1890,13 @@ error_t handleApiFileUpload(HttpConnection *connection, const char_t *uri, const
     char overlay[16];
     char path[256 + 1];
 
-    osStrcpy(path, "");
+    osStrcpy(path, "/");
 
     const char *rootPath = NULL;
 
     if (fileQueryPrepare(uri, queryString, &rootPath, overlay, sizeof(overlay), &client_ctx->settings) != NO_ERROR)
     {
         return ERROR_FAILURE;
-    }
-
-    if (!queryGet(queryString, "path", path, sizeof(path)))
-    {
-        osStrcpy(path, "/");
     }
 
     /* Plugin requests must be validated before path normalization. */
@@ -1896,6 +1907,10 @@ error_t handleApiFileUpload(HttpConnection *connection, const char_t *uri, const
         uint_t statusCode = pluginFilePath(rootPath, path, true, false);
         if (statusCode != 200)
             return pluginFileError(connection, statusCode);
+    }
+    else
+    {
+        queryGet(queryString, "path", path, sizeof(path));
     }
 
     /* first canonicalize path, then merge to prevent directory traversal bugs */
@@ -2593,23 +2608,11 @@ error_t handleApiDirectoryCreate(HttpConnection *connection, const char_t *uri, 
     char path[256 + 3];
     size_t size = 0;
 
-    /* Plugin bodies must be complete; never execute a truncated path. */
-    error_t error;
-    if (isPluginFileRequest(uri))
-    {
-        error = parsePostData(connection, path, sizeof(path) - 2);
-        size = osStrlen(path);
-        if (error != NO_ERROR || size != connection->request.contentLength)
-            return pluginFileError(connection, 400);
-    }
-    else
-    {
-        error = httpReceive(connection, &path, sizeof(path) - 3, &size, 0x00);
-    }
+    error_t error = fileReadPath(connection, uri, path, sizeof(path), &size);
     if (error != NO_ERROR)
     {
         TRACE_ERROR("httpReceive failed!\r\n");
-        return error;
+        return isPluginFileRequest(uri) ? pluginFileError(connection, 400) : error;
     }
     path[size] = 0;
 
@@ -2662,23 +2665,11 @@ error_t handleApiDirectoryDelete(HttpConnection *connection, const char_t *uri, 
     char path[256 + 3];
     size_t size = 0;
 
-    /* Plugin bodies must be complete; never execute a truncated path. */
-    error_t error;
-    if (isPluginFileRequest(uri))
-    {
-        error = parsePostData(connection, path, sizeof(path) - 2);
-        size = osStrlen(path);
-        if (error != NO_ERROR || size != connection->request.contentLength)
-            return pluginFileError(connection, 400);
-    }
-    else
-    {
-        error = httpReceive(connection, &path, sizeof(path) - 3, &size, 0x00);
-    }
+    error_t error = fileReadPath(connection, uri, path, sizeof(path), &size);
     if (error != NO_ERROR)
     {
         TRACE_ERROR("httpReceive failed!\r\n");
-        return error;
+        return isPluginFileRequest(uri) ? pluginFileError(connection, 400) : error;
     }
     path[size] = 0;
 
@@ -2731,23 +2722,11 @@ error_t handleApiFileDelete(HttpConnection *connection, const char_t *uri, const
     char path[256 + 3];
     size_t size = 0;
 
-    /* Plugin bodies must be complete; never execute a truncated path. */
-    error_t error;
-    if (isPluginFileRequest(uri))
-    {
-        error = parsePostData(connection, path, sizeof(path) - 2);
-        size = osStrlen(path);
-        if (error != NO_ERROR || size != connection->request.contentLength)
-            return pluginFileError(connection, 400);
-    }
-    else
-    {
-        error = httpReceive(connection, &path, sizeof(path) - 3, &size, 0x00);
-    }
+    error_t error = fileReadPath(connection, uri, path, sizeof(path), &size);
     if (error != NO_ERROR)
     {
         TRACE_ERROR("httpReceive failed!\r\n");
-        return error;
+        return isPluginFileRequest(uri) ? pluginFileError(connection, 400) : error;
     }
     path[size] = 0;
 
@@ -2806,17 +2785,6 @@ error_t handleApiFileMove(HttpConnection *connection, const char_t *uri, const c
     char source[256 + 3];
     char target[256 + 3];
 
-    if (!queryGet(post_data, "source", source, sizeof(source)))
-    {
-        TRACE_ERROR("source missing!\r\n");
-        return isPluginFileRequest(uri) ? pluginFileError(connection, 400) : ERROR_INVALID_REQUEST;
-    }
-    if (!queryGet(post_data, "target", target, sizeof(target)))
-    {
-        TRACE_ERROR("target missing!\r\n");
-        return isPluginFileRequest(uri) ? pluginFileError(connection, 400) : ERROR_INVALID_REQUEST;
-    }
-
     /* Both sides must stay inside plugin storage; never overwrite a target. */
     if (isPluginFileRequest(uri))
     {
@@ -2829,6 +2797,19 @@ error_t handleApiFileMove(HttpConnection *connection, const char_t *uri, const c
             statusCode = pluginFilePath(rootPath, target, false, true);
         if (statusCode != 200)
             return pluginFileError(connection, statusCode);
+    }
+    else
+    {
+        if (!queryGet(post_data, "source", source, sizeof(source)))
+        {
+            TRACE_ERROR("source missing!\r\n");
+            return ERROR_INVALID_REQUEST;
+        }
+        if (!queryGet(post_data, "target", target, sizeof(target)))
+        {
+            TRACE_ERROR("target missing!\r\n");
+            return ERROR_INVALID_REQUEST;
+        }
     }
 
     /* first canonicalize path, then merge to prevent directory traversal bugs */
