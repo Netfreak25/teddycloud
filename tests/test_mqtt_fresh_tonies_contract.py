@@ -61,8 +61,9 @@ class MqttFreshToniesContractTests(unittest.TestCase):
         self.assertIn("duplicate ? 0x08U : 0", encoder)
         self.assertIn("packet_id >> 8", encoder)
 
-    def test_retry_schedule_is_three_attempts_five_seconds_apart(self):
+    def test_retry_schedule_retains_connection_after_three_fast_attempts(self):
         self.assertIn("#define MQTT_FRESH_TONIES_RETRY_INTERVAL_SEC 5", self.server)
+        self.assertIn("#define MQTT_FRESH_TONIES_SLOW_RETRY_INTERVAL_SEC 30", self.server)
         self.assertIn("#define MQTT_FRESH_TONIES_MAX_ATTEMPTS 3", self.server)
         pump = self.server_function(
             "static bool_t mqtt_fresh_tonies_pump",
@@ -70,7 +71,16 @@ class MqttFreshToniesContractTests(unittest.TestCase):
         )
         self.assertIn("conn->fresh_tonie_attempts >= MQTT_FRESH_TONIES_MAX_ATTEMPTS", pump)
         self.assertIn("mqtt_send_fresh_tonie(conn, conn->fresh_tonie_inflight, TRUE)", pump)
-        self.assertIn('mqtt_connection_close(conn, "fresh-tonies PUBACK timeout")', pump)
+        self.assertNotIn("mqtt_connection_close", pump)
+        self.assertIn("mqtt_monotonic_ms(&now)", pump)
+        self.assertIn("(uint32_t)(now - conn->fresh_tonie_sent_at)", pump)
+        self.assertIn("conn->fresh_tonie_slow_retry_logged", pump)
+        sender = self.server_function(
+            "static bool_t mqtt_send_fresh_tonie",
+            "static bool_t mqtt_fresh_tonies_pump",
+        )
+        self.assertIn("conn->fresh_tonie_attempts < UINT8_MAX", sender)
+        self.assertIn("state->last_publish_at = (uint32_t)time(NULL)", sender)
 
     def test_matching_puback_advances_without_clearing_persistent_cache(self):
         ack = self.server_function(

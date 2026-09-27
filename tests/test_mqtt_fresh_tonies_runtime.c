@@ -1,0 +1,305 @@
+/* Production types and freshness functions are inserted verbatim by the runner. */
+#include <assert.h>
+#include <byteswap.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include "core/net.h"
+#include "core/socket.h"
+#include "tls.h"
+#include "tb2_mqtt_passthrough.h"
+#include "handler.h"
+#undef TRACE_DEBUG
+#undef TRACE_INFO
+#undef TRACE_WARNING
+#undef TRACE_ERROR
+/* Preserve the project macros' if/block form: missing caller braces must fail. */
+#define TRACE_DEBUG(...) if (TRUE) { record_log(0, __VA_ARGS__); }
+#define TRACE_INFO(...) if (TRUE) { record_log(1, __VA_ARGS__); }
+#define TRACE_WARNING(...) if (TRUE) { record_log(2, __VA_ARGS__); }
+#define TRACE_ERROR(...) if (TRUE) { record_log(3, __VA_ARGS__); }
+/* SERVER_TYPES */
+
+static MqttClientConnection connections[MQTT_MAX_CONNECTIONS];
+static MqttFreshToniesPublishState fresh_tonies_publish_state[MAX_OVERLAYS];
+static settings_t settings;
+static uint64_t cache[3];
+static size_t cache_count;
+static time_t wall_now;
+static uint32_t monotonic_now;
+static bool_t clock_available, publish_succeeds, lose_clock_on_publish;
+static bool_t allocation_succeeds;
+static uint16_t next_packet_id;
+static unsigned warning_count, info_retries, debug_retries;
+static struct {
+    uint32_t at;
+    uint16_t packet_id;
+    bool_t duplicate;
+    char payload[40];
+} publishes[512];
+static size_t publish_count;
+
+static void record_log(unsigned severity, const char *format, ...)
+{
+    char message[512];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+    if (severity == 2) warning_count++;
+    if (strstr(message, "fresh-tonies retry")) {
+        if (severity == 0) debug_retries++;
+        if (severity == 1) info_retries++;
+    }
+}
+
+time_t time(time_t *out)
+{
+    if (out != NULL) *out = wall_now;
+    return wall_now;
+}
+
+static bool_t mqtt_monotonic_ms(uint32_t *now)
+{
+    if (!clock_available) return FALSE;
+    *now = monotonic_now;
+    return TRUE;
+}
+
+void *osAllocMem(size_t size) { return allocation_succeeds ? malloc(size) : NULL; }
+void osFreeMem(void *pointer) { free(pointer); }
+
+settings_t *get_settings_id(uint8_t overlay)
+{
+    assert(overlay == settings.internal.overlayNumber);
+    return &settings;
+}
+
+uint64_t *settings_get_u64_array_id(const char *name, uint8_t overlay, size_t *length)
+{
+    assert(!strcmp(name, "internal.freshnessCache"));
+    assert(overlay == settings.internal.overlayNumber);
+    *length = cache_count;
+    return cache;
+}
+
+static bool_t mqtt_connection_matches_box_overlay(MqttClientConnection *conn,
+                                                  settings_t *target)
+{
+    return conn->active && conn->box_connection && conn->client_ctx.settings == target;
+}
+
+static bool_t mqtt_fresh_tonies_topic(MqttClientConnection *conn, char *topic, size_t size)
+{
+    assert(conn->active && size >= sizeof("toniebox/AABBCCDDEEFF/fresh-tonies"));
+    strcpy(topic, "toniebox/AABBCCDDEEFF/fresh-tonies");
+    return TRUE;
+}
+
+static bool_t mqtt_connection_has_sub(MqttClientConnection *conn, const char *topic)
+{
+    assert(conn->active && strstr(topic, "/fresh-tonies"));
+    return TRUE;
+}
+
+static bool_t mqtt_connection_publish_packet(MqttClientConnection *conn,
+    const char *topic, const char *payload, uint8_t qos, bool_t duplicate,
+    uint16_t *packet_id, const char *action)
+{
+    assert(conn->active && strstr(topic, "/fresh-tonies") && qos == 1);
+    assert(!strcmp(action, "local_freshness_publish"));
+    if (!publish_succeeds) return FALSE;
+    if (duplicate) assert(*packet_id != 0);
+    else { assert(*packet_id == 0); *packet_id = ++next_packet_id; }
+    assert(publish_count < sizeof(publishes) / sizeof(publishes[0]));
+    publishes[publish_count].at = monotonic_now;
+    publishes[publish_count].packet_id = *packet_id;
+    publishes[publish_count].duplicate = duplicate;
+    snprintf(publishes[publish_count].payload, sizeof(publishes[publish_count].payload),
+             "%s", payload);
+    publish_count++;
+    if (lose_clock_on_publish) clock_available = FALSE;
+    return TRUE;
+}
+
+/* SERVER_FUNCTIONS */
+
+static MqttClientConnection *initialize(size_t entries)
+{
+    for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
+        mqtt_fresh_tonies_reset_connection(&connections[i]);
+    memset(connections, 0, sizeof(connections));
+    memset(fresh_tonies_publish_state, 0, sizeof(fresh_tonies_publish_state));
+    memset(&settings, 0, sizeof(settings));
+    settings.commonName = "AABBCCDDEEFF";
+    settings.internal.overlayNumber = 1;
+    settings.internal.config_used = TRUE;
+    settings.internal.freshnessCacheChanged = TRUE;
+    cache[0] = 1; cache[1] = 2; cache[2] = 2; cache_count = entries;
+    wall_now = 1000; monotonic_now = 50000;
+    clock_available = publish_succeeds = allocation_succeeds = TRUE;
+    lose_clock_on_publish = FALSE;
+    warning_count = info_retries = debug_retries = 0;
+    publish_count = 0; next_packet_id = 0;
+    MqttClientConnection *conn = &connections[0];
+    conn->active = true; conn->box_connection = TRUE;
+    conn->client_ctx.settings = &settings;
+    mqtt_mark_fresh_tonies_pending(&settings, "test");
+    wall_now += MQTT_FRESH_TONIES_DEBOUNCE_SEC;
+    return conn;
+}
+
+static void pump_at(MqttClientConnection *conn, uint32_t now)
+{
+    monotonic_now = now;
+    assert(mqtt_fresh_tonies_pump(conn));
+    assert(conn->active && settings.internal.freshnessCacheChanged);
+}
+
+static void test_schedule_and_delayed_ack(void)
+{
+    MqttClientConnection *conn = initialize(3);
+    const uint32_t start = monotonic_now;
+    pump_at(conn, start);
+    MqttFreshTonieEntry *first = conn->fresh_tonie_inflight;
+    assert(first && first->uid == 1 && first->next && first->next->uid == 2);
+    assert(first->next->next == NULL);
+    const uint16_t id = conn->fresh_tonie_packet_id;
+    pump_at(conn, start + 4999); assert(publish_count == 1);
+    wall_now = 900000;
+    pump_at(conn, start + 5000); assert(publish_count == 2);
+    wall_now = 1;
+    pump_at(conn, start + 10000); assert(publish_count == 3);
+    pump_at(conn, start + 15000); assert(publish_count == 3 && warning_count == 1);
+    pump_at(conn, start + 39999); assert(publish_count == 3 && warning_count == 1);
+    pump_at(conn, start + 40000); assert(publish_count == 4);
+    pump_at(conn, start + 69999); assert(publish_count == 4);
+    pump_at(conn, start + 70000); assert(publish_count == 5);
+    assert(warning_count == 1 && info_retries == 2 && debug_retries == 2);
+    assert(fresh_tonies_publish_state[1].last_publish_at == (uint32_t)wall_now);
+    const uint32_t offsets[] = {0, 5000, 10000, 40000, 70000};
+    for (size_t i = 0; i < publish_count; i++) {
+        assert(publishes[i].at == start + offsets[i]);
+        assert(publishes[i].packet_id == id && publishes[i].duplicate == (i != 0));
+        assert(!strcmp(publishes[i].payload, publishes[0].payload));
+    }
+    assert(!mqtt_handle_fresh_tonies_puback(conn, id + 1));
+    assert(conn->fresh_tonie_inflight == first && !first->delivered);
+    assert(mqtt_handle_fresh_tonies_puback(conn, id));
+    assert(first->delivered && !conn->fresh_tonie_inflight);
+    assert(!conn->fresh_tonie_sent_at_valid && !conn->fresh_tonie_slow_retry_logged);
+    assert(!conn->fresh_tonie_attempts && !conn->fresh_tonie_packet_id);
+    assert(cache_count == 3 && cache[0] == 1 && settings.internal.freshnessCacheChanged);
+    wall_now = 1002;
+    pump_at(conn, start + 70001);
+    assert(publish_count == 6 && conn->fresh_tonie_inflight->uid == 2);
+    assert(conn->fresh_tonie_packet_id != id && !publishes[5].duplicate);
+    assert(!mqtt_handle_fresh_tonies_puback(conn, id));
+}
+
+static void test_counter_saturates_and_reset(void)
+{
+    MqttClientConnection *conn = initialize(1);
+    pump_at(conn, monotonic_now);
+    conn->fresh_tonie_attempts = UINT8_MAX - 1;
+    pump_at(conn, monotonic_now + 30000);
+    assert(conn->fresh_tonie_attempts == UINT8_MAX);
+    for (unsigned i = 0; i < 3; i++) pump_at(conn, monotonic_now + 30000);
+    assert(conn->fresh_tonie_attempts == UINT8_MAX && warning_count == 1);
+    assert(conn->fresh_tonie_packet_id == 1 && !conn->fresh_tonie_inflight->delivered);
+    mqtt_fresh_tonies_reset_connection(conn);
+    assert(!conn->fresh_tonie_inflight && !conn->fresh_tonie_entries);
+    assert(!conn->fresh_tonie_packet_id && !conn->fresh_tonie_attempts);
+    assert(!conn->fresh_tonie_sent_at_valid && !conn->fresh_tonie_slow_retry_logged);
+    assert(settings.internal.freshnessCacheChanged && cache_count == 1);
+}
+
+static void test_clock_failure_and_wrap(void)
+{
+    MqttClientConnection *conn = initialize(1);
+    clock_available = FALSE;
+    pump_at(conn, monotonic_now);
+    assert(publish_count == 1 && !conn->fresh_tonie_sent_at_valid);
+    pump_at(conn, monotonic_now + 100000); assert(publish_count == 1);
+    clock_available = TRUE;
+    pump_at(conn, monotonic_now); assert(publish_count == 1 && conn->fresh_tonie_sent_at_valid);
+    pump_at(conn, monotonic_now + 4999); assert(publish_count == 1);
+    lose_clock_on_publish = TRUE;
+    pump_at(conn, monotonic_now + 1);
+    assert(publish_count == 2 && !conn->fresh_tonie_sent_at_valid);
+    pump_at(conn, monotonic_now + 100000); assert(publish_count == 2);
+    lose_clock_on_publish = FALSE; clock_available = TRUE;
+    pump_at(conn, monotonic_now); assert(publish_count == 2);
+    pump_at(conn, monotonic_now + 5000); assert(publish_count == 3);
+    clock_available = FALSE;
+    pump_at(conn, monotonic_now + 40000); assert(publish_count == 3);
+    clock_available = TRUE;
+    pump_at(conn, monotonic_now); assert(publish_count == 4);
+    conn = initialize(1);
+    const uint32_t start = UINT32_MAX - 2000U;
+    pump_at(conn, start);
+    pump_at(conn, start + 4999U); assert(publish_count == 1);
+    pump_at(conn, start + 5000U); assert(publish_count == 2);
+    assert(conn->fresh_tonie_packet_id == 1);
+}
+
+static void test_sync_and_targeted_changes_keep_inflight(void)
+{
+    MqttClientConnection *conn = initialize(2);
+    pump_at(conn, monotonic_now);
+    pump_at(conn, monotonic_now + 5000);
+    pump_at(conn, monotonic_now + 5000);
+    pump_at(conn, monotonic_now + 5000);
+    MqttFreshTonieEntry *inflight = conn->fresh_tonie_inflight;
+    const uint16_t id = conn->fresh_tonie_packet_id;
+    const uint32_t sent_at = conn->fresh_tonie_sent_at;
+    assert(mqtt_server_publish_fresh_tonie_for_overlay(1, 1));
+    assert(mqtt_server_publish_fresh_tonie_for_overlay(1, 2));
+    assert(conn->fresh_tonie_inflight == inflight && conn->fresh_tonie_packet_id == id);
+    assert(conn->fresh_tonie_attempts == 3 && conn->fresh_tonie_sent_at == sent_at);
+    assert(conn->fresh_tonie_slow_retry_logged && !inflight->delivered);
+    cache[0] = 2; cache_count = 1;
+    assert(mqtt_fresh_tonies_sync_connection(conn, &settings));
+    assert(conn->fresh_tonie_inflight == inflight && !inflight->present);
+    pump_at(conn, sent_at + 30000);
+    assert(publish_count == 4 && publishes[3].packet_id == id);
+    assert(!strcmp(publishes[0].payload, publishes[3].payload));
+    assert(mqtt_handle_fresh_tonies_puback(conn, id));
+    assert(conn->fresh_tonie_entries->uid == 2 && !conn->fresh_tonie_entries->next);
+    assert(settings.internal.freshnessCacheChanged && cache_count == 1 && cache[0] == 2);
+    pump_at(conn, monotonic_now);
+    assert(conn->fresh_tonie_inflight->uid == 2 && conn->fresh_tonie_packet_id != id);
+}
+
+static void test_unsent_publish_does_not_advance_delivery(void)
+{
+    MqttClientConnection *conn = initialize(1);
+    pump_at(conn, monotonic_now);
+    const uint32_t sent_at = conn->fresh_tonie_sent_at;
+    MqttFreshTonieEntry *entry = conn->fresh_tonie_inflight;
+    publish_succeeds = FALSE;
+    monotonic_now += 5000;
+    assert(!mqtt_fresh_tonies_pump(conn));
+    assert(publish_count == 1 && conn->fresh_tonie_attempts == 1);
+    assert(conn->fresh_tonie_sent_at == sent_at && conn->fresh_tonie_inflight == entry);
+    assert(conn->active && !entry->delivered && settings.internal.freshnessCacheChanged);
+    publish_succeeds = TRUE; allocation_succeeds = FALSE;
+    assert(!mqtt_fresh_tonies_pump(conn));
+    assert(publish_count == 1 && conn->fresh_tonie_attempts == 1);
+    allocation_succeeds = TRUE;
+    pump_at(conn, monotonic_now);
+    assert(publish_count == 2 && conn->fresh_tonie_packet_id == 1);
+}
+
+int main(void)
+{
+    test_schedule_and_delayed_ack();
+    test_counter_saturates_and_reset();
+    test_clock_failure_and_wrap();
+    test_sync_and_targeted_changes_keep_inflight();
+    test_unsent_publish_does_not_advance_delivery();
+    mqtt_fresh_tonies_reset_connection(&connections[0]);
+    puts("MQTT fresh delivery PASS: schedule 0/5/10/40/70, delayed ACK, saturation, monotonic failures/wrap, unchanged cache and targeted coalescing");
+    return 0;
+}

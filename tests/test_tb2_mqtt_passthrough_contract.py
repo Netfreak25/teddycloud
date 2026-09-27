@@ -22,6 +22,34 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
             self.passthrough.index(start) : self.passthrough.index(end)
         ]
 
+    def test_box_retry_read_and_capture_share_io_lock_without_observers(self):
+        writer = self.function("static error_t tb2_mqtt_record_packet_ex(",
+                               "static error_t tb2_mqtt_record_packet(")
+        self.assertLess(writer.index("osAcquireMutex"), writer.index("tb2_mqtt_record_packet_ex_locked("))
+        self.assertLess(writer.index("tb2_mqtt_record_packet_ex_locked("), writer.index("osReleaseMutex"))
+        reader = self.function("static error_t tb2_mqtt_forward_ready(",
+                               "error_t tb2_mqtt_passthrough_init(")
+        self.assertLess(reader.index("osAcquireMutex"), reader.index("tb2_mqtt_passthrough_box_write_error("))
+        self.assertLess(reader.index("tb2_mqtt_passthrough_box_write_error("), reader.index("tlsRead("))
+        after_read = reader[reader.index("tlsRead("):]
+        self.assertLess(after_read.index("osReleaseMutex"), after_read.index("tb2_mqtt_process_stream("))
+        self.assertNotIn("session->observer(", writer)
+
+    def test_http_publish_and_mainloop_cleanup_share_lifetime_lock(self):
+        start = self.server.index("static bool_t mqtt_connection_publish_packet(")
+        wrapper = self.server[start:self.server.index("static bool_t mqtt_connection_publish(", start)]
+        self.assertLess(wrapper.index("mutex_lock(MUTEX_MQTT_SESSION)"),
+                        wrapper.index("mqtt_connection_publish_packet_locked("))
+        self.assertLess(wrapper.index("mqtt_connection_publish_packet_locked("),
+                        wrapper.index("mutex_unlock(MUTEX_MQTT_SESSION)"))
+        start = self.server.index("error = tb2_mqtt_passthrough_task(conn->passthrough);")
+        close = self.server[start:self.server.index("mutex_unlock(MUTEX_MQTT_SESSION)", start)]
+        self.assertLess(close.index("mutex_lock(MUTEX_MQTT_SESSION)"),
+                        close.index("tb2_mqtt_passthrough_box_write_error("))
+        self.assertLess(close.index("tb2_mqtt_passthrough_box_write_error("),
+                        close.index("tb2_mqtt_passthrough_close("))
+        self.assertIn('if (conn->passthrough == NULL)\n            mqtt_connection_close_locked(conn, "publish write failed");', self.server)
+
     def test_proxy_is_selected_before_legacy_packet_parser(self):
         start = self.server.index("tb2_mqtt_passthrough_start")
         parser = self.server.index("size_t processed_total", start)

@@ -11,6 +11,8 @@
 #include "debug.h"
 #include "settings.h"
 #include "mqtt_server.h"
+#include "mutex_manager.h"
+#include "mqtt_time.h"
 #include "tls.h"
 #include "rand.h"
 #include "tls_adapter.h"
@@ -37,6 +39,7 @@ uint_t tcpWaitForEvents(Socket *socket, uint_t eventMask, systime_t timeout);
 #define MQTT_LOG_INLINE_PAYLOAD_SIZE 256
 #define MQTT_FRESH_TONIES_DEBOUNCE_SEC 2
 #define MQTT_FRESH_TONIES_RETRY_INTERVAL_SEC 5
+#define MQTT_FRESH_TONIES_SLOW_RETRY_INTERVAL_SEC 30
 #define MQTT_FRESH_TONIES_MAX_ATTEMPTS 3
 #define MQTT_FRESH_TONIES_REASON_MAX 32
 #define MQTT_CONNECTION_ESTABLISH_TIMEOUT_MS 15000U
@@ -85,6 +88,8 @@ typedef struct {
     uint16_t next_packet_id;
     uint8_t fresh_tonie_attempts;
     uint32_t fresh_tonie_sent_at;
+    bool_t fresh_tonie_sent_at_valid;
+    bool_t fresh_tonie_slow_retry_logged;
     bool_t observer_local_reply_matched;
 } MqttClientConnection;
 
@@ -323,9 +328,12 @@ static void mqtt_fresh_tonies_reset_connection(MqttClientConnection *conn)
     conn->fresh_tonie_packet_id = 0;
     conn->fresh_tonie_attempts = 0;
     conn->fresh_tonie_sent_at = 0;
+    conn->fresh_tonie_sent_at_valid = FALSE;
+    conn->fresh_tonie_slow_retry_logged = FALSE;
 }
 
-static void mqtt_connection_close(MqttClientConnection *conn, const char *reason)
+/* Caller holds the lifetime lock; never free a session during an HTTP publish. */
+static void mqtt_connection_close_locked(MqttClientConnection *conn, const char *reason)
 {
     if (conn == NULL)
     {
@@ -386,6 +394,13 @@ static void mqtt_connection_close(MqttClientConnection *conn, const char *reason
         osMemset(&app_control_ping_state[closed_overlay_id], 0,
                  sizeof(app_control_ping_state[closed_overlay_id]));
     }
+}
+
+static void mqtt_connection_close(MqttClientConnection *conn, const char *reason)
+{
+    mutex_lock(MUTEX_MQTT_SESSION);
+    mqtt_connection_close_locked(conn, reason);
+    mutex_unlock(MUTEX_MQTT_SESSION);
 }
 
 static void mqtt_connection_replace_existing_box_sessions(MqttClientConnection *current)
@@ -1313,7 +1328,7 @@ static bool_t mqtt_build_publish_packet(const char *topic, const char *payload,
     return TRUE;
 }
 
-static bool_t mqtt_connection_publish_packet(MqttClientConnection *conn,
+static bool_t mqtt_connection_publish_packet_locked(MqttClientConnection *conn,
                                              const char *topic,
                                              const char *payload, uint8_t qos,
                                              bool_t duplicate,
@@ -1396,18 +1411,45 @@ static bool_t mqtt_connection_publish_packet(MqttClientConnection *conn,
                       written,
                       error2text(error));
         osFreeMem(packet);
-        mqtt_connection_close(conn, "publish write failed");
+        /* The main loop owns relay teardown, including terminal capture errors.
+         * The session retained the error; no HTTP thread may free it here. */
+        if (conn->passthrough == NULL)
+            mqtt_connection_close_locked(conn, "publish write failed");
         return FALSE;
     }
 
     mqtt_trace_full_publish("tx", topic, (const uint8_t *)payload,
                             osStrlen(payload), qos);
-    TRACE_INFO("MQTT PUBLISH: %s -> %s (qos=%u packet_id=%u dup=%s len %" PRIuSIZE ")\r\n",
-               topic, payload, (unsigned)qos, (unsigned)*packet_id,
-               duplicate ? "true" : "false", osStrlen(payload));
+    if (duplicate && capture_action != NULL &&
+        osStrcmp(capture_action, "local_freshness_publish") == 0 &&
+        conn->fresh_tonie_attempts >= MQTT_FRESH_TONIES_MAX_ATTEMPTS)
+    {
+        TRACE_DEBUG("MQTT PUBLISH: %s -> %s (qos=%u packet_id=%u dup=true len %" PRIuSIZE ")\r\n",
+                    topic, payload, (unsigned)qos, (unsigned)*packet_id,
+                    osStrlen(payload));
+    }
+    else
+    {
+        TRACE_INFO("MQTT PUBLISH: %s -> %s (qos=%u packet_id=%u dup=%s len %" PRIuSIZE ")\r\n",
+                   topic, payload, (unsigned)qos, (unsigned)*packet_id,
+                   duplicate ? "true" : "false", osStrlen(payload));
+    }
 
     osFreeMem(packet);
     return TRUE;
+}
+
+static bool_t mqtt_connection_publish_packet(MqttClientConnection *conn,
+                                             const char *topic, const char *payload,
+                                             uint8_t qos, bool_t duplicate,
+                                             uint16_t *packet_id,
+                                             const char *capture_action)
+{
+    mutex_lock(MUTEX_MQTT_SESSION);
+    bool_t sent = mqtt_connection_publish_packet_locked(conn, topic, payload, qos,
+        duplicate, packet_id, capture_action);
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    return sent;
 }
 
 static bool_t mqtt_connection_publish(MqttClientConnection *conn,
@@ -3333,14 +3375,24 @@ void mqtt_server_task()
                 error = tb2_mqtt_passthrough_task(conn->passthrough);
                 if (error)
                 {
-                    const bool_t clean = error == ERROR_END_OF_STREAM || error == ERROR_ABORTED;
-                    const char *result = error == ERROR_ABORTED ? "disabled" :
+                    mutex_lock(MUTEX_MQTT_SESSION);
+                    const error_t box_write_error =
+                        tb2_mqtt_passthrough_box_write_error(conn->passthrough);
+                    const error_t terminal_error = box_write_error ? box_write_error : error;
+                    const bool_t clean = !box_write_error &&
+                        (error == ERROR_END_OF_STREAM || error == ERROR_ABORTED);
+                    const char *result = box_write_error ? "box_write_failed" :
+                                         error == ERROR_ABORTED ? "disabled" :
                                          error == ERROR_END_OF_STREAM ? "completed" :
                                          error == ERROR_WRITE_FAILED ? "capture_or_write_failed" :
                                          "stream_failed";
+                    TRACE_INFO("TB2 MQTT local session ended: slot=%d reason=%s error=%s (%d)\r\n",
+                               mqtt_connection_slot(conn), result,
+                               error2text(terminal_error), terminal_error);
                     tb2_mqtt_passthrough_close(conn->passthrough, result, clean);
                     conn->passthrough = NULL;
-                    mqtt_connection_close(conn, result);
+                    mqtt_connection_close_locked(conn, result);
+                    mutex_unlock(MUTEX_MQTT_SESSION);
                 }
                 else if (conn->active)
                 {
@@ -3402,13 +3454,15 @@ void mqtt_server_task()
                                 conn->buffer_len = 0;
                                 if (error)
                                 {
+                                    mutex_lock(MUTEX_MQTT_SESSION);
                                     if (conn->passthrough != NULL)
                                     {
                                         tb2_mqtt_passthrough_close(conn->passthrough,
                                                                    "initial_forward_failed", FALSE);
                                         conn->passthrough = NULL;
                                     }
-                                    mqtt_connection_close(conn, "MQTT passthrough start failed");
+                                    mqtt_connection_close_locked(conn, "MQTT passthrough start failed");
+                                    mutex_unlock(MUTEX_MQTT_SESSION);
                                 }
                                 continue;
                             }
@@ -4203,13 +4257,14 @@ static bool_t mqtt_send_fresh_tonie(MqttClientConnection *conn,
         return FALSE;
 
     conn->fresh_tonie_packet_id = packet_id;
-    conn->fresh_tonie_sent_at = (uint32_t)time(NULL);
+    conn->fresh_tonie_sent_at_valid = mqtt_monotonic_ms(&conn->fresh_tonie_sent_at);
     if (!duplicate)
     {
         conn->fresh_tonie_inflight = entry;
         conn->fresh_tonie_attempts = 1;
+        conn->fresh_tonie_slow_retry_logged = FALSE;
     }
-    else
+    else if (conn->fresh_tonie_attempts < UINT8_MAX)
     {
         conn->fresh_tonie_attempts++;
     }
@@ -4217,7 +4272,7 @@ static bool_t mqtt_send_fresh_tonie(MqttClientConnection *conn,
     MqttFreshToniesPublishState *state =
         mqtt_fresh_tonies_publish_state(settings);
     if (state != NULL)
-        state->last_publish_at = conn->fresh_tonie_sent_at;
+        state->last_publish_at = (uint32_t)time(NULL);
     return TRUE;
 }
 
@@ -4233,33 +4288,57 @@ static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn)
     if (!mqtt_fresh_tonies_sync_connection(conn, settings))
         return TRUE;
 
-    uint32_t now = (uint32_t)time(NULL);
+    uint32_t now;
     if (conn->fresh_tonie_inflight != NULL)
     {
-        if (now >= conn->fresh_tonie_sent_at &&
-            (now - conn->fresh_tonie_sent_at) <
-                MQTT_FRESH_TONIES_RETRY_INTERVAL_SEC)
+        if (!mqtt_monotonic_ms(&now))
+            return TRUE;
+        if (!conn->fresh_tonie_sent_at_valid)
+        {
+            /* Recover a timing baseline without replaying immediately after a
+             * failed clock sample at the successful send boundary. */
+            conn->fresh_tonie_sent_at = now;
+            conn->fresh_tonie_sent_at_valid = TRUE;
+            return TRUE;
+        }
+        const uint32_t elapsed_ms = (uint32_t)(now - conn->fresh_tonie_sent_at);
+        if (elapsed_ms < MQTT_FRESH_TONIES_RETRY_INTERVAL_SEC * MQTT_MILLISECONDS_PER_SECOND)
         {
             return TRUE;
         }
         if (conn->fresh_tonie_attempts >= MQTT_FRESH_TONIES_MAX_ATTEMPTS)
         {
-            char ruid[17];
-            mqtt_uid_to_ruid(conn->fresh_tonie_inflight->uid, ruid);
-            TRACE_WARNING("MQTT fresh-tonies PUBACK timeout for %s ruid=%s packet_id=%u attempts=%u\r\n",
-                          settings->commonName, ruid,
-                          (unsigned)conn->fresh_tonie_packet_id,
-                          (unsigned)conn->fresh_tonie_attempts);
-            mqtt_connection_close(conn, "fresh-tonies PUBACK timeout");
-            return FALSE;
+            if (!conn->fresh_tonie_slow_retry_logged)
+            {
+                char ruid[17];
+                mqtt_uid_to_ruid(conn->fresh_tonie_inflight->uid, ruid);
+                TRACE_WARNING("MQTT fresh-tonies PUBACK pending for %s ruid=%s packet_id=%u attempts=%u; local connection retained, retry_interval=%us\r\n",
+                              settings->commonName, ruid,
+                              (unsigned)conn->fresh_tonie_packet_id,
+                              (unsigned)conn->fresh_tonie_attempts,
+                              (unsigned)MQTT_FRESH_TONIES_SLOW_RETRY_INTERVAL_SEC);
+                conn->fresh_tonie_slow_retry_logged = TRUE;
+            }
+            if (elapsed_ms < MQTT_FRESH_TONIES_SLOW_RETRY_INTERVAL_SEC * MQTT_MILLISECONDS_PER_SECOND)
+                return TRUE;
         }
 
         char ruid[17];
         mqtt_uid_to_ruid(conn->fresh_tonie_inflight->uid, ruid);
-        TRACE_INFO("MQTT fresh-tonies retry for %s ruid=%s packet_id=%u attempt=%u\r\n",
-                   settings->commonName, ruid,
-                   (unsigned)conn->fresh_tonie_packet_id,
-                   (unsigned)(conn->fresh_tonie_attempts + 1));
+        const unsigned next_attempt = conn->fresh_tonie_attempts < UINT8_MAX ?
+            (unsigned)conn->fresh_tonie_attempts + 1 : UINT8_MAX;
+        if (conn->fresh_tonie_attempts >= MQTT_FRESH_TONIES_MAX_ATTEMPTS)
+        {
+            TRACE_DEBUG("MQTT fresh-tonies retry for %s ruid=%s packet_id=%u attempt=%u\r\n",
+                        settings->commonName, ruid,
+                        (unsigned)conn->fresh_tonie_packet_id, next_attempt);
+        }
+        else
+        {
+            TRACE_INFO("MQTT fresh-tonies retry for %s ruid=%s packet_id=%u attempt=%u\r\n",
+                       settings->commonName, ruid,
+                       (unsigned)conn->fresh_tonie_packet_id, next_attempt);
+        }
         return mqtt_send_fresh_tonie(conn, conn->fresh_tonie_inflight, TRUE);
     }
 
@@ -4341,6 +4420,8 @@ static bool_t mqtt_handle_fresh_tonies_puback(MqttClientConnection *conn,
     conn->fresh_tonie_packet_id = 0;
     conn->fresh_tonie_attempts = 0;
     conn->fresh_tonie_sent_at = 0;
+    conn->fresh_tonie_sent_at_valid = FALSE;
+    conn->fresh_tonie_slow_retry_logged = FALSE;
 
     if (settings != NULL)
     {

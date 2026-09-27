@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -21,6 +22,7 @@
 #include "http/http_server_misc.h"
 #include "mqtt_forward_filter.h"
 #include "mqtt_nocloud_filter.h"
+#include "mqtt_time.h"
 #include "os_ext.h"
 #include "os_port.h"
 #include "platform.h"
@@ -33,6 +35,8 @@
 
 #define TB2_MQTT_TUNNEL_BUFFER_SIZE 16384
 #define TB2_MQTT_TUNNEL_IO_TIMEOUT_MS 500
+#define TB2_MQTT_BOX_WRITE_MAX_RETRIES 2U
+#define TB2_MQTT_BOX_WRITE_RETRY_BUDGET_MS 1500U
 #define TB2_MQTT_CAPTURE_MIB_BYTES (1024ULL * 1024ULL)
 #define TB2_MQTT_MAX_REMAINING_LENGTH 268435455U
 #define TB2_MQTT_PACKET_PUBLISH 3U
@@ -152,6 +156,9 @@ struct tb2_mqtt_passthrough_session
     uint16_t next_local_packet_id;
     tb2_mqtt_capture_t capture;
     bool_t capture_opened;
+    OsMutex io_mutex;
+    atomic_int box_write_error;
+    atomic_int local_publish_error;
 };
 
 static tb2_mqtt_passthrough_status_t mqtt_passthrough_status;
@@ -931,6 +938,88 @@ static error_t tb2_mqtt_tls_write_all(TlsContext *destination, const uint8_t *da
     return NO_ERROR;
 }
 
+error_t tb2_mqtt_passthrough_box_write_error(const tb2_mqtt_passthrough_session_t *session)
+{
+    return session != NULL ? atomic_load(&session->box_write_error) : NO_ERROR;
+}
+
+/* Caller holds io_mutex for the complete packet. TLS retains partial ciphertext;
+ * written credits completed plaintext records, including on an error. Resume
+ * only the unchanged, uncredited remainder on the same TLS context. */
+static error_t tb2_mqtt_box_write_all(tb2_mqtt_passthrough_session_t *session,
+                                     const uint8_t *data, size_t length)
+{
+    error_t error = tb2_mqtt_passthrough_box_write_error(session);
+    if (error)
+        return error;
+
+    TlsContext *destination = session->box_tls;
+    uint32_t started = 0;
+    bool_t clock_valid = mqtt_monotonic_ms(&started);
+    unsigned retries = 0;
+    size_t offset = 0;
+    while (offset < length)
+    {
+        size_t written = 0;
+        error = tlsWrite(destination, data + offset, length - offset, &written, 0);
+        if (written > length - offset)
+        {
+            error = ERROR_WRITE_FAILED;
+            break;
+        }
+        offset += written;
+        if (!error)
+        {
+            if (written == 0)
+            {
+                error = ERROR_WRITE_FAILED;
+                break;
+            }
+            continue;
+        }
+        uint32_t now;
+        if ((error != ERROR_TIMEOUT && error != ERROR_WOULD_BLOCK) ||
+            tlsGetState(destination) != TLS_STATE_APPLICATION_DATA ||
+            retries >= TB2_MQTT_BOX_WRITE_MAX_RETRIES || !clock_valid ||
+            !mqtt_monotonic_ms(&now) ||
+            (uint32_t)(now - started) >= TB2_MQTT_BOX_WRITE_RETRY_BUDGET_MS ||
+            offset == length)
+            break;
+
+        retries++;
+        TRACE_WARNING("TB2 MQTT box_write_retry box=%s overlay=%u session=%s"
+                      " direction=to_box code=%d error=%s tls_state=%u length=%" PRIuSIZE
+                      " written=%" PRIuSIZE " retry=%u\r\n",
+                      session->box_settings->commonName,
+                      (unsigned)session->box_settings->internal.overlayNumber,
+                      session->capture.session_id, (int)error, error2text(error),
+                      (unsigned)tlsGetState(destination), length, offset, retries);
+    }
+    if (error)
+    {
+        atomic_store(&session->box_write_error, error);
+        TRACE_WARNING("TB2 MQTT box_write_failed box=%s overlay=%u session=%s"
+                      " direction=to_box code=%d error=%s tls_state=%u length=%" PRIuSIZE
+                      " written=%" PRIuSIZE " retries=%u decision=close\r\n",
+                      session->box_settings->commonName,
+                      (unsigned)session->box_settings->internal.overlayNumber,
+                      session->capture.session_id, (int)error, error2text(error),
+                      (unsigned)tlsGetState(destination), length, offset, retries);
+        return error;
+    }
+    if (retries != 0)
+    {
+        TRACE_INFO("TB2 MQTT box_write_recovered box=%s overlay=%u session=%s"
+                   " direction=to_box code=0 tls_state=%u length=%" PRIuSIZE
+                   " written=%" PRIuSIZE " retries=%u\r\n",
+                   session->box_settings->commonName,
+                   (unsigned)session->box_settings->internal.overlayNumber,
+                   session->capture.session_id, (unsigned)tlsGetState(destination),
+                   length, offset, retries);
+    }
+    return NO_ERROR;
+}
+
 static void tb2_mqtt_status_add_message(bool_t box_to_upstream, bool_t blocked)
 {
     osAcquireMutex(&mqtt_passthrough_status.mutex);
@@ -987,7 +1076,7 @@ static void tb2_mqtt_add_nocloud_stats(
     osReleaseMutex(&mqtt_passthrough_status.mutex);
 }
 
-static error_t tb2_mqtt_record_packet_ex(tb2_mqtt_passthrough_session_t *session,
+static error_t tb2_mqtt_record_packet_ex_locked(tb2_mqtt_passthrough_session_t *session,
                                          bool_t box_to_upstream,
                                          const uint8_t *data, size_t length,
                                          const uint8_t *wire_data, size_t wire_length,
@@ -999,11 +1088,18 @@ static error_t tb2_mqtt_record_packet_ex(tb2_mqtt_passthrough_session_t *session
                                          bool_t count_blocked, bool_t rewritten,
                                          size_t removed_count)
 {
+    error_t error = tb2_mqtt_passthrough_box_write_error(session);
+    if (!error)
+        error = atomic_load(&session->local_publish_error);
+    if (error)
+        return error;
+
     const char *direction = box_to_upstream ? "box_to_upstream" : "upstream_to_box";
-    error_t error = tb2_mqtt_capture_packet_ex(&session->capture, direction,
+    const bool_t box_delivery = !box_to_upstream && forwarded;
+    error = tb2_mqtt_capture_packet_ex(&session->capture, direction,
                                                data, length, wire_data, wire_length,
-                                               packet_type, topic, forwarded, filter_id,
-                                               generated, packet_complete, action,
+                                               packet_type, topic, box_delivery ? FALSE : forwarded, filter_id,
+                                               generated, packet_complete, box_delivery ? "box_write_pending" : action,
                                                packet_id, wire_packet_id,
                                                removed_count);
     if (error)
@@ -1027,10 +1123,23 @@ static error_t tb2_mqtt_record_packet_ex(tb2_mqtt_passthrough_session_t *session
         return NO_ERROR;
     }
 
-    TlsContext *destination = box_to_upstream ? session->upstream.tlsContext : session->box_tls;
     const uint8_t *outgoing = wire_data != NULL ? wire_data : data;
     size_t outgoing_length = wire_data != NULL ? wire_length : length;
-    error = tb2_mqtt_tls_write_all(destination, outgoing, outgoing_length);
+    error = box_to_upstream ?
+        tb2_mqtt_tls_write_all(session->upstream.tlsContext, outgoing, outgoing_length) :
+        tb2_mqtt_box_write_all(session, outgoing, outgoing_length);
+    if (box_delivery)
+    {
+        error_t capture_error = tb2_mqtt_capture_packet_ex(&session->capture, direction,
+            data, length, wire_data, wire_length, packet_type, topic, !error, filter_id,
+            generated, packet_complete, error ? "box_write_failed" : action,
+            packet_id, wire_packet_id, removed_count);
+        if (!error && capture_error)
+        {
+            tb2_mqtt_trace_error("capture_write", capture_error);
+            error = ERROR_WRITE_FAILED;
+        }
+    }
     if (error)
     {
         return error;
@@ -1050,6 +1159,28 @@ static error_t tb2_mqtt_record_packet_ex(tb2_mqtt_passthrough_session_t *session
     tb2_mqtt_add_nocloud_stats(session, box_to_upstream, rewritten,
                                removed_count);
     return NO_ERROR;
+}
+
+/* Serialize capture and packet writes; observers run outside this lock. */
+static error_t tb2_mqtt_record_packet_ex(tb2_mqtt_passthrough_session_t *session,
+                                         bool_t box_to_upstream,
+                                         const uint8_t *data, size_t length,
+                                         const uint8_t *wire_data, size_t wire_length,
+                                         uint8_t packet_type, const char *topic,
+                                         bool_t forwarded, const char *filter_id,
+                                         bool_t generated, bool_t packet_complete,
+                                         const char *action, uint16_t packet_id,
+                                         uint16_t wire_packet_id,
+                                         bool_t count_blocked, bool_t rewritten,
+                                         size_t removed_count)
+{
+    osAcquireMutex(&session->io_mutex);
+    error_t error = tb2_mqtt_record_packet_ex_locked(session, box_to_upstream,
+        data, length, wire_data, wire_length, packet_type, topic, forwarded, filter_id,
+        generated, packet_complete, action, packet_id, wire_packet_id,
+        count_blocked, rewritten, removed_count);
+    osReleaseMutex(&session->io_mutex);
+    return error;
 }
 
 static error_t tb2_mqtt_record_packet(tb2_mqtt_passthrough_session_t *session,
@@ -2147,15 +2278,28 @@ static error_t tb2_mqtt_process_stream(tb2_mqtt_passthrough_session_t *session,
 static error_t tb2_mqtt_forward_ready(tb2_mqtt_passthrough_session_t *session,
                                       bool_t box_to_upstream)
 {
+    osAcquireMutex(&session->io_mutex);
+    error_t error = tb2_mqtt_passthrough_box_write_error(session);
+    if (!error)
+        error = atomic_load(&session->local_publish_error);
+    if (error)
+    {
+        osReleaseMutex(&session->io_mutex);
+        return error;
+    }
     TlsContext *source = box_to_upstream ? session->box_tls : session->upstream.tlsContext;
     Socket *source_socket = box_to_upstream ? session->box_socket : session->upstream.socket;
     if (!tlsIsRxReady(source) &&
         (tcpWaitForEvents(source_socket, SOCKET_EVENT_RX_READY, 0) & SOCKET_EVENT_RX_READY) == 0)
+    {
+        osReleaseMutex(&session->io_mutex);
         return NO_ERROR;
+    }
 
     uint8_t buffer[TB2_MQTT_TUNNEL_BUFFER_SIZE];
     size_t received = 0;
-    error_t error = tlsRead(source, buffer, sizeof(buffer), &received, 0);
+    error = tlsRead(source, buffer, sizeof(buffer), &received, 0);
+    osReleaseMutex(&session->io_mutex);
     if (error == ERROR_WOULD_BLOCK || error == ERROR_TIMEOUT)
         return NO_ERROR;
     if (error)
@@ -2246,6 +2390,13 @@ error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
         return ERROR_OUT_OF_MEMORY;
     }
     osMemset(created, 0, sizeof(*created));
+    atomic_init(&created->box_write_error, NO_ERROR);
+    atomic_init(&created->local_publish_error, NO_ERROR);
+    if (!osCreateMutex(&created->io_mutex))
+    {
+        osFreeMem(created);
+        return ERROR_OUT_OF_RESOURCES;
+    }
     created->box_tls = box_tls;
     created->box_socket = box_socket;
     created->box_settings = box_settings;
@@ -2259,6 +2410,7 @@ error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
     {
         tb2_mqtt_trace_error("capture_open", error);
         tb2_mqtt_status_attempt_failed("capture_open_failed");
+        osDeleteMutex(&created->io_mutex);
         osFreeMem(created);
         return error;
     }
@@ -2373,11 +2525,19 @@ error_t tb2_mqtt_passthrough_write_local_publish(
                 topic, (unsigned)qos, (unsigned)packet_id,
                 capture_action != NULL ? capture_action : "local_publish",
                 packet_size);
-    return tb2_mqtt_record_packet_ex(
+    error_t error = tb2_mqtt_record_packet_ex(
         session, FALSE, packet, packet_size, NULL, 0,
         TB2_MQTT_PACKET_PUBLISH, topic, TRUE, NULL, TRUE, TRUE,
         capture_action != NULL ? capture_action : "local_publish",
         packet_id, packet_id, FALSE, FALSE, 0);
+    /* HTTP writers never free the main-loop-owned session. Preserve a capture
+     * failure too, so the original coupled-session failure behavior is kept. */
+    if (error)
+    {
+        int expected = NO_ERROR;
+        atomic_compare_exchange_strong(&session->local_publish_error, &expected, error);
+    }
+    return error;
 }
 
 void tb2_mqtt_passthrough_close(tb2_mqtt_passthrough_session_t *session,
@@ -2428,6 +2588,7 @@ void tb2_mqtt_passthrough_close(tb2_mqtt_passthrough_session_t *session,
     tb2_mqtt_qos2_free(&session->blocked_qos2_upstream);
     tb2_mqtt_local_responses_free(session);
     tb2_mqtt_packet_ids_free(session);
+    osDeleteMutex(&session->io_mutex);
     osFreeMem(session);
 }
 

@@ -57,6 +57,8 @@ error_t tb2_mqtt_passthrough_start(struct _TlsContext *box_tls,
 error_t tb2_mqtt_passthrough_forward_initial(tb2_mqtt_passthrough_session_t *session,
                                              const uint8_t *data, size_t length);
 error_t tb2_mqtt_passthrough_task(tb2_mqtt_passthrough_session_t *session);
+/* First terminal box-write error; recovered transient errors are not stored. */
+error_t tb2_mqtt_passthrough_box_write_error(const tb2_mqtt_passthrough_session_t *session);
 error_t tb2_mqtt_passthrough_reserve_local_packet_id(
     tb2_mqtt_passthrough_session_t *session, uint16_t *packet_id);
 void tb2_mqtt_passthrough_release_local_packet_id(

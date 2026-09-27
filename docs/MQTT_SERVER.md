@@ -221,6 +221,36 @@ deadline, not a hard wall-clock limit for an entire TLS call: each socket I/O
 has its own timeout. Once ICI forwarding is established, the existing proxy
 I/O timeout of 500 ms continues to apply.
 
+Box-facing relay writes retry `ERROR_TIMEOUT` and `ERROR_WOULD_BLOCK` at most
+twice while TLS remains in application-data state. No retry starts after 1,500
+monotonic milliseconds from the packet start. This is not a hard total deadline:
+a TLS call may contain several socket operations. The same TLS context resumes
+the unchanged remainder, accounting for `written` even on error; buffered record
+bytes are not encrypted or sent twice. Fatal errors and zero-progress success
+are terminal. The original upstream writer is not given these box retries.
+
+`src/tb2_mqtt_passthrough.c` serializes the existing relay reads, packet writes
+and capture using one session I/O mutex. It releases this lock before invoking
+application observers. `src/mqtt_server.c` uses `MUTEX_MQTT_SESSION` from
+`include/mutex_manager.h` around publishes and connection destruction: an HTTP
+writer cannot free a session still used by the main loop. The lock order is
+session lifetime, then I/O, then capture/status; no callback runs under I/O.
+Final local publish failures are retained for main-loop cleanup. The internal
+error accessor in `include/tb2_mqtt_passthrough.h` distinguishes a terminal box
+write from a capture/upstream failure. This is a narrow delivery safeguard,
+not a general MQTT threading redesign or independent upstream session support.
+
+Diagnostics use `box_write_retry`, `box_write_recovered` and `box_write_failed`
+with box/session, direction, TLS code/state, packet length, credited bytes and
+retry count. Capture first records `box_write_pending` with `forwarded=false`,
+then records the original action only after the complete box write succeeds, or
+`box_write_failed` otherwise. It preserves original and rewritten packet bytes.
+The first terminal box-write error prevents further session TLS I/O. Capture
+and upstream errors retain their existing coupled-session failure behavior;
+this does not restore offline session decoupling, new settings ownership or
+app-control/filter policies. A destroyed TCP/TLS connection still needs a
+reconnect from the box.
+
 The capture is packet-based and records `packet_type`, optional `topic`,
 `forwarded`, optional `filter_id`, `generated`, and `packet_complete`.
 `data_base64` always contains the packet actually received from that direction.
@@ -295,7 +325,10 @@ The implementation currently has these fixed limits:
 | `MQTT_LOG_INLINE_PAYLOAD_SIZE` | `256` | Payload size at which optional full-payload capture replaces inline previews. |
 | `MQTT_FRESH_TONIES_DEBOUNCE_SEC` | `2` | Per-overlay coalescing window before a pending `fresh-tonies` publish may be sent. |
 | `MQTT_FRESH_TONIES_RETRY_INTERVAL_SEC` | `5` | Delay before retrying an unacknowledged per-rUID freshness publish. |
-| `MQTT_FRESH_TONIES_MAX_ATTEMPTS` | `3` | Initial freshness publish plus two retries before closing the connection. |
+| `MQTT_FRESH_TONIES_MAX_ATTEMPTS` | `3` | Initial freshness publish plus two fast retries, then slow retries without disconnecting. |
+| `MQTT_FRESH_TONIES_SLOW_RETRY_INTERVAL_SEC` | `30` | Delay between subsequent freshness retries while PUBACK is missing. |
+| `TB2_MQTT_BOX_WRITE_MAX_RETRIES` | `2` | Additional attempts after transient box TLS write errors. |
+| `TB2_MQTT_BOX_WRITE_RETRY_BUDGET_MS` | `1500` | Monotonic elapsed limit before starting another box-write attempt. |
 | `MQTT_CONNECTION_ESTABLISH_TIMEOUT_MS` | `15000` | Maximum time from TCP accept to completed MQTT CONNECT/CONNACK or transparent initial forwarding. |
 | `MQTT_SETTINGS_DESIRED_MAX_ATTEMPTS` | `3` | Maximum pending settings publishes before waiting for confirm. |
 | `MQTT_SETTINGS_DESIRED_RETRY_INTERVAL_SEC` | `5` | Retry interval for pending settings publishes. |
@@ -529,8 +562,16 @@ does not delay freshness delivery.
 
 The initial publish uses a newly reserved non-zero packet ID and `DUP=0`. If no
 matching `PUBACK` arrives, the same packet ID and payload are retried after five
-and ten seconds with `DUP=1`. Five seconds after the third attempt, the
-connection is closed. Remaining cache entries are retried after reconnect. A
+and ten seconds with `DUP=1`, then every thirty seconds (approximately at 40,
+70, 100 seconds). Missing this ACK alone no longer closes the connection; other
+MQTT traffic can continue. The next freshness UID still waits for the matching
+ACK, which may arrive late. No ACK is invented and the packet ID remains reserved.
+The counter saturates rather than wrapping. Slow mode is logged once, subsequent
+retry attempts at debug level. `include/mqtt_time.h` uses `CLOCK_MONOTONIC` on
+Linux and monotonic ticks on Windows for these intervals and the write-retry
+budget; diagnostic calendar timestamps remain separate. If the clock cannot be
+sampled, no new timed retry starts. Real protocol/transport failures retain the
+existing close/reconnect behavior and remaining cache entries. A
 foreign valid `PUBACK` is only logged by the local server and remains transparent
 in proxy mode.
 
