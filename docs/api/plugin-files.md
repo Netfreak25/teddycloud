@@ -13,7 +13,7 @@ They use the existing web access controls (`SERTY_WEB`) and do not require
 | GET | `/api/plugins/files/read` | Required URL-encoded `path` query parameter. |
 | POST | `/api/plugins/files/upload` | Optional URL-encoded `path` identifying an existing directory; defaults to `/`. Existing `multipart/form-data` format with a `file` field and filename. |
 | POST | `/api/plugins/files/mkdir` | Raw UTF-8 directory path in the request body. Creates one directory. |
-| POST | `/api/plugins/files/move` | Form-encoded `source` and `target` in the request body. Moves a file without overwriting an existing target. |
+| POST | `/api/plugins/files/move` | Form-encoded `source` and `target` in the request body. Moves a file or directory without overwriting an existing target. |
 | POST | `/api/plugins/files/delete` | Raw UTF-8 file path in the request body. |
 | POST | `/api/plugins/files/rmdir` | Raw UTF-8 directory path in the request body. Removes an empty directory. |
 
@@ -52,6 +52,11 @@ characters are rejected. Symlinks and Windows reparse points below the configure
 root cannot be used as path components. The plugin root cannot be deleted or
 moved. The configured root and local filesystem remain administrator-controlled;
 these checks do not provide isolation from concurrent local filesystem changes.
+
+Directory moves use a filesystem rename, supporting staging activation, backups
+and recovery. Existing file or directory targets are rejected. Rename failures,
+including moves across filesystems or into the source directory's own subtree,
+return HTTP 500; directories are never moved by recursively copying and deleting.
 
 ## Client responsibilities
 

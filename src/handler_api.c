@@ -2843,12 +2843,12 @@ error_t handleApiFileMove(HttpConnection *connection, const char_t *uri, const c
     TRACE_INFO("Moving file: '%s' to '%s'\r\n", source, target);
     TRACE_INFO("Moving file: '%s' to '%s'\r\n", sourceAbsolute, targetAbsolute);
 
-    /* fsMoveFile can rename a directory before its file checks; reject it first. */
-    if (isPluginFileRequest(uri) && (fsDirExists(sourceAbsolute) || fsDirExists(targetAbsolute)))
+    /* Both files and directories block a plugin move; never replace an existing target. */
+    if (isPluginFileRequest(uri) && (fsFileExists(targetAbsolute) || fsDirExists(targetAbsolute)))
     {
         osFreeMem(sourceAbsolute);
         osFreeMem(targetAbsolute);
-        return pluginFileError(connection, 400);
+        return pluginFileError(connection, 500);
     }
 
     uint_t statusCode = 200;
@@ -2856,7 +2856,10 @@ error_t handleApiFileMove(HttpConnection *connection, const char_t *uri, const c
 
     osSnprintf(message, sizeof(message), "OK");
 
-    error_t err = fsMoveFile(sourceAbsolute, targetAbsolute, false);
+    /* Directory moves need only rename: the file mover's copy fallback is unsuitable. */
+    error_t err = isPluginFileRequest(uri) && fsDirExists(sourceAbsolute)
+                      ? fsRenameFile(sourceAbsolute, targetAbsolute)
+                      : fsMoveFile(sourceAbsolute, targetAbsolute, false);
 
     if (err != NO_ERROR)
     {

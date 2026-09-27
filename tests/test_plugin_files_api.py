@@ -223,10 +223,52 @@ class PluginFilesTest(unittest.TestCase):
         self.assertEqual((self.folder / "target").read_bytes(), b"target")
         self.assertEqual(self.request("POST", "move", body + "&source=/")[0], 400)
 
-        # Reject directories before the shared mover can rename them.
-        body = urlencode({"source": self.path, "target": self.path + "-renamed"})
-        self.assertEqual(self.request("POST", "move", body)[0], 400)
-        self.assertTrue(self.folder.is_dir())
+    def test_directory_activation_and_recovery(self):
+        for name, payload in (("active", b"old"), ("stage", bytes(range(256)))):
+            nested = self.folder / name / "nested"
+            nested.mkdir(parents=True)
+            (nested / "data.bin").write_bytes(payload)
+
+        # Activate staging only after the previous installation has a backup.
+        for source, target in (("active", "backup"), ("stage", "active"),
+                               ("active", "failed"), ("backup", "active")):
+            expected = (self.folder / source / "nested/data.bin").read_bytes()
+            body = urlencode({"source": self.path + "/" + source, "target": self.path + "/" + target})
+            self.assertEqual(self.request("POST", "move", body), (200, b"OK"))
+            self.assertFalse((self.folder / source).exists())
+            self.assertEqual((self.folder / target / "nested/data.bin").read_bytes(), expected)
+        self.assertEqual((self.folder / "active/nested/data.bin").read_bytes(), b"old")
+
+    def test_move_never_replaces_existing_targets(self):
+        (self.folder / "file").write_bytes(b"unchanged")
+        (self.folder / "empty").mkdir()
+        (self.folder / "directory").mkdir()
+        (self.folder / "directory/child").write_bytes(b"nested")
+
+        # Files, empty directories and populated directories all block a move.
+        for source in ("file", "directory"):
+            for target in ("file", "empty", "directory"):
+                with self.subTest(source=source, target=target):
+                    body = urlencode({"source": self.path + "/" + source, "target": self.path + "/" + target})
+                    self.assertEqual(self.request("POST", "move", body)[0], 500)
+                    self.assertEqual((self.folder / "file").read_bytes(), b"unchanged")
+                    self.assertEqual((self.folder / "directory/child").read_bytes(), b"nested")
+                    self.assertEqual(list((self.folder / "empty").iterdir()), [])
+
+    def test_directory_move_rejects_unsafe_targets(self):
+        source = self.folder / "source"
+        source.mkdir()
+        (source / "child").write_bytes(b"keep")
+        (self.folder / "link").symlink_to(source, target_is_directory=True)
+        (self.folder / "dangling").symlink_to(self.folder / "missing")
+
+        # Root and symlink targets are rejected before rename; self-descendants fail.
+        for target, expected in (("/", 400), (self.path + "/link", 400),
+                                 (self.path + "/dangling", 400), (self.path + "/source/sub", 500)):
+            body = urlencode({"source": self.path + "/source", "target": target})
+            self.assertEqual(self.request("POST", "move", body)[0], expected)
+            self.assertEqual((source / "child").read_bytes(), b"keep")
+            self.assertFalse((source / "sub").exists())
 
     def test_filesystem_failures(self):
         self.assertEqual(self.request("POST", "mkdir", self.path)[0], 500)
