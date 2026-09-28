@@ -5,7 +5,7 @@ FROM alpine:latest AS buildenv
 ARG NO_SANITIZERS=1 # No libsanitizie support in alpine
 
 # Install necessary dependencies
-RUN apk --no-cache add gcc protobuf-c-dev build-base git zip curl ca-certificates
+RUN apk --no-cache add gcc protobuf-c-dev build-base git zip curl ca-certificates libarchive-dev
 
 # Copy source code and build
 COPY . /buildenv
@@ -24,7 +24,7 @@ LABEL org.opencontainers.image.version=$TEDDYCLOUD_VERSION
 EXPOSE 80 443 8443
 
 # Install necessary runtime dependencies
-RUN apk --no-cache add strace ffmpeg curl ca-certificates bash su-exec shadow libcap
+RUN apk --no-cache add libarchive strace ffmpeg curl ca-certificates bash su-exec shadow libcap
 
 # Update CA certificates
 RUN update-ca-certificates

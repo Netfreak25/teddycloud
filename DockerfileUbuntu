@@ -4,7 +4,7 @@ FROM ubuntu:latest AS buildenv
 ARG NO_SANITIZERS=0
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc protobuf-c-compiler build-essential git zip curl ca-certificates
+    && apt-get install -y --no-install-recommends gcc protobuf-c-compiler build-essential git zip curl ca-certificates libarchive-dev
 
 COPY . /buildenv
 WORKDIR /buildenv
@@ -20,7 +20,7 @@ LABEL org.opencontainers.image.version=$TEDDYCLOUD_VERSION
 EXPOSE 80 443 8443
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libubsan1 strace ffmpeg curl ca-certificates gosu libcap2-bin \
+    && apt-get install -y --no-install-recommends libubsan1 libarchive13t64 strace ffmpeg curl ca-certificates gosu libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
 RUN update-ca-certificates

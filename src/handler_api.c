@@ -1,4 +1,6 @@
 
+#include <archive.h>
+#include <archive_entry.h>
 #include <sys/types.h>
 #include <time.h>
 #include <stdbool.h>
@@ -4781,7 +4783,7 @@ error_t handleApiPluginsGet(HttpConnection *connection, const char_t *uri, const
                 fsCloseDir(dir);
                 break;
             }
-            if (osStrcmp(entry.name, ".") == 0 || osStrcmp(entry.name, "..") == 0)
+            if (osStrcmp(entry.name, ".") == 0 || osStrcmp(entry.name, "..") == 0 || osStrcmp(entry.name, ".upload") == 0)
             {
                 continue;
             }
@@ -4798,4 +4800,212 @@ error_t handleApiPluginsGet(HttpConnection *connection, const char_t *uri, const
         return httpWriteResponseString(connection, pluginJson, true);
     }
     return ERROR_FAILURE;
+}
+
+/* Plugin ZIPs use the Community template layout: one folder containing the plugin. */
+#define PLUGIN_EXPANDED_LIMIT (128 * 1024 * 1024)
+#define PLUGIN_ENTRY_LIMIT 4096
+#define PLUGIN_JSON_LIMIT (1024 * 1024)
+
+typedef struct
+{
+    file_save_ctx file;
+    bool started;
+    bool complete;
+} plugin_upload_ctx;
+
+static error_t pluginUploadStart(void *data, const char *name, const char *filename)
+{
+    plugin_upload_ctx *ctx = data;
+    if (ctx->started || osStrcmp(name, "file"))
+        return ERROR_INVALID_REQUEST;
+    ctx->started = true;
+    return file_save_start(&ctx->file, name, "package.zip");
+}
+
+/* Keep TC's file callbacks and track completion for interrupted uploads. */
+static error_t pluginUploadEnd(void *data)
+{
+    plugin_upload_ctx *ctx = data;
+    ctx->complete = file_save_end(&ctx->file) == NO_ERROR;
+    ctx->file.filename = NULL;
+    return ctx->complete ? NO_ERROR : ERROR_FAILURE;
+}
+
+static bool pluginIdValid(const char *id)
+{
+    return *id && *id != '.' && id[osStrlen(id) - 1] != '.' &&
+        strspn(id, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") == osStrlen(id);
+}
+
+static error_t pluginRemove(const char *path)
+{
+    /* Remove files/links and empty directories before descending into real directories. */
+    if (fsDeleteFile(path) == NO_ERROR || fsRemoveDir(path) == NO_ERROR)
+        return NO_ERROR;
+    FsDir *dir = fsOpenDir(path);
+    FsDirEntry entry;
+    error_t error = ERROR_FAILURE;
+    if (!dir)
+        return error;
+    while ((error = fsReadDir(dir, &entry)) == NO_ERROR)
+    {
+        if (!osStrcmp(entry.name, ".") || !osStrcmp(entry.name, ".."))
+            continue;
+        char *child = custom_asprintf("%s/%s", path, entry.name);
+        error = child ? pluginRemove(child) : ERROR_OUT_OF_MEMORY;
+        osFreeMem(child);
+        if (error)
+            break;
+    }
+    fsCloseDir(dir);
+    return error == ERROR_END_OF_STREAM ? fsRemoveDir(path) : error;
+}
+
+static bool pluginValid(const char *path)
+{
+    char *filename = custom_asprintf("%s/plugin.json", path);
+    uint32_t size = 0;
+    char *data = NULL;
+    cJSON *json = NULL;
+    bool complete = false;
+    FsFile *file = filename ? fsOpenFile(filename, FS_FILE_MODE_READ) : NULL;
+    size_t received;
+    if (file && fsGetFileSize(filename, &size) == NO_ERROR && size && size <= PLUGIN_JSON_LIMIT)
+    {
+        data = osAllocMem(size + 1);
+        if (data && fsReadFile(file, data, size, &received) == NO_ERROR && received == size)
+        {
+            data[size] = '\0';
+            const char *end;
+            json = cJSON_ParseWithLengthOpts(data, size + 1, &end, false);
+            complete = json && end + strspn(end, " \t\r\n") == data + size;
+        }
+    }
+    if (file)
+        fsCloseFile(file);
+    osFreeMem(data);
+    osFreeMem(filename);
+    /* The WebUI needs a named manifest and a nonempty HTML entry point. */
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(json, "pluginName");
+    filename = custom_asprintf("%s/index.html", path);
+    bool valid = complete && cJSON_IsString(name) && *name->valuestring && filename &&
+        fsGetFileSize(filename, &size) == NO_ERROR && size > 0 && fsFileExists(filename);
+    cJSON_Delete(json);
+    osFreeMem(filename);
+    return valid;
+}
+
+static bool pluginExtract(const char *zip, const char *stage, char *id, size_t idSize)
+{
+    struct archive *archive = archive_read_new();
+    struct archive_entry *entry;
+    size_t total = 0;
+    unsigned count = 0;
+    int result = ARCHIVE_FATAL;
+    if (!archive)
+        return false;
+    archive_read_support_format_zip_seekable(archive);
+    if (archive_read_open_filename(archive, zip, 10240) != ARCHIVE_OK)
+        goto cleanup;
+    while ((result = archive_read_next_header(archive, &entry)) == ARCHIVE_OK)
+    {
+        const char *name = archive_entry_pathname(entry);
+        const char *slash = name ? osStrchr(name, '/') : NULL;
+        result = ARCHIVE_FATAL;
+        /* One named folder, regular files only, with bounded expansion into fresh staging. */
+        if (!slash || slash == name || (size_t)(slash - name) >= idSize ||
+            osStrchr(name, '\\') || osStrchr(name, ':') || archive_entry_symlink(entry) ||
+            archive_entry_hardlink(entry) || archive_entry_is_encrypted(entry) ||
+            (archive_entry_filetype(entry) != AE_IFREG && archive_entry_filetype(entry) != AE_IFDIR))
+            break;
+        if (!*id)
+        {
+            osMemcpy(id, name, slash - name);
+            id[slash - name] = '\0';
+            if (!pluginIdValid(id))
+                break;
+        }
+        if (osStrlen(id) != (size_t)(slash - name) ||
+            osStrncmp(id, name, slash - name) || ++count > PLUGIN_ENTRY_LIMIT ||
+            archive_entry_size(entry) < 0 || archive_entry_size(entry) > PLUGIN_EXPANDED_LIMIT - total)
+            break;
+        total += archive_entry_size(entry);
+        char *path = custom_asprintf("%s/%s", stage, name);
+        if (!path)
+            break;
+        archive_entry_set_pathname(entry, path);
+        archive_entry_set_perm(entry, archive_entry_filetype(entry) == AE_IFDIR ? 0755 : 0644);
+        result = archive_read_extract(archive, entry, ARCHIVE_EXTRACT_SECURE_SYMLINKS |
+            ARCHIVE_EXTRACT_SECURE_NODOTDOT | ARCHIVE_EXTRACT_NO_OVERWRITE);
+        osFreeMem(path);
+        if (result != ARCHIVE_OK)
+            break;
+    }
+cleanup:
+    archive_read_free(archive);
+    return result == ARCHIVE_EOF && count > 0;
+}
+
+error_t handleApiPluginUpload(HttpConnection *connection, const char_t *uri,
+                              const char_t *queryString, client_ctx_t *client_ctx)
+{
+    const char *root = settings_get_string("internal.pluginsdirfull");
+    if (!root || !fsDirExists(root))
+        return httpSendErrorResponse(connection, 500, "Plugin directory unavailable");
+    char *stage = custom_asprintf("%s/.upload", root);
+    if (!stage)
+        return ERROR_OUT_OF_MEMORY;
+    if (fsCreateDir(stage) != NO_ERROR)
+    {
+        osFreeMem(stage);
+        return httpSendErrorResponse(connection, 409, "Plugin operation busy or staging needs cleanup");
+    }
+    /* Receive through TC's multipart parser; staging is published only after validation. */
+    plugin_upload_ctx ctx = {.file = {.root_path = stage}};
+    multipart_cbr_t callbacks = {pluginUploadStart, file_save_add, pluginUploadEnd};
+    char id[128] = "";
+    char *zip = custom_asprintf("%s/package.zip", stage);
+    char *package = NULL, *target = NULL;
+    uint_t status = 400;
+    if (zip && multipart_handle(connection, &callbacks, &ctx) == NO_ERROR && ctx.complete &&
+        pluginExtract(zip, stage, id, sizeof(id)))
+    {
+        package = custom_asprintf("%s/%s", stage, id);
+        target = custom_asprintf("%s/%s", root, id);
+        if (package && target && pluginValid(package))
+            status = fsDirExists(target) || fsFileExists(target) ? 409 :
+                (fsRenameFile(package, target) == NO_ERROR ? 200 : 500);
+    }
+    /* Close partial uploads before removing temporary files, including on Windows. */
+    if (ctx.file.file)
+        file_save_end(&ctx.file);
+    else
+        osFreeMem(ctx.file.filename);
+    if (pluginRemove(stage) != NO_ERROR)
+        status = 500;
+    osFreeMem(zip);
+    osFreeMem(package);
+    osFreeMem(target);
+    osFreeMem(stage);
+    connection->response.keepAlive = false;
+    return status == 200 ? httpOkResponse(connection) :
+        httpSendErrorResponse(connection, status, "Plugin upload failed: check ZIP layout, plugin.json, index.html and existing target");
+}
+
+error_t handleApiPluginDelete(HttpConnection *connection, const char_t *uri,
+                              const char_t *queryString, client_ctx_t *client_ctx)
+{
+    const char *id = uri + osStrlen("/api/plugins/delete/");
+    const char *root = settings_get_string("internal.pluginsdirfull");
+    if (!pluginIdValid(id))
+        return httpSendErrorResponse(connection, 400, "Invalid plugin ID");
+    if (!root || !fsDirExists(root))
+        return httpSendErrorResponse(connection, 500, "Plugin directory unavailable");
+    char *path = custom_asprintf("%s/%s", root, id);
+    uint_t status = 500;
+    if (path)
+        status = !fsDirExists(path) ? 404 : (pluginRemove(path) == NO_ERROR ? 200 : 500);
+    osFreeMem(path);
+    return status == 200 ? httpOkResponse(connection) : httpSendErrorResponse(connection, status, "Plugin deletion failed");
 }
