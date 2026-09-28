@@ -20,6 +20,10 @@ jobs:
       with:
         submodules: recursive
 
+    - name: Install libarchive
+      shell: cmd
+      run: vcpkg install libarchive[core]:x64-windows
+
     - name: Build windows
       id:  build-zip
       shell: cmd
@@ -27,6 +31,8 @@ jobs:
         for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
         if not defined VSINSTALL ( echo Could not locate Visual Studio via vswhere & exit /b 1 )
         call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" && make build PLATFORM=windows SHELL_ENV=bash
+        if errorlevel 1 exit /b 1
+        copy "%VCPKG_INSTALLATION_ROOT%\installed\x64-windows\bin\*.dll" bin\
     - name: Check windows executable existence
       id: check_release
       uses: andstor/file-existence-action@v3
@@ -49,7 +55,7 @@ jobs:
       appendix: ${{ steps.set_data2.outputs.appendix }}
     steps:
     - name: Install build dependencies
-      run: sudo apt-get install -y --no-install-recommends gcc protobuf-c-compiler build-essential
+      run: sudo apt-get install -y --no-install-recommends gcc protobuf-c-compiler build-essential libarchive-dev
     - name: Get current datetime
       id: get-datetime
       run: echo "CURRENT_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV

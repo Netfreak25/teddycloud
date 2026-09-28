@@ -195,7 +195,7 @@ ifneq ($(NO_WARN_FAIL),1)
 endif
 CFLAGS_linux += -ggdb
 CFLAGS_linux += -DFFMPEG_DECODING
-LFLAGS_linux += -pthread -lm
+LFLAGS_linux += -pthread -lm -larchive
 
 ifeq ($(NO_SANITIZERS),2)
 # Workaround for broken libasan (disable it for now)
@@ -222,6 +222,10 @@ SOURCES_windows = \
 LFLAGS_windows = /DEBUG:FULL
 CFLAGS_windows = /DEBUG:FULL /Zi /nologo -DWIN32 /D_UNICODE
 CFLAGS_windows += -DFFMPEG_DECODING
+# libarchive is supplied by vcpkg (or an equivalent native installation).
+LIBARCHIVE_ROOT ?= $(VCPKG_INSTALLATION_ROOT)/installed/x64-windows
+INCLUDES_windows += -I"$(LIBARCHIVE_ROOT)/include"
+LFLAGS_windows += /LIBPATH:"$(LIBARCHIVE_ROOT)/lib" archive.lib
 
 
 ## generic headers/sources

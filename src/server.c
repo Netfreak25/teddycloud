@@ -120,6 +120,8 @@ request_type_t request_paths[] = {
     {REQ_GET, "/api/auth/logout", SERTY_WEB, &handleApiAuthLogout},
     {REQ_POST, "/api/auth/refresh-token", SERTY_WEB, &handleApiAuthRefreshToken},
     /* plugins API */
+    {REQ_POST, "/api/plugins/upload", SERTY_WEB, &handleApiPluginUpload},
+    {REQ_POST, "/api/plugins/delete/", SERTY_WEB, &handleApiPluginDelete},
     {REQ_GET, "/api/plugins/get", SERTY_WEB, &handleApiPluginsGet},
     /* custom API */
     {REQ_POST, "/api/fileDelete", SERTY_WEB, &handleApiFileDelete},

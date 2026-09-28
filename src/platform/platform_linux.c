@@ -313,7 +313,8 @@ error_t socketReceive(Socket *socket, void *data_in,
             }
         }
 
-        if (buff->buffer_used >= size)
+        /* Preserve a CRLF boundary found above, even when the receive buffer is full. */
+        if (buff->buffer_used >= size && (return_count == 0 || return_count > size))
         {
             return_count = size;
         }

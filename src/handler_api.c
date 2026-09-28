@@ -1,4 +1,6 @@
 
+#include <archive.h>
+#include <archive_entry.h>
 #include <sys/types.h>
 #include <time.h>
 #include <stdbool.h>
@@ -4798,4 +4800,146 @@ error_t handleApiPluginsGet(HttpConnection *connection, const char_t *uri, const
         return httpWriteResponseString(connection, pluginJson, true);
     }
     return ERROR_FAILURE;
+}
+
+/* Plugin ZIPs use the Community template layout: one folder containing the plugin. */
+typedef struct
+{
+    file_save_ctx file;
+    error_t error;
+} plugin_upload_ctx;
+
+static bool pluginIdValid(const char *id)
+{
+    return *id && *id != '.' && id[osStrlen(id) - 1] != '.' &&
+        strspn(id, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") == osStrlen(id);
+}
+
+static error_t pluginRemove(const char *path)
+{
+    /* Remove files/links and empty directories before descending into real directories. */
+    if (fsDeleteFile(path) == NO_ERROR || fsRemoveDir(path) == NO_ERROR)
+        return NO_ERROR;
+    FsDir *dir = fsOpenDir(path);
+    FsDirEntry entry;
+    error_t error = ERROR_FAILURE;
+    if (!dir)
+        return error;
+    while ((error = fsReadDir(dir, &entry)) == NO_ERROR)
+    {
+        if (!osStrcmp(entry.name, ".") || !osStrcmp(entry.name, ".."))
+            continue;
+        char *child = custom_asprintf("%s/%s", path, entry.name);
+        error = child ? pluginRemove(child) : ERROR_OUT_OF_MEMORY;
+        osFreeMem(child);
+        if (error)
+            break;
+    }
+    fsCloseDir(dir);
+    return error == ERROR_END_OF_STREAM ? fsRemoveDir(path) : error;
+}
+
+static bool pluginExtract(const char *zip, const char *root)
+{
+    struct archive *archive = archive_read_new();
+    struct archive_entry *entry;
+    char id[128] = "";
+    int result = ARCHIVE_FATAL;
+    if (!archive)
+        return false;
+    archive_read_support_format_zip_seekable(archive);
+    if (archive_read_open_filename(archive, zip, 10240) != ARCHIVE_OK)
+        goto cleanup;
+    while ((result = archive_read_next_header(archive, &entry)) == ARCHIVE_OK)
+    {
+        const char *name = archive_entry_pathname(entry);
+        const char *slash = name ? osStrchr(name, '/') : NULL;
+        result = ARCHIVE_FATAL;
+        /* Keep archive paths inside one plugin folder; libarchive handles extraction. */
+        if (!slash || slash == name || (size_t)(slash - name) >= sizeof(id) ||
+            osStrchr(name, '\\') || osStrchr(name, ':') || archive_entry_symlink(entry) ||
+            archive_entry_hardlink(entry) || archive_entry_is_encrypted(entry) ||
+            (archive_entry_filetype(entry) != AE_IFREG && archive_entry_filetype(entry) != AE_IFDIR))
+            break;
+        if (!*id)
+        {
+            osMemcpy(id, name, slash - name);
+            id[slash - name] = '\0';
+            if (!pluginIdValid(id))
+                break;
+            char *target = custom_asprintf("%s/%s", root, id);
+            bool exists = !target || fsDirExists(target) || fsFileExists(target);
+            osFreeMem(target);
+            if (exists)
+                break;
+        }
+        if (osStrlen(id) != (size_t)(slash - name) ||
+            osStrncmp(id, name, slash - name))
+            break;
+        char *path = custom_asprintf("%s/%s", root, name);
+        if (!path)
+            break;
+        archive_entry_set_pathname(entry, path);
+        archive_entry_set_perm(entry, archive_entry_filetype(entry) == AE_IFDIR ? 0755 : 0644);
+        result = archive_read_extract(archive, entry, ARCHIVE_EXTRACT_SECURE_SYMLINKS |
+            ARCHIVE_EXTRACT_SECURE_NODOTDOT | ARCHIVE_EXTRACT_NO_OVERWRITE);
+        osFreeMem(path);
+        if (result != ARCHIVE_OK)
+            break;
+    }
+cleanup:
+    archive_read_free(archive);
+    return result == ARCHIVE_EOF && *id;
+}
+
+/* Extract each received ZIP directly; retain errors because multipart ignores end results. */
+static error_t pluginUploadEnd(void *data)
+{
+    plugin_upload_ctx *ctx = data;
+    fsCloseFile(ctx->file.file);
+    ctx->file.file = NULL;
+    if (!pluginExtract(ctx->file.filename, ctx->file.root_path))
+        ctx->error = ERROR_FAILURE;
+    if (fsDeleteFile(ctx->file.filename) != NO_ERROR)
+        ctx->error = ERROR_FAILURE;
+    osFreeMem(ctx->file.filename);
+    ctx->file.filename = NULL;
+    return ctx->error;
+}
+
+error_t handleApiPluginUpload(HttpConnection *connection, const char_t *uri,
+                              const char_t *queryString, client_ctx_t *client_ctx)
+{
+    const char *root = settings_get_string("internal.pluginsdirfull");
+    if (!root || !fsDirExists(root))
+        return httpSendErrorResponse(connection, 500, "Plugin directory unavailable");
+    plugin_upload_ctx ctx = {.file = {.root_path = root}};
+    multipart_cbr_t callbacks = {file_save_start, file_save_add, pluginUploadEnd};
+    error_t error = multipart_handle(connection, &callbacks, &ctx);
+    /* Release an interrupted ZIP upload; already extracted files remain in place. */
+    if (ctx.file.file)
+        fsCloseFile(ctx.file.file);
+    if (ctx.file.filename)
+        fsDeleteFile(ctx.file.filename);
+    osFreeMem(ctx.file.filename);
+    connection->response.keepAlive = false;
+    return !error && !ctx.error ? httpOkResponse(connection) :
+        httpSendErrorResponse(connection, 400, "Plugin upload failed: check ZIP layout and existing target");
+}
+
+error_t handleApiPluginDelete(HttpConnection *connection, const char_t *uri,
+                              const char_t *queryString, client_ctx_t *client_ctx)
+{
+    const char *id = uri + osStrlen("/api/plugins/delete/");
+    const char *root = settings_get_string("internal.pluginsdirfull");
+    if (!pluginIdValid(id))
+        return httpSendErrorResponse(connection, 400, "Invalid plugin ID");
+    if (!root || !fsDirExists(root))
+        return httpSendErrorResponse(connection, 500, "Plugin directory unavailable");
+    char *path = custom_asprintf("%s/%s", root, id);
+    uint_t status = 500;
+    if (path)
+        status = !fsDirExists(path) ? 404 : (pluginRemove(path) == NO_ERROR ? 200 : 500);
+    osFreeMem(path);
+    return status == 200 ? httpOkResponse(connection) : httpSendErrorResponse(connection, status, "Plugin deletion failed");
 }

@@ -518,7 +518,8 @@ error_t multipart_handle(HttpConnection *connection, multipart_cbr_t *cbr, void 
         {
             memmove(buffer, &buffer[save_start], leftover);
         }
-    } while (payload_size > 0);
+        /* Headers may end at a packet boundary; fetch the pending body before stopping. */
+    } while (payload_size > 0 || fetch);
 
     return NO_ERROR;
 }
