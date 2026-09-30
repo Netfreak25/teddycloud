@@ -8,8 +8,10 @@
 #include "core/net.h"
 #include "core/socket.h"
 #include "tls.h"
+#include "toniebox_state.h"
 #include "tb2_mqtt_passthrough.h"
 #include "handler.h"
+#include "mutex_manager.h"
 #undef TRACE_DEBUG
 #undef TRACE_INFO
 #undef TRACE_WARNING
@@ -30,6 +32,9 @@ static time_t wall_now;
 static uint32_t monotonic_now;
 static bool_t clock_available, publish_succeeds, lose_clock_on_publish;
 static bool_t allocation_succeeds;
+static bool_t defer_publish, lock_held;
+static tb2_mqtt_local_write_completed_t deferred_completed;
+static void *deferred_context;
 static uint16_t next_packet_id;
 static unsigned warning_count, info_retries, debug_retries;
 static struct {
@@ -69,6 +74,8 @@ static bool_t mqtt_monotonic_ms(uint32_t *now)
 
 void *osAllocMem(size_t size) { return allocation_succeeds ? malloc(size) : NULL; }
 void osFreeMem(void *pointer) { free(pointer); }
+void mutex_lock(mutex_id_t id) { assert(id == MUTEX_MQTT_SESSION && !lock_held); lock_held = TRUE; }
+void mutex_unlock(mutex_id_t id) { assert(id == MUTEX_MQTT_SESSION && lock_held); lock_held = FALSE; }
 
 settings_t *get_settings_id(uint8_t overlay)
 {
@@ -103,13 +110,15 @@ static bool_t mqtt_connection_has_sub(MqttClientConnection *conn, const char *to
     return TRUE;
 }
 
-static bool_t mqtt_connection_publish_packet(MqttClientConnection *conn,
+static mqtt_delivery_result_t mqtt_connection_publish_packet_locked(MqttClientConnection *conn,
     const char *topic, const char *payload, uint8_t qos, bool_t duplicate,
-    uint16_t *packet_id, const char *action)
+    uint16_t *packet_id, const char *action,
+    tb2_mqtt_local_write_completed_t completed, void *context, size_t context_bytes)
 {
     assert(conn->active && strstr(topic, "/fresh-tonies") && qos == 1);
     assert(!strcmp(action, "local_freshness_publish"));
-    if (!publish_succeeds) return FALSE;
+    assert(lock_held && context_bytes == sizeof(MqttFreshDelivery));
+    if (!publish_succeeds) return mqtt_delivery_result(MQTT_DELIVERY_BUSY, ERROR_WOULD_BLOCK);
     if (duplicate) assert(*packet_id != 0);
     else { assert(*packet_id == 0); *packet_id = ++next_packet_id; }
     assert(publish_count < sizeof(publishes) / sizeof(publishes[0]));
@@ -120,13 +129,19 @@ static bool_t mqtt_connection_publish_packet(MqttClientConnection *conn,
              "%s", payload);
     publish_count++;
     if (lose_clock_on_publish) clock_available = FALSE;
-    return TRUE;
+    if (defer_publish) {
+        assert(!deferred_completed);
+        deferred_completed = completed; deferred_context = context;
+        return mqtt_delivery_result(MQTT_DELIVERY_QUEUED, NO_ERROR);
+    }
+    return mqtt_delivery_result(MQTT_DELIVERY_SENT, NO_ERROR);
 }
 
 /* SERVER_FUNCTIONS */
 
 static MqttClientConnection *initialize(size_t entries)
 {
+    assert(!deferred_completed);
     for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
         mqtt_fresh_tonies_reset_connection(&connections[i]);
     memset(connections, 0, sizeof(connections));
@@ -140,6 +155,7 @@ static MqttClientConnection *initialize(size_t entries)
     wall_now = 1000; monotonic_now = 50000;
     clock_available = publish_succeeds = allocation_succeeds = TRUE;
     lose_clock_on_publish = FALSE;
+    defer_publish = FALSE;
     warning_count = info_retries = debug_retries = 0;
     publish_count = 0; next_packet_id = 0;
     MqttClientConnection *conn = &connections[0];
@@ -164,10 +180,10 @@ static void test_schedule_and_delayed_ack(void)
     pump_at(conn, start);
     MqttFreshTonieEntry *first = conn->fresh_tonie_inflight;
     assert(first && first->uid == 1 && first->next && first->next->uid == 2);
-    assert(first->next->next == NULL);
+    assert(first->next->next == NULL); /* Existing cache-order deduplication. */
     const uint16_t id = conn->fresh_tonie_packet_id;
     pump_at(conn, start + 4999); assert(publish_count == 1);
-    wall_now = 900000;
+    wall_now = 900000; /* Wall-clock jumps never affect retry scheduling. */
     pump_at(conn, start + 5000); assert(publish_count == 2);
     wall_now = 1;
     pump_at(conn, start + 10000); assert(publish_count == 3);
@@ -292,6 +308,52 @@ static void test_unsent_publish_does_not_advance_delivery(void)
     assert(publish_count == 2 && conn->fresh_tonie_packet_id == 1);
 }
 
+static void complete_deferred(error_t error)
+{
+    assert(deferred_completed);
+    tb2_mqtt_local_write_completed_t completed = deferred_completed;
+    void *context = deferred_context;
+    deferred_completed = NULL; deferred_context = NULL;
+    completed(context, error);
+}
+
+static void test_deferred_completion_retains_uid_and_retry_boundary(void)
+{
+    MqttClientConnection *conn = initialize(2);
+    defer_publish = TRUE;
+    pump_at(conn, monotonic_now);
+    assert(conn->fresh_tonie_queued && conn->fresh_tonie_queued_uid == 1);
+    assert(!conn->fresh_tonie_inflight && !conn->fresh_tonie_attempts);
+    assert(!conn->fresh_tonie_sent_at_valid);
+    assert(!mqtt_handle_fresh_tonies_puback(conn, 1));
+    pump_at(conn, monotonic_now + 10000);
+    assert(publish_count == 1);
+    cache[0] = 2; cache_count = 1;
+    assert(mqtt_fresh_tonies_sync_connection(conn, &settings));
+    assert(mqtt_fresh_tonie_find(conn, 1) != NULL);
+    complete_deferred(NO_ERROR);
+    assert(!conn->fresh_tonie_queued && conn->fresh_tonie_inflight->uid == 1);
+    assert(conn->fresh_tonie_attempts == 1 && conn->fresh_tonie_sent_at == monotonic_now);
+    assert(mqtt_handle_fresh_tonies_puback(conn, 1));
+    assert(mqtt_fresh_tonie_find(conn, 1) == NULL);
+
+    conn = initialize(1);
+    defer_publish = TRUE;
+    pump_at(conn, monotonic_now);
+    assert(mqtt_server_publish_fresh_tonie_for_overlay(1, 1));
+    assert(conn->fresh_tonie_requeued);
+    complete_deferred(NO_ERROR);
+    assert(mqtt_handle_fresh_tonies_puback(conn, 1));
+    assert(!conn->fresh_tonie_entries->delivered && settings.internal.freshnessCacheChanged);
+
+    conn = initialize(1);
+    defer_publish = TRUE;
+    pump_at(conn, monotonic_now);
+    complete_deferred(ERROR_WRITE_FAILED);
+    assert(!conn->fresh_tonie_queued && !conn->fresh_tonie_inflight);
+    assert(!conn->fresh_tonie_attempts && !conn->fresh_tonie_sent_at_valid);
+}
+
 int main(void)
 {
     test_schedule_and_delayed_ack();
@@ -299,6 +361,7 @@ int main(void)
     test_clock_failure_and_wrap();
     test_sync_and_targeted_changes_keep_inflight();
     test_unsent_publish_does_not_advance_delivery();
+    test_deferred_completion_retains_uid_and_retry_boundary();
     mqtt_fresh_tonies_reset_connection(&connections[0]);
     puts("MQTT fresh delivery PASS: schedule 0/5/10/40/70, delayed ACK, saturation, monotonic failures/wrap, unchanged cache and targeted coalescing");
     return 0;

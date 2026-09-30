@@ -4,6 +4,7 @@
 #include "compiler_port.h"
 #include "error.h"
 #include "settings.h"
+#include "mqtt_delivery.h"
 
 struct _HttpConnection;
 struct _Socket;
@@ -30,6 +31,30 @@ typedef error_t (*tb2_mqtt_publish_observer_t)(
     void *context, bool_t box_to_upstream, const char *topic,
     const uint8_t *payload, size_t payload_len, uint8_t qos,
     tb2_mqtt_observer_result_t *result);
+/** Mainloop completion, outside io_mutex. Failure/cancel handlers must not take
+ * the session lifetime lock: connection teardown can already hold it. */
+typedef void (*tb2_mqtt_local_write_completed_t)(void *context, error_t error);
+typedef struct {
+    const uint8_t *packet;
+    size_t packet_size;
+    const char *topic;
+    uint16_t packet_id;
+    const char *capture_action;
+    tb2_mqtt_local_write_completed_t completed;
+    void *context;
+    size_t context_bytes;
+} tb2_mqtt_local_publish_t;
+
+/** Atomic admission: QUEUED owns callback/context until exactly one completion;
+ * BUSY/FAILED own nothing. Packet/topic/action bytes are copied on admission. */
+mqtt_delivery_result_t tb2_mqtt_passthrough_submit_local_batch(
+    tb2_mqtt_passthrough_session_t *session,
+    const tb2_mqtt_local_publish_t *publishes, size_t count);
+mqtt_delivery_result_t tb2_mqtt_passthrough_submit_local_publish(
+    tb2_mqtt_passthrough_session_t *session, const uint8_t *packet,
+    size_t packet_size, const char *topic, uint16_t packet_id,
+    const char *capture_action, tb2_mqtt_local_write_completed_t completed,
+    void *context, size_t context_bytes);
 typedef enum
 {
     TB2_MQTT_CONTROL_SUBSCRIBE,
@@ -57,6 +82,7 @@ error_t tb2_mqtt_passthrough_start(struct _TlsContext *box_tls,
 error_t tb2_mqtt_passthrough_forward_initial(tb2_mqtt_passthrough_session_t *session,
                                              const uint8_t *data, size_t length);
 error_t tb2_mqtt_passthrough_task(tb2_mqtt_passthrough_session_t *session);
+bool_t tb2_mqtt_passthrough_is_established(const tb2_mqtt_passthrough_session_t *session);
 /* First terminal box-write error; recovered transient errors are not stored. */
 error_t tb2_mqtt_passthrough_box_write_error(const tb2_mqtt_passthrough_session_t *session);
 error_t tb2_mqtt_passthrough_reserve_local_packet_id(

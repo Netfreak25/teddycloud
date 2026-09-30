@@ -4567,6 +4567,10 @@ static error_t api_write_status_response(HttpConnection *connection, uint_t stat
 {
     cJSON *json = cJSON_CreateObject();
     cJSON_AddBoolToObject(json, "ok", ok);
+    if (ok && status_code == 202)
+    {
+        cJSON_AddStringToObject(json, "delivery", "queued");
+    }
     if (message != NULL)
     {
         cJSON_AddStringToObject(json, ok ? "message" : "error", message);
@@ -4586,6 +4590,31 @@ static error_t api_write_status_response(HttpConnection *connection, uint_t stat
     httpPrepareHeader(connection, "application/json; charset=utf-8", osStrlen(json_string));
     connection->response.statusCode = status_code;
     return httpWriteResponse(connection, json_string, connection->response.contentLength, true);
+}
+
+/** Queue admission is not completed delivery. Retain this checkout's control
+ * permissions and failure messages; only distinguish deferred transport work. */
+static error_t api_box_control_delivery(HttpConnection *connection, uint8_t overlay_id,
+                                        const char *command, mqtt_delivery_result_t result,
+                                        const char *sent_message, const char *failure_message,
+                                        const char *request_id)
+{
+    switch (result.status)
+    {
+    case MQTT_DELIVERY_SENT:
+        return api_write_status_response(connection, 200, true, sent_message, request_id);
+    case MQTT_DELIVERY_QUEUED:
+        return api_write_status_response(connection, 202, true,
+                                         "Command accepted; local MQTT delivery is pending", request_id);
+    case MQTT_DELIVERY_BUSY:
+        TRACE_INFO("TB2 MQTT local_control_rejected overlay=%u command=%s reason=send_busy\r\n",
+                   (unsigned int)overlay_id, command);
+        return api_write_status_response(connection, 503, false,
+                                         "Local MQTT connection is temporarily not ready to send; command was not accepted",
+                                         NULL);
+    default:
+        return api_write_status_response(connection, 409, false, failure_message, NULL);
+    }
 }
 
 error_t handleApiNativeLibraryDelete(HttpConnection *connection,
@@ -4858,7 +4887,7 @@ error_t handleApiBoxPlayback(HttpConnection *connection, const char_t *uri, cons
     }
 
     cJSON *action = cJSON_GetObjectItemCaseSensitive(json, "action");
-    bool_t published = FALSE;
+    mqtt_delivery_result_t delivery = mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_INVALID_PARAMETER);
     bool_t action_valid = cJSON_IsString(action) && action->valuestring != NULL;
     if (action_valid && osStrcmp(action->valuestring, "setPosition") == 0)
     {
@@ -4869,7 +4898,7 @@ error_t handleApiBoxPlayback(HttpConnection *connection, const char_t *uri, cons
                        chapter < TONIEFILE_MAX_CHAPTERS;
         if (action_valid)
         {
-            published = mqtt_server_publish_playback_position_for_overlay(overlay_id, chapter, position_ms);
+            delivery = mqtt_server_publish_playback_position_for_overlay(overlay_id, chapter, position_ms);
         }
     }
     else if (action_valid)
@@ -4890,7 +4919,7 @@ error_t handleApiBoxPlayback(HttpConnection *connection, const char_t *uri, cons
 
         if (action_valid)
         {
-            published = mqtt_server_publish_playback_for_overlay(overlay_id, playback_action);
+            delivery = mqtt_server_publish_playback_for_overlay(overlay_id, playback_action);
         }
     }
 
@@ -4899,11 +4928,8 @@ error_t handleApiBoxPlayback(HttpConnection *connection, const char_t *uri, cons
     {
         return api_write_status_response(connection, 400, false, "Unsupported playback action", NULL);
     }
-    if (!published)
-    {
-        return api_write_status_response(connection, 409, false, "Toniebox is offline or not subscribed to playback control", NULL);
-    }
-    return api_write_status_response(connection, 200, true, message, NULL);
+    return api_box_control_delivery(connection, overlay_id, "playback", delivery, message,
+                                    "Toniebox is offline or not subscribed to playback control", NULL);
 }
 
 error_t handleApiBoxVolume(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
@@ -4932,14 +4958,9 @@ error_t handleApiBoxVolume(HttpConnection *connection, const char_t *uri, const 
         return api_write_status_response(connection, 400, false,
                                          "Volume level must be an integer between 1 and 12", NULL);
     }
-    toniebox_state_volume_t previous_volume;
-    tbs_toniebox2_volume_snapshot(overlay_id, &previous_volume);
-    if (!mqtt_server_publish_volume_for_overlay(overlay_id, level))
-    {
-        return api_write_status_response(connection, 409, false, "Toniebox is offline or not subscribed to volume control", NULL);
-    }
-    tbs_toniebox2_volume_command(overlay_id, level, previous_volume.revision);
-    return api_write_status_response(connection, 200, true, message, NULL);
+    mqtt_delivery_result_t delivery = mqtt_server_publish_volume_for_overlay(overlay_id, level);
+    return api_box_control_delivery(connection, overlay_id, "volume", delivery, message,
+                                    "Toniebox is offline or not subscribed to volume control", NULL);
 }
 
 error_t handleApiBoxPing(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
@@ -4953,11 +4974,9 @@ error_t handleApiBoxPing(HttpConnection *connection, const char_t *uri, const ch
     }
 
     char request_id[TBS_TB2_REQUEST_ID_MAX] = "";
-    if (!mqtt_server_publish_ping_for_overlay(overlay_id, request_id, sizeof(request_id)))
-    {
-        return api_write_status_response(connection, 409, false, "Toniebox is offline or not subscribed to ping control", NULL);
-    }
-    return api_write_status_response(connection, 200, true, message, request_id);
+    mqtt_delivery_result_t delivery = mqtt_server_publish_ping_for_overlay(overlay_id, request_id, sizeof(request_id));
+    return api_box_control_delivery(connection, overlay_id, "ping", delivery, message,
+                                    "Toniebox is offline or not subscribed to ping control", request_id);
 }
 
 error_t handleApiBoxBedtime(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
@@ -5063,14 +5082,10 @@ error_t handleApiBoxBedtime(HttpConnection *connection, const char_t *uri, const
         return api_write_status_response(connection, 500, false, "Out of memory", NULL);
     }
 
-    bool_t published = mqtt_server_publish_app_control_stl_for_overlay(overlay_id, payload_json);
+    mqtt_delivery_result_t delivery = mqtt_server_publish_app_control_stl_for_overlay(overlay_id, payload_json);
     cJSON_free(payload_json);
-    if (!published)
-    {
-        return api_write_status_response(connection, 409, false,
-                                         "Toniebox is offline or not subscribed to bedtime control", NULL);
-    }
-    return api_write_status_response(connection, 200, true, message, NULL);
+    return api_box_control_delivery(connection, overlay_id, "stl", delivery, message,
+                                    "Toniebox is offline or not subscribed to bedtime control", NULL);
 }
 
 error_t handleApiBoxSleep(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
@@ -5101,12 +5116,9 @@ error_t handleApiBoxSleep(HttpConnection *connection, const char_t *uri, const c
         return api_write_status_response(connection, 409, false,
                                          "Sleep requires an active bedtime mode", NULL);
     }
-    if (!mqtt_server_publish_app_control_sleep_for_overlay(overlay_id))
-    {
-        return api_write_status_response(connection, 409, false,
-                                         "Toniebox is offline or not subscribed to sleep control", NULL);
-    }
-    return api_write_status_response(connection, 200, true, message, NULL);
+    mqtt_delivery_result_t delivery = mqtt_server_publish_app_control_sleep_for_overlay(overlay_id);
+    return api_box_control_delivery(connection, overlay_id, "sleep", delivery, message,
+                                    "Toniebox is offline or not subscribed to sleep control", NULL);
 }
 
 error_t handleApiBoxShutdown(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
@@ -5144,23 +5156,17 @@ error_t handleApiBoxShutdown(HttpConnection *connection, const char_t *uri, cons
     osSnprintf(bedtime_payload, sizeof(bedtime_payload),
                "{\"state\":\"on\",\"duration\":%u}",
                (unsigned int)API_TB2_BEDTIME_DURATION_MIN);
-    if (!bedtime_active &&
-        !mqtt_server_publish_app_control_stl_for_overlay(overlay_id, bedtime_payload))
+    bool_t bedtime_sent = FALSE;
+    mqtt_delivery_result_t delivery = mqtt_server_publish_shutdown_for_overlay(
+        overlay_id, bedtime_active ? NULL : bedtime_payload, &bedtime_sent);
+    if (delivery.status == MQTT_DELIVERY_FAILED && bedtime_sent)
     {
         return api_write_status_response(connection, 409, false,
-                                         "Could not activate bedtime before shutdown", NULL);
-    }
-
-    if (!mqtt_server_publish_app_control_sleep_for_overlay(overlay_id))
-    {
-        return api_write_status_response(connection, 409, false,
-                                         bedtime_active
-                                             ? "Could not publish shutdown command"
-                                             : "Bedtime was activated but the shutdown command could not be published",
+                                         "Bedtime command was sent, but the sleep command could not be published",
                                          NULL);
     }
-
-    return api_write_status_response(connection, 200, true, message, NULL);
+    return api_box_control_delivery(connection, overlay_id, "sleep", delivery, message,
+                                    "Could not publish shutdown command", NULL);
 }
 
 static error_t loadToniesCustomJsonRoot(const char *configDir, cJSON **outRoot)

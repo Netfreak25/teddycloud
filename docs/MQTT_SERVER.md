@@ -203,8 +203,8 @@ paths, payloads or box identifiers.
 
 Each session writes `session.json` and a full Base64 `traffic.jsonl` capture.
 
-After a newly authenticated connection has completed MQTT CONNECT/CONNACK (or
-the transparent initial forwarding), TeddyCloud closes older active sessions
+After a newly authenticated connection has completed MQTT CONNECT/CONNACK,
+including a fully written forwarded success CONNACK, TeddyCloud closes older active sessions
 for the same canonical box ID and overlay. Failed or incomplete reconnects do
 not displace the working session. Pending freshness remains stored in the
 overlay and is retried on the replacement connection.
@@ -218,18 +218,38 @@ continue; it does not itself close the connection.
 The main loop closes incomplete TLS/MQTT setups with `establishment timeout`
 once it observes 15 seconds since acceptance. This is a loop-checked setup
 deadline, not a hard wall-clock limit for an entire TLS call: each socket I/O
-has its own timeout. Once ICI forwarding is established, the existing proxy
-I/O timeout of 500 ms continues to apply.
+has its own timeout. After TLS setup, the box-facing relay uses session-specific
+nonblocking socket callbacks. The upstream transport retains its existing
+500-ms socket timeout and synchronous connection lifecycle.
 
-Box-facing relay writes retry `ERROR_TIMEOUT` and `ERROR_WOULD_BLOCK` at most
-twice while TLS remains in application-data state. No retry starts after 1,500
-monotonic milliseconds from the packet start. This is not a hard total deadline:
-a TLS call may contain several socket operations. The same TLS context resumes
-the unchanged remainder, accounting for `written` even on error; buffered record
-bytes are not encrypted or sent twice. Fatal errors and zero-progress success
-are terminal. The original upstream writer is not given these box retries.
+The MQTT loop alone operates established box TLS. HTTP threads submit owned
+packets to a FIFO bounded to 32 entries and 1 MiB including copied metadata;
+there is one active TLS write. Each loop pass permits at most four socket
+operations or 16 KiB per box. Hitting this fairness budget is not a socket
+failure. There are no additional threads, persistent queues or offline replay.
 
-`src/tb2_mqtt_passthrough.c` serializes the existing relay reads, packet writes
+`ERROR_TIMEOUT` and `ERROR_WOULD_BLOCK` preserve a usable context and resume
+the unchanged plaintext remainder on later loop passes. Credited bytes are
+not resent; partial ciphertext stays in the same TLS record. Raw socket-byte
+progress resets a monotonic 120-second deadline, including when TLS has not
+yet credited a complete plaintext chunk. Incoming PINGs do not reset this
+send deadline. The same bound applies to pending TLS control output. Fatal
+TLS/socket errors, closed contexts and zero-progress success remain terminal.
+
+No other TLS read, write or shutdown is interleaved with an unfinished
+application write. TLS control output is completed before starting the next
+application packet. The negotiated MQTT keepalive is checked independently
+using monotonic time and the 1.5-times receive interval. It can expire before
+120 seconds: this TLS stack cannot process buffered encrypted PINGs while an
+application write remains unfinished. A 120-second grace period is not promised.
+
+Packet parsing reserves response capacity before observers or QoS side effects.
+Cloud packets are conservatively limited to `(1 MiB - 32 KiB) / 3` before
+processing so original/wire/topic copies and protocol replies fit the bounded
+queue. Exceeding this limit retains this checkout's existing coupled error
+handling; it does not introduce a new independent cloud session.
+
+`src/tb2_mqtt_passthrough.c` serializes packet admission, box I/O steps
 and capture using one session I/O mutex. It releases this lock before invoking
 application observers. `src/mqtt_server.c` uses `MUTEX_MQTT_SESSION` from
 `include/mutex_manager.h` around publishes and connection destruction: an HTTP
@@ -240,9 +260,9 @@ error accessor in `include/tb2_mqtt_passthrough.h` distinguishes a terminal box
 write from a capture/upstream failure. This is a narrow delivery safeguard,
 not a general MQTT threading redesign or independent upstream session support.
 
-Diagnostics use `box_write_retry`, `box_write_recovered` and `box_write_failed`
-with box/session, direction, TLS code/state, packet length, credited bytes and
-retry count. Capture first records `box_write_pending` with `forwarded=false`,
+Diagnostics distinguish send backpressure, resumed delivery, the no-progress
+deadline, MQTT keepalive expiry and fatal errors without additional payloads.
+Capture first records `box_write_pending` with `forwarded=false`,
 then records the original action only after the complete box write succeeds, or
 `box_write_failed` otherwise. It preserves original and rewritten packet bytes.
 The first terminal box-write error prevents further session TLS I/O. Capture
@@ -327,9 +347,10 @@ The implementation currently has these fixed limits:
 | `MQTT_FRESH_TONIES_RETRY_INTERVAL_SEC` | `5` | Delay before retrying an unacknowledged per-rUID freshness publish. |
 | `MQTT_FRESH_TONIES_MAX_ATTEMPTS` | `3` | Initial freshness publish plus two fast retries, then slow retries without disconnecting. |
 | `MQTT_FRESH_TONIES_SLOW_RETRY_INTERVAL_SEC` | `30` | Delay between subsequent freshness retries while PUBACK is missing. |
-| `TB2_MQTT_BOX_WRITE_MAX_RETRIES` | `2` | Additional attempts after transient box TLS write errors. |
-| `TB2_MQTT_BOX_WRITE_RETRY_BUDGET_MS` | `1500` | Monotonic elapsed limit before starting another box-write attempt. |
-| `MQTT_CONNECTION_ESTABLISH_TIMEOUT_MS` | `15000` | Maximum time from TCP accept to completed MQTT CONNECT/CONNACK or transparent initial forwarding. |
+| `TB2_MQTT_BOX_WRITE_STALL_MS` | `120000` | Monotonic interval without actual send progress before closing a stalled box session. |
+| `TB2_MQTT_BOX_IO_OPS_PER_TICK` / `TB2_MQTT_BOX_IO_BYTES_PER_TICK` | `4` / `16384` | Nonblocking socket operation and byte budgets per box and loop pass. |
+| `TB2_MQTT_INFLIGHT_MAX` / `TB2_MQTT_BUFFER_LIMIT` | `32` / `1048576` | Output FIFO entries and owned bytes including completion metadata. |
+| `MQTT_CONNECTION_ESTABLISH_TIMEOUT_MS` | `15000` | Maximum time from TCP accept to completely written local or forwarded successful MQTT CONNACK. |
 | `MQTT_SETTINGS_DESIRED_MAX_ATTEMPTS` | `3` | Maximum pending settings publishes before waiting for confirm. |
 | `MQTT_SETTINGS_DESIRED_RETRY_INTERVAL_SEC` | `5` | Retry interval for pending settings publishes. |
 | `MQTT_APP_CONTROL_REPLY_WINDOW_SEC` | `30` | Time window used to correlate an `app-control/stl` publish with a later bedtime-state reply. |
@@ -609,7 +630,7 @@ toniebox/<box_cn>/app-control/sleep
 toniebox/<box_cn>/app-control/alarm-preview
 ```
 
-Currently implemented direct publish APIs:
+Currently implemented local publish APIs:
 
 | Function | Topic | Payload handling |
 |----------|-------|------------------|
@@ -619,6 +640,7 @@ Currently implemented direct publish APIs:
 | `mqtt_server_publish_ping_for_overlay()` | `toniebox/<box_cn>/app-control/ping` | Generates a bounded server request ID and builds the ping payload. |
 | `mqtt_server_publish_app_control_stl_for_overlay()` | `toniebox/<box_cn>/app-control/stl` | Sends the caller-provided JSON payload after syntax validation and records a local correlation marker. |
 | `mqtt_server_publish_app_control_sleep_for_overlay()` | `toniebox/<box_cn>/app-control/sleep` | Sends the empty JSON object required to put a box with active bedtime mode to sleep. |
+| `mqtt_server_publish_shutdown_for_overlay()` | Ordered STL and sleep, or sleep only | Reserves the pair together on one connection; does not claim execution from queue admission. |
 
 App-control publishes are box-only. The server sends them only to active
 connections that were mapped from a TLS client certificate to the requested
@@ -639,6 +661,21 @@ The confirmed playback payloads are generated only by the server. Resume/play
 uses `{"action":"start"}`; `{"action":"play"}` is never sent. Chapter numbers
 remain zero-based in the protocol. No generic HTTP-to-MQTT command relay is
 provided.
+
+Control senders distinguish `SENT`, `QUEUED`, `BUSY` and `FAILED`. HTTP `200`
+means complete transport delivery; `202`, `ok:true`, `delivery:"queued"` means
+accepted but not yet fully written. Neither proves execution by the box.
+During detected send backpressure new independent commands return HTTP `503`
+and are not collected for later execution. Existing permission failures remain
+HTTP `409`; no per-command cloud ownership policy is imported here.
+
+Settings retry accounting, ping/STL correlation, freshness retry/ACK clocks
+and optimistic playback/volume updates run only after the full packet was
+written. Completion metadata is owned and bound to the concrete connection;
+cancellation cannot update a reused connection slot. Packet IDs remain reserved
+while queued and are released on rejected admission. Shutdown admission is
+all-or-none and retains wire order; a direct-path partial send is reported as
+such, never as confirmed shutdown.
 
 `app-control/stl` is deliberately defensive because the full payload schema is
 not confirmed yet. The server validates that the payload is JSON but does not
@@ -895,6 +932,7 @@ as `BatteryPercent`, `BatteryRaw`, `BatteryCurrent`, `BatteryStatus`,
 | File | Server-relevant occurrence |
 |------|----------------------------|
 | `include/mqtt_server.h` | Public lifecycle and direct publish APIs for the internal server. |
+| `include/mqtt_delivery.h` | Sent/queued/busy/failed admission result shared by the relay, local senders and HTTP endpoints. |
 | `include/toniebox_state_type.h` | Adds bounded TB2 bedtime/STL, playback, claim, battery, headphone, volume, pong and diagnostic snapshot state to the runtime box state. |
 | `src/toniebox_state.c` | Stores semantic TB2 runtime updates and emits the existing playback plus detailed TB2 box events. |
 | `include/settings.h` | `settings_mqtt_server_t` and internal pending-state fields for freshness/settings delivery, including TB2 desired-setting revisions, `internal.v3ForcedVersionUids`/`internal.v3ForcedVersions`/`internal.v3ForcedVersionBaseAudioIds` and the `internal.v3HashedChapterUids` migration guard. |

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise TB2 writes through the unchanged vendored TLS buffering functions.
 
-Function bodies are inserted verbatim from this checkout. Only the
+Function bodies are inserted verbatim, as in the session runtime suite. Only the
 socket, clock, handshake and cryptographic boundaries are controlled by the test;
 the deterministic cipher verifies buffer continuation, not real cryptography.
 """
@@ -23,15 +23,13 @@ def functions(source):
 def main():
     root = Path(__file__).resolve().parents[1]
     source = (root / "src/tb2_mqtt_passthrough.c").read_text(encoding="utf-8")
-    fixture = (root / "tests/test_tb2_mqtt_box_write_runtime.c").read_text(encoding="utf-8")
     production = functions(source)
-    boundaries = functions(fixture)
-    required = {"tb2_mqtt_box_write_all", "tb2_mqtt_passthrough_box_write_error",
-                "tb2_mqtt_record_packet_ex"}
+    required = {"tb2_mqtt_tls_write_step", "tb2_mqtt_passthrough_box_write_error",
+                "tb2_mqtt_box_send", "tb2_mqtt_box_receive", "tb2_mqtt_box_control_step"}
     selected = set()
     while required:
         name = required.pop()
-        if name in selected or name in boundaries:
+        if name in selected:
             continue
         if name not in production:
             raise AssertionError(f"Production function missing: {name}")
@@ -44,6 +42,7 @@ def main():
         vendor.update(functions((root / "cyclone/cyclone_ssl" / filename).read_text(encoding="utf-8")))
     vendor_names = ("tlsGetState", "tlsChangeState", "tlsProcessError", "tlsWriteRecord",
                     "tlsWriteProtocolData", "tlsWrite")
+    fixture = (root / "tests/test_tb2_mqtt_box_write_runtime.c").read_text(encoding="utf-8")
     declarations = source[:FUNCTION.search(source).start()]
     generated = fixture.replace("/* PRODUCTION_DECLARATIONS */", declarations)
     generated = generated.replace("/* PRODUCTION_PROTOTYPES */",

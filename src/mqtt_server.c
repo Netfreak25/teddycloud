@@ -84,6 +84,10 @@ typedef struct {
     size_t subscription_count;
     MqttFreshTonieEntry *fresh_tonie_entries;
     MqttFreshTonieEntry *fresh_tonie_inflight;
+    bool_t fresh_tonie_queued;
+    uint64_t fresh_tonie_queued_uid;
+    bool_t fresh_tonie_requeued;
+    bool_t settings_delivery_queued;
     uint16_t fresh_tonie_packet_id;
     uint16_t next_packet_id;
     uint8_t fresh_tonie_attempts;
@@ -130,6 +134,33 @@ typedef enum {
     MQTT_TB2_SETTING_AGE_MODE,
     MQTT_TB2_SETTING_COUNT
 } MqttToniebox2SettingId;
+
+/** Immutable metadata owned until actual write completion or cancellation. */
+typedef struct {
+    MqttClientConnection *conn;
+    tb2_mqtt_passthrough_session_t *session;
+    uint64_t revisions[MQTT_TB2_SETTING_COUNT];
+    bool_t track_attempt;
+} MqttSettingsDelivery;
+
+typedef struct {
+    MqttClientConnection *conn;
+    tb2_mqtt_passthrough_session_t *session;
+    char command[16];
+    cJSON *payload;
+    uint32_t payload_hash;
+    uint32_t volume_revision;
+    size_t context_bytes;
+} MqttControlDelivery;
+
+typedef struct {
+    MqttClientConnection *conn;
+    tb2_mqtt_passthrough_session_t *session;
+    uint64_t uid;
+    uint16_t packet_id;
+    bool_t duplicate;
+} MqttFreshDelivery;
+
 
 typedef struct {
     const char *json_name;
@@ -325,6 +356,9 @@ static void mqtt_fresh_tonies_reset_connection(MqttClientConnection *conn)
         osFreeMem(removed);
     }
     conn->fresh_tonie_inflight = NULL;
+    conn->fresh_tonie_queued = FALSE;
+    conn->fresh_tonie_queued_uid = 0;
+    conn->fresh_tonie_requeued = FALSE;
     conn->fresh_tonie_packet_id = 0;
     conn->fresh_tonie_attempts = 0;
     conn->fresh_tonie_sent_at = 0;
@@ -387,6 +421,7 @@ static void mqtt_connection_close_locked(MqttClientConnection *conn, const char 
     conn->box_common_name[0] = '\0';
     conn->box_topic_id[0] = '\0';
     conn->observer_local_reply_matched = FALSE;
+    conn->settings_delivery_queued = FALSE;
     if (closed_overlay_id > 0 && closed_overlay_id < MAX_OVERLAYS)
     {
         osMemset(&app_control_stl_state[closed_overlay_id], 0,
@@ -1202,7 +1237,7 @@ static bool_t mqtt_connection_matches_box_overlay(MqttClientConnection *conn, se
 
 static bool_t mqtt_validate_json_payload(const char *payload, const char *label)
 {
-    if (payload == NULL || payload[0] == '\0')
+    if (payload == NULL || payload[0] == '\0' || osStrlen(payload) > MQTT_MAX_PACKET_SIZE)
     {
         TRACE_WARNING("MQTT app-control/%s payload is empty\r\n", label != NULL ? label : "-");
         return FALSE;
@@ -1328,16 +1363,18 @@ static bool_t mqtt_build_publish_packet(const char *topic, const char *payload,
     return TRUE;
 }
 
-static bool_t mqtt_connection_publish_packet_locked(MqttClientConnection *conn,
+static mqtt_delivery_result_t mqtt_connection_publish_packet_locked(MqttClientConnection *conn,
                                              const char *topic,
                                              const char *payload, uint8_t qos,
                                              bool_t duplicate,
                                              uint16_t *packet_id,
-                                             const char *capture_action)
+                                             const char *capture_action,
+                                             tb2_mqtt_local_write_completed_t completed, void *context,
+                                             size_t context_bytes)
 {
     if (conn == NULL || !conn->active || topic == NULL || payload == NULL ||
         packet_id == NULL)
-        return FALSE;
+        return mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_INVALID_PARAMETER);
 
     bool_t reserved_passthrough_id = FALSE;
     if (qos == 1 && *packet_id == 0)
@@ -1350,7 +1387,7 @@ static bool_t mqtt_connection_publish_packet_locked(MqttClientConnection *conn,
             {
                 TRACE_ERROR("MQTT local packet-id reservation failed: %s\r\n",
                             error2text(reserve_error));
-                return FALSE;
+                return mqtt_delivery_result(MQTT_DELIVERY_BUSY, reserve_error);
             }
             reserved_passthrough_id = TRUE;
         }
@@ -1376,17 +1413,23 @@ static bool_t mqtt_connection_publish_packet_locked(MqttClientConnection *conn,
             *packet_id = 0;
         }
         TRACE_ERROR("Failed to allocate or encode MQTT PUBLISH packet\r\n");
-        return FALSE;
+        return mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_OUT_OF_MEMORY);
     }
 
     size_t written = 0;
     error_t error = NO_ERROR;
     if (conn->passthrough != NULL)
     {
-        error = tb2_mqtt_passthrough_write_local_publish(
+        mqtt_delivery_result_t result = tb2_mqtt_passthrough_submit_local_publish(
             conn->passthrough, packet, packet_size, topic, *packet_id,
-            capture_action);
-        written = error ? 0 : packet_size;
+            capture_action, completed, context, context_bytes);
+        osFreeMem(packet);
+        if (!mqtt_delivery_accepted(result) && reserved_passthrough_id)
+        {
+            tb2_mqtt_passthrough_release_local_packet_id(conn->passthrough, *packet_id);
+            *packet_id = 0;
+        }
+        return result;
     }
     else if (conn->tlsContext)
     {
@@ -1411,11 +1454,9 @@ static bool_t mqtt_connection_publish_packet_locked(MqttClientConnection *conn,
                       written,
                       error2text(error));
         osFreeMem(packet);
-        /* The main loop owns relay teardown, including terminal capture errors.
-         * The session retained the error; no HTTP thread may free it here. */
-        if (conn->passthrough == NULL)
-            mqtt_connection_close_locked(conn, "publish write failed");
-        return FALSE;
+        /* Packet sessions returned above; only the legacy transport closes here. */
+        mqtt_connection_close_locked(conn, "publish write failed");
+        return mqtt_delivery_result(MQTT_DELIVERY_FAILED, error ? error : ERROR_WRITE_FAILED);
     }
 
     mqtt_trace_full_publish("tx", topic, (const uint8_t *)payload,
@@ -1436,30 +1477,12 @@ static bool_t mqtt_connection_publish_packet_locked(MqttClientConnection *conn,
     }
 
     osFreeMem(packet);
-    return TRUE;
+    return mqtt_delivery_result(MQTT_DELIVERY_SENT, NO_ERROR);
 }
 
-static bool_t mqtt_connection_publish_packet(MqttClientConnection *conn,
-                                             const char *topic, const char *payload,
-                                             uint8_t qos, bool_t duplicate,
-                                             uint16_t *packet_id,
-                                             const char *capture_action)
-{
-    mutex_lock(MUTEX_MQTT_SESSION);
-    bool_t sent = mqtt_connection_publish_packet_locked(conn, topic, payload, qos,
-        duplicate, packet_id, capture_action);
-    mutex_unlock(MUTEX_MQTT_SESSION);
-    return sent;
-}
 
-static bool_t mqtt_connection_publish(MqttClientConnection *conn,
-                                      const char *topic, const char *payload,
-                                      const char *capture_action)
-{
-    uint16_t packet_id = 0;
-    return mqtt_connection_publish_packet(conn, topic, payload, 0, FALSE,
-                                          &packet_id, capture_action);
-}
+
+
 
 static void mqtt_connection_update_context_from_cert(MqttClientConnection *conn)
 {
@@ -1578,6 +1601,39 @@ static bool_t mqtt_is_toniebox2_overlay(settings_t *settings)
     return settings != NULL && settings->internal.config_used && settings->toniebox.boxGeneration == GENERATION_TB2;
 }
 
+static void mqtt_local_settings_completed(void *context, error_t error)
+{
+    MqttSettingsDelivery *delivery = context;
+    MqttClientConnection *conn = delivery->conn;
+    if (!error)
+        mutex_lock(MUTEX_MQTT_SESSION);
+    if (conn->passthrough == delivery->session)
+    {
+        conn->settings_delivery_queued = FALSE;
+        if (!error && conn->active)
+        {
+            settings_t *settings = conn->client_ctx.settings;
+            uint64_t current_revisions[MQTT_TB2_SETTING_COUNT];
+            mqtt_copy_u64_settings_array(settings, "internal.toniebox2SettingsDesiredRevisions",
+                current_revisions);
+            bool_t current_attempt = osMemcmp(current_revisions, delivery->revisions,
+                sizeof(current_revisions)) == 0;
+            if (delivery->track_attempt && current_attempt && settings->internal.toniebox2SettingsDesiredPending)
+            {
+                settings_set_unsigned_id("internal.toniebox2SettingsDesiredAttempts",
+                    settings->internal.toniebox2SettingsDesiredAttempts + 1, settings->internal.overlayNumber);
+                settings_set_unsigned_id("internal.toniebox2SettingsDesiredLastAttempt",
+                    (uint32_t)time(NULL), settings->internal.overlayNumber);
+            }
+            TRACE_INFO("MQTT settings response sent overlay=%u\r\n",
+                (unsigned)settings->internal.overlayNumber);
+        }
+    }
+    if (!error)
+        mutex_unlock(MUTEX_MQTT_SESSION);
+    osFreeMem(delivery);
+}
+
 static bool_t mqtt_publish_settings_desired_to_connection(MqttClientConnection *conn, bool_t track_pending_attempt)
 {
     if (!mqtt_connection_local_control_allowed(conn))
@@ -1599,26 +1655,43 @@ static bool_t mqtt_publish_settings_desired_to_connection(MqttClientConnection *
         return FALSE;
     }
 
-    bool_t published = mqtt_connection_publish(conn, topic, settings_payload,
-                                                "local_settings_desired");
-    osFreeMem(settings_payload);
-
-    if (published && track_pending_attempt && settings->internal.toniebox2SettingsDesiredPending)
+    MqttSettingsDelivery *delivery = osAllocMem(sizeof(*delivery));
+    cJSON *sent = cJSON_Parse(settings_payload);
+    if (delivery == NULL || sent == NULL)
     {
-        uint32_t attempts = settings->internal.toniebox2SettingsDesiredAttempts + 1;
-        uint32_t now = (uint32_t)time(NULL);
-        settings_set_unsigned_id("internal.toniebox2SettingsDesiredAttempts", attempts, settings->internal.overlayNumber);
-        settings_set_unsigned_id("internal.toniebox2SettingsDesiredLastAttempt", now, settings->internal.overlayNumber);
-
-        if (attempts >= MQTT_SETTINGS_DESIRED_MAX_ATTEMPTS)
-        {
-            TRACE_WARNING("MQTT settings desired sent %u times for %s, waiting for confirm\r\n",
-                          (unsigned)attempts,
-                          settings->commonName);
-        }
+        osFreeMem(delivery);
+        cJSON_Delete(sent);
+        osFreeMem(settings_payload);
+        return FALSE;
     }
-
-    return published;
+    osMemset(delivery, 0, sizeof(*delivery));
+    delivery->conn = conn;
+    delivery->track_attempt = track_pending_attempt;
+    cJSON *history = cJSON_GetObjectItemCaseSensitive(sent, "settings_history");
+    for (size_t i = 0; i < MQTT_TB2_SETTING_COUNT; i++)
+    {
+        cJSON *revision = cJSON_GetObjectItemCaseSensitive(history, toniebox2_settings_descriptors[i].json_name);
+        if (cJSON_IsNumber(revision))
+            delivery->revisions[i] = (uint64_t)revision->valuedouble;
+    }
+    cJSON_Delete(sent);
+    uint16_t packet_id = 0;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    delivery->session = conn->passthrough;
+    bool_t already_queued = conn->settings_delivery_queued;
+    mqtt_delivery_result_t result = already_queued ?
+        mqtt_delivery_result(MQTT_DELIVERY_BUSY, ERROR_WOULD_BLOCK) :
+        mqtt_connection_publish_packet_locked(conn, topic, settings_payload, 0, FALSE,
+            &packet_id, "local_settings_desired", mqtt_local_settings_completed, delivery, sizeof(*delivery));
+    if (result.status == MQTT_DELIVERY_QUEUED)
+        conn->settings_delivery_queued = TRUE;
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    osFreeMem(settings_payload);
+    if (result.status == MQTT_DELIVERY_SENT)
+        mqtt_local_settings_completed(delivery, NO_ERROR);
+    else if (result.status != MQTT_DELIVERY_QUEUED)
+        osFreeMem(delivery);
+    return mqtt_delivery_accepted(result) || already_queued;
 }
 
 static bool_t mqtt_publish_pending_settings_desired_to_connection(MqttClientConnection *conn, bool_t require_subscription, bool_t force)
@@ -3396,6 +3469,11 @@ void mqtt_server_task()
                 }
                 else if (conn->active)
                 {
+                    if (!conn->established && tb2_mqtt_passthrough_is_established(conn->passthrough))
+                    {
+                        conn->established = TRUE;
+                        mqtt_connection_replace_existing_box_sessions(conn);
+                    }
                     mqtt_touch_box_connection(conn);
                     mqtt_publish_pending_settings_desired_to_connection(conn, TRUE, FALSE);
                     mqtt_fresh_tonies_pump(conn);
@@ -3443,7 +3521,7 @@ void mqtt_server_task()
                                 error = tb2_mqtt_passthrough_forward_initial(conn->passthrough,
                                                                              conn->buffer,
                                                                              conn->buffer_len);
-                                if (!error)
+                                if (!error && tb2_mqtt_passthrough_is_established(conn->passthrough))
                                 {
                                     conn->established = TRUE;
                                     mqtt_connection_replace_existing_box_sessions(conn);
@@ -3799,9 +3877,9 @@ void mqtt_server_mark_toniebox2_settings_changed(uint8_t overlay_id)
     mqtt_server_mark_toniebox2_setting_changed(overlay_id, NULL);
 }
 
-static void mqtt_record_app_control_stl(uint8_t overlay_id, const char *payload)
+static void mqtt_record_app_control_stl(uint8_t overlay_id, uint32_t payload_hash)
 {
-    if (overlay_id >= MAX_OVERLAYS || payload == NULL)
+    if (overlay_id >= MAX_OVERLAYS)
     {
         return;
     }
@@ -3814,53 +3892,179 @@ static void mqtt_record_app_control_stl(uint8_t overlay_id, const char *payload)
     {
         state->sequence = 1;
     }
-    state->payload_hash = mqtt_payload_hash(payload);
+    state->payload_hash = payload_hash;
 }
 
-static bool_t mqtt_server_publish_app_control_for_overlay(uint8_t overlay_id, const char *command, const char *payload_json, bool_t record_stl)
+static bool_t mqtt_control_connection_available(MqttClientConnection *conn, settings_t *settings,
+                                                 const char *command)
+{
+    char topic[128];
+    return mqtt_connection_matches_box_overlay(conn, settings) &&
+        mqtt_connection_local_control_allowed(conn) &&
+        mqtt_app_control_topic(conn, command, topic, sizeof(topic)) &&
+        mqtt_connection_has_sub(conn, topic);
+}
+
+static void mqtt_control_delivery_free(MqttControlDelivery *delivery)
+{
+    cJSON_Delete(delivery->payload);
+    osFreeMem(delivery);
+}
+
+static size_t mqtt_control_json_bytes(const cJSON *json)
+{
+    size_t bytes = 0;
+    for (const cJSON *item = json; item != NULL; item = item->next)
+    {
+        bytes += sizeof(*item);
+        bytes += mqtt_control_json_bytes(item->child);
+    }
+    return bytes;
+}
+
+static void mqtt_control_delivery_commit(MqttControlDelivery *delivery)
+{
+    MqttClientConnection *conn = delivery->conn;
+    if (!conn->active || conn->passthrough != delivery->session)
+        return;
+    const char *command = delivery->command;
+    cJSON *payload = delivery->payload;
+    if (osStrcmp(command, "stl") == 0)
+    {
+        mqtt_record_app_control_stl(conn->box_overlay_id, delivery->payload_hash);
+    }
+    else if (osStrcmp(command, "ping") == 0)
+    {
+        const char *request_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(payload, "requestId"));
+        MqttAppControlPingState *state = &app_control_ping_state[conn->box_overlay_id];
+        if (request_id != NULL)
+        {
+            state->valid = TRUE;
+            state->sent_at = osGetSystemTime();
+            osStrncpy(state->request_id, request_id, sizeof(state->request_id) - 1);
+            state->request_id[sizeof(state->request_id) - 1] = '\0';
+        }
+    }
+    else if (osStrcmp(command, "playback") == 0)
+    {
+        const char *action = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(payload, "action"));
+        if (action != NULL && osStrcmp(action, "pause") == 0)
+            tbs_toniebox2_playback_command_state(&conn->client_ctx, TBS_TB2_PLAYBACK_STATUS_PAUSED);
+        else if (action != NULL && osStrcmp(action, "start") == 0)
+            tbs_toniebox2_playback_command_state(&conn->client_ctx, TBS_TB2_PLAYBACK_STATUS_PLAYING);
+    }
+    else if (osStrcmp(command, "volume") == 0)
+    {
+        cJSON *level = cJSON_GetObjectItemCaseSensitive(payload, "level");
+        if (cJSON_IsNumber(level))
+        {
+            uint32_t expected_revision = delivery->volume_revision;
+            if (delivery->session != NULL)
+            {
+                /* The packet owner commits before RX and before the next write. */
+                toniebox_state_volume_t volume;
+                tbs_toniebox2_volume_snapshot(conn->box_overlay_id, &volume);
+                expected_revision = volume.revision;
+            }
+            tbs_toniebox2_volume_command(conn->box_overlay_id, (uint32_t)level->valuedouble,
+                expected_revision);
+        }
+    }
+    TRACE_INFO("MQTT app-control/%s sent for %s\r\n", command,
+        mqtt_connection_common_name(conn));
+}
+
+static void mqtt_local_control_completed(void *context, error_t error)
+{
+    MqttControlDelivery *delivery = context;
+    if (!error)
+    {
+        mutex_lock(MUTEX_MQTT_SESSION);
+        mqtt_control_delivery_commit(delivery);
+        mutex_unlock(MUTEX_MQTT_SESSION);
+    }
+    else
+    {
+        TRACE_WARNING("MQTT app-control/%s delivery failed for %s error=%d\r\n",
+            delivery->command, mqtt_connection_common_name(delivery->conn), (int)error);
+    }
+    /* Close already owns app-control lock: cancellation only disposes metadata. */
+    mqtt_control_delivery_free(delivery);
+}
+
+static MqttControlDelivery *mqtt_control_delivery_create(MqttClientConnection *conn,
+    const char *command, const char *payload_json)
+{
+    MqttControlDelivery *delivery = osAllocMem(sizeof(*delivery));
+    if (delivery == NULL)
+        return NULL;
+    osMemset(delivery, 0, sizeof(*delivery));
+    delivery->conn = conn;
+    delivery->session = conn->passthrough;
+    osStrncpy(delivery->command, command, sizeof(delivery->command) - 1);
+    delivery->payload = cJSON_Parse(payload_json);
+    if (delivery->payload == NULL)
+    {
+        osFreeMem(delivery);
+        return NULL;
+    }
+    delivery->context_bytes = sizeof(*delivery) + mqtt_control_json_bytes(delivery->payload) +
+        osStrlen(payload_json);
+    delivery->payload_hash = mqtt_payload_hash(payload_json);
+    if (osStrcmp(command, "volume") == 0)
+    {
+        toniebox_state_volume_t volume;
+        tbs_toniebox2_volume_snapshot(conn->box_overlay_id, &volume);
+        delivery->volume_revision = volume.revision;
+    }
+    return delivery;
+}
+
+static mqtt_delivery_result_t mqtt_submit_control_locked(MqttClientConnection *conn,
+    const char *command, const char *payload_json)
+{
+    char topic[128];
+    if (!mqtt_app_control_topic(conn, command, topic, sizeof(topic)))
+        return mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_INVALID_PARAMETER);
+    MqttControlDelivery *delivery = mqtt_control_delivery_create(conn, command, payload_json);
+    if (delivery == NULL)
+        return mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_OUT_OF_MEMORY);
+    uint16_t packet_id = 0;
+    mqtt_delivery_result_t result = mqtt_connection_publish_packet_locked(conn, topic,
+        payload_json, 0, FALSE, &packet_id, "local_app_control",
+        mqtt_local_control_completed, delivery, delivery->context_bytes);
+    if (result.status == MQTT_DELIVERY_SENT)
+        mqtt_control_delivery_commit(delivery);
+    if (result.status != MQTT_DELIVERY_QUEUED)
+        mqtt_control_delivery_free(delivery);
+    return result;
+}
+
+static mqtt_delivery_result_t mqtt_server_publish_app_control_for_overlay(uint8_t overlay_id, const char *command, const char *payload_json)
 {
     settings_t *settings = get_settings_id(overlay_id);
     if (!mqtt_is_toniebox2_overlay(settings))
     {
-        return FALSE;
+        return mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_INVALID_PARAMETER);
     }
     if (!mqtt_validate_json_payload(payload_json, command))
     {
-        return FALSE;
+        return mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_INVALID_PARAMETER);
     }
 
-    bool_t published = FALSE;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    mqtt_delivery_result_t result = mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_NOT_CONNECTED);
     for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
     {
         MqttClientConnection *conn = &connections[i];
-        char topic[128];
-        if (mqtt_connection_matches_box_overlay(conn, settings) &&
-            mqtt_app_control_topic(conn, command, topic, sizeof(topic)) &&
-            mqtt_connection_has_sub(conn, topic))
+        if (mqtt_control_connection_available(conn, settings, command))
         {
-            if (mqtt_connection_local_control_allowed(conn) &&
-                mqtt_connection_publish(conn, topic, payload_json,
-                                        "local_app_control"))
-            {
-                published = TRUE;
-            }
+            result = mqtt_submit_control_locked(conn, command, payload_json);
+            break;
         }
     }
-
-    if (published)
-    {
-        if (record_stl)
-        {
-            mqtt_record_app_control_stl(settings->internal.overlayNumber, payload_json);
-        }
-        TRACE_INFO("MQTT app-control/%s sent for %s\r\n", command, settings->commonName);
-    }
-    else
-    {
-        TRACE_INFO("MQTT app-control/%s not sent for %s, no subscribed box connection active\r\n", command, settings->commonName);
-    }
-
-    return published;
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    return result;
 }
 
 static bool_t mqtt_server_has_app_control_subscription(uint8_t overlay_id, const char *command)
@@ -3931,113 +4135,149 @@ static const char *mqtt_server_playback_action_name(mqtt_server_playback_action_
     }
 }
 
-static void mqtt_server_record_playback_command_state(uint8_t overlay_id,
-                                                      toniebox_state_tb2_playback_status_t status)
-{
-    settings_t *settings = get_settings_id(overlay_id);
-    if (!mqtt_is_toniebox2_overlay(settings))
-    {
-        return;
-    }
 
-    for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
-    {
-        MqttClientConnection *conn = &connections[i];
-        if (mqtt_connection_matches_box_overlay(conn, settings))
-        {
-            tbs_toniebox2_playback_command_state(&conn->client_ctx, status);
-            return;
-        }
-    }
-}
 
-bool_t mqtt_server_publish_playback_for_overlay(uint8_t overlay_id, mqtt_server_playback_action_t action)
+mqtt_delivery_result_t mqtt_server_publish_playback_for_overlay(uint8_t overlay_id, mqtt_server_playback_action_t action)
 {
     const char *action_name = mqtt_server_playback_action_name(action);
     if (action_name == NULL)
     {
-        return FALSE;
+        return mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_INVALID_PARAMETER);
     }
 
     char payload[48];
     osSnprintf(payload, sizeof(payload), "{\"action\":\"%s\"}", action_name);
-    bool_t published = mqtt_server_publish_app_control_for_overlay(overlay_id, "playback", payload, FALSE);
-    if (published && action == MQTT_SERVER_PLAYBACK_PAUSE)
-    {
-        mqtt_server_record_playback_command_state(overlay_id, TBS_TB2_PLAYBACK_STATUS_PAUSED);
-    }
-    else if (published && action == MQTT_SERVER_PLAYBACK_START)
-    {
-        mqtt_server_record_playback_command_state(overlay_id, TBS_TB2_PLAYBACK_STATUS_PLAYING);
-    }
-    return published;
+    return mqtt_server_publish_app_control_for_overlay(overlay_id, "playback", payload);
 }
 
-bool_t mqtt_server_publish_playback_position_for_overlay(uint8_t overlay_id, uint32_t chapter, uint32_t position_ms)
+mqtt_delivery_result_t mqtt_server_publish_playback_position_for_overlay(uint8_t overlay_id, uint32_t chapter, uint32_t position_ms)
 {
     if (chapter >= TONIEFILE_MAX_CHAPTERS)
     {
-        return FALSE;
+        return mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_INVALID_PARAMETER);
     }
 
     char payload[96];
     osSnprintf(payload, sizeof(payload),
                "{\"action\":\"setPosition\",\"chapter\":%" PRIu32 ",\"ms\":%" PRIu32 "}",
                chapter, position_ms);
-    return mqtt_server_publish_app_control_for_overlay(overlay_id, "playback", payload, FALSE);
+    return mqtt_server_publish_app_control_for_overlay(overlay_id, "playback", payload);
 }
 
-bool_t mqtt_server_publish_volume_for_overlay(uint8_t overlay_id, uint32_t level)
+mqtt_delivery_result_t mqtt_server_publish_volume_for_overlay(uint8_t overlay_id, uint32_t level)
 {
     if (level < TBS_TB2_VOLUME_LEVEL_MIN || level > TBS_TB2_VOLUME_LEVEL_MAX)
     {
-        return FALSE;
+        return mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_INVALID_PARAMETER);
     }
 
     char payload[32];
     osSnprintf(payload, sizeof(payload), "{\"level\":%" PRIu32 "}", level);
-    return mqtt_server_publish_app_control_for_overlay(overlay_id, "volume", payload, FALSE);
+    return mqtt_server_publish_app_control_for_overlay(overlay_id, "volume", payload);
 }
 
-bool_t mqtt_server_publish_ping_for_overlay(uint8_t overlay_id, char *request_id, size_t request_id_size)
+mqtt_delivery_result_t mqtt_server_publish_ping_for_overlay(uint8_t overlay_id, char *request_id, size_t request_id_size)
 {
     if (overlay_id >= MAX_OVERLAYS || request_id == NULL || request_id_size < TBS_TB2_REQUEST_ID_MAX)
     {
-        return FALSE;
+        return mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_INVALID_PARAMETER);
     }
 
+    mutex_lock(MUTEX_MQTT_SESSION);
     MqttAppControlPingState *state = &app_control_ping_state[overlay_id];
-    uint32_t sequence = state->sequence + 1;
+    uint32_t sequence = ++state->sequence;
     if (sequence == 0)
-    {
-        sequence = 1;
-    }
+        sequence = ++state->sequence;
+    mutex_unlock(MUTEX_MQTT_SESSION);
 
     osSnprintf(request_id, request_id_size, "teddycloud-%" PRIu32, sequence);
     char payload[96];
     osSnprintf(payload, sizeof(payload), "{\"requestId\":\"%s\"}", request_id);
-    if (!mqtt_server_publish_app_control_for_overlay(overlay_id, "ping", payload, FALSE))
-    {
+    mqtt_delivery_result_t result = mqtt_server_publish_app_control_for_overlay(overlay_id, "ping", payload);
+    if (!mqtt_delivery_accepted(result))
         request_id[0] = '\0';
-        return FALSE;
+    return result;
+}
+
+mqtt_delivery_result_t mqtt_server_publish_app_control_stl_for_overlay(uint8_t overlay_id, const char *payload_json)
+{
+    return mqtt_server_publish_app_control_for_overlay(overlay_id, "stl", payload_json);
+}
+
+mqtt_delivery_result_t mqtt_server_publish_app_control_sleep_for_overlay(uint8_t overlay_id)
+{
+    return mqtt_server_publish_app_control_for_overlay(overlay_id, "sleep", "{}");
+}
+
+mqtt_delivery_result_t mqtt_server_publish_shutdown_for_overlay(uint8_t overlay_id,
+    const char *bedtime_payload_json, bool_t *bedtime_sent)
+{
+    if (bedtime_sent != NULL)
+        *bedtime_sent = FALSE;
+    settings_t *settings = get_settings_id(overlay_id);
+    if (!mqtt_is_toniebox2_overlay(settings) ||
+        (bedtime_payload_json != NULL && !mqtt_validate_json_payload(bedtime_payload_json, "stl")))
+        return mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_INVALID_PARAMETER);
+    mqtt_delivery_result_t result = mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_NOT_CONNECTED);
+    mutex_lock(MUTEX_MQTT_SESSION);
+    for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
+    {
+        MqttClientConnection *conn = &connections[i];
+        if (!mqtt_control_connection_available(conn, settings, "sleep") ||
+            (bedtime_payload_json != NULL &&
+             !mqtt_control_connection_available(conn, settings, "stl")))
+            continue;
+        if (conn->passthrough == NULL || bedtime_payload_json == NULL)
+        {
+            if (bedtime_payload_json != NULL)
+            {
+                result = mqtt_submit_control_locked(conn, "stl", bedtime_payload_json);
+                if (result.status != MQTT_DELIVERY_SENT)
+                    break;
+                if (bedtime_sent != NULL)
+                    *bedtime_sent = TRUE;
+            }
+            result = mqtt_submit_control_locked(conn, "sleep", "{}");
+            break;
+        }
+        /* Both packets and completion records exist before the atomic handoff. */
+        const char *commands[] = {"stl", "sleep"};
+        const char *payloads[] = {bedtime_payload_json, "{}"};
+        tb2_mqtt_local_publish_t batch[2] = {0};
+        MqttControlDelivery *deliveries[2] = {0};
+        uint8_t *packets[2] = {0};
+        char topics[2][128];
+        bool_t prepared = TRUE;
+        for (size_t j = 0; j < 2; j++)
+        {
+            deliveries[j] = mqtt_control_delivery_create(conn, commands[j], payloads[j]);
+            if (deliveries[j] == NULL ||
+                !mqtt_app_control_topic(conn, commands[j], topics[j], sizeof(topics[j])) ||
+                !mqtt_build_publish_packet(topics[j], payloads[j], 0, FALSE, 0,
+                    &packets[j], &batch[j].packet_size))
+            {
+                prepared = FALSE;
+                break;
+            }
+            batch[j].packet = packets[j];
+            batch[j].topic = topics[j];
+            batch[j].capture_action = "local_app_control";
+            batch[j].completed = mqtt_local_control_completed;
+            batch[j].context = deliveries[j];
+            batch[j].context_bytes = deliveries[j]->context_bytes;
+        }
+        result = prepared ? tb2_mqtt_passthrough_submit_local_batch(conn->passthrough, batch, 2) :
+            mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_OUT_OF_MEMORY);
+        for (size_t j = 0; j < 2; j++)
+        {
+            osFreeMem(packets[j]);
+            if (result.status != MQTT_DELIVERY_QUEUED && deliveries[j] != NULL)
+                mqtt_control_delivery_free(deliveries[j]);
+        }
+        break;
     }
-
-    state->valid = TRUE;
-    state->sequence = sequence;
-    state->sent_at = osGetSystemTime();
-    osStrncpy(state->request_id, request_id, sizeof(state->request_id) - 1);
-    state->request_id[sizeof(state->request_id) - 1] = '\0';
-    return TRUE;
-}
-
-bool_t mqtt_server_publish_app_control_stl_for_overlay(uint8_t overlay_id, const char *payload_json)
-{
-    return mqtt_server_publish_app_control_for_overlay(overlay_id, "stl", payload_json, TRUE);
-}
-
-bool_t mqtt_server_publish_app_control_sleep_for_overlay(uint8_t overlay_id)
-{
-    return mqtt_server_publish_app_control_for_overlay(overlay_id, "sleep", "{}", FALSE);
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    return result;
 }
 
 static void mqtt_uid_to_ruid(uint64_t uid, char ruid[17])
@@ -4175,7 +4415,8 @@ static bool_t mqtt_fresh_tonies_sync_connection(MqttClientConnection *conn,
         MqttFreshTonieEntry *entry = remaining;
         remaining = entry->next;
         entry->present = FALSE;
-        if (entry == conn->fresh_tonie_inflight)
+        if (entry == conn->fresh_tonie_inflight ||
+            (conn->fresh_tonie_queued && entry->uid == conn->fresh_tonie_queued_uid))
         {
             entry->next = NULL;
             *tail = entry;
@@ -4231,6 +4472,40 @@ static char *mqtt_build_fresh_tonie_payload(uint64_t uid)
     return payload;
 }
 
+static void mqtt_local_fresh_completed(void *context, error_t error)
+{
+    MqttFreshDelivery *delivery = context;
+    MqttClientConnection *conn = delivery->conn;
+    if (!error)
+        mutex_lock(MUTEX_MQTT_SESSION);
+    if (conn->passthrough == delivery->session)
+    {
+        conn->fresh_tonie_queued = FALSE;
+        conn->fresh_tonie_queued_uid = 0;
+        MqttFreshTonieEntry *entry = !error && conn->active
+                                       ? mqtt_fresh_tonie_find(conn, delivery->uid) : NULL;
+        if (entry != NULL)
+        {
+            conn->fresh_tonie_packet_id = delivery->packet_id;
+            conn->fresh_tonie_sent_at_valid = mqtt_monotonic_ms(&conn->fresh_tonie_sent_at);
+            if (!delivery->duplicate)
+            {
+                conn->fresh_tonie_inflight = entry;
+                conn->fresh_tonie_attempts = 1;
+                conn->fresh_tonie_slow_retry_logged = FALSE;
+            }
+            else if (conn->fresh_tonie_attempts < UINT8_MAX)
+                conn->fresh_tonie_attempts++;
+            MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(conn->client_ctx.settings);
+            if (state != NULL)
+                state->last_publish_at = (uint32_t)time(NULL);
+        }
+    }
+    if (!error)
+        mutex_unlock(MUTEX_MQTT_SESSION);
+    osFreeMem(delivery);
+}
+
 static bool_t mqtt_send_fresh_tonie(MqttClientConnection *conn,
                                     MqttFreshTonieEntry *entry,
                                     bool_t duplicate)
@@ -4248,32 +4523,37 @@ static bool_t mqtt_send_fresh_tonie(MqttClientConnection *conn,
         return FALSE;
     }
 
-    uint16_t packet_id = duplicate ? conn->fresh_tonie_packet_id : 0;
-    bool_t published = mqtt_connection_publish_packet(
-        conn, topic, payload, 1, duplicate, &packet_id,
-        "local_freshness_publish");
-    osFreeMem(payload);
-    if (!published)
+    MqttFreshDelivery *delivery = osAllocMem(sizeof(*delivery));
+    if (delivery == NULL)
+    {
+        osFreeMem(payload);
         return FALSE;
-
-    conn->fresh_tonie_packet_id = packet_id;
-    conn->fresh_tonie_sent_at_valid = mqtt_monotonic_ms(&conn->fresh_tonie_sent_at);
-    if (!duplicate)
-    {
-        conn->fresh_tonie_inflight = entry;
-        conn->fresh_tonie_attempts = 1;
-        conn->fresh_tonie_slow_retry_logged = FALSE;
     }
-    else if (conn->fresh_tonie_attempts < UINT8_MAX)
+    delivery->conn = conn;
+    delivery->uid = entry->uid;
+    delivery->duplicate = duplicate;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    delivery->session = conn->passthrough;
+    delivery->packet_id = duplicate ? conn->fresh_tonie_packet_id : 0;
+    mqtt_delivery_result_t result = conn->fresh_tonie_queued ?
+        mqtt_delivery_result(MQTT_DELIVERY_BUSY, ERROR_WOULD_BLOCK) :
+        mqtt_connection_publish_packet_locked(conn, topic, payload, 1, duplicate,
+            &delivery->packet_id, "local_freshness_publish",
+            mqtt_local_fresh_completed, delivery, sizeof(*delivery));
+    if (result.status == MQTT_DELIVERY_QUEUED)
     {
-        conn->fresh_tonie_attempts++;
+        conn->fresh_tonie_queued = TRUE;
+        conn->fresh_tonie_queued_uid = delivery->uid;
+        if (!duplicate)
+            conn->fresh_tonie_requeued = FALSE;
     }
-
-    MqttFreshToniesPublishState *state =
-        mqtt_fresh_tonies_publish_state(settings);
-    if (state != NULL)
-        state->last_publish_at = (uint32_t)time(NULL);
-    return TRUE;
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    osFreeMem(payload);
+    if (result.status == MQTT_DELIVERY_SENT)
+        mqtt_local_fresh_completed(delivery, NO_ERROR);
+    else if (result.status != MQTT_DELIVERY_QUEUED)
+        osFreeMem(delivery);
+    return mqtt_delivery_accepted(result);
 }
 
 static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn)
@@ -4286,6 +4566,8 @@ static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn)
 
     settings_t *settings = conn->client_ctx.settings;
     if (!mqtt_fresh_tonies_sync_connection(conn, settings))
+        return TRUE;
+    if (conn->fresh_tonie_queued)
         return TRUE;
 
     uint32_t now;
@@ -4415,7 +4697,8 @@ static bool_t mqtt_handle_fresh_tonies_puback(MqttClientConnection *conn,
                settings != NULL ? settings->commonName : "-", ruid,
                (unsigned)packet_id, (unsigned)conn->fresh_tonie_attempts);
 
-    conn->fresh_tonie_inflight->delivered = TRUE;
+    conn->fresh_tonie_inflight->delivered = !conn->fresh_tonie_requeued;
+    conn->fresh_tonie_requeued = FALSE;
     conn->fresh_tonie_inflight = NULL;
     conn->fresh_tonie_packet_id = 0;
     conn->fresh_tonie_attempts = 0;
@@ -4504,6 +4787,8 @@ bool_t mqtt_server_publish_fresh_tonie_for_overlay(uint8_t overlay_id,
         }
 
         MqttFreshTonieEntry *entry = mqtt_fresh_tonie_find(conn, uid);
+        if (conn->fresh_tonie_queued && uid == conn->fresh_tonie_queued_uid)
+            conn->fresh_tonie_requeued = TRUE;
         if (entry != NULL && entry != conn->fresh_tonie_inflight)
             entry->delivered = FALSE;
     }

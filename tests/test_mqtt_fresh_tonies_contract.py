@@ -47,15 +47,15 @@ class MqttFreshToniesContractTests(unittest.TestCase):
             "static bool_t mqtt_send_fresh_tonie",
             "static bool_t mqtt_fresh_tonies_pump",
         )
-        self.assertIn("conn, topic, payload, 1, duplicate, &packet_id", sender)
+        self.assertIn("conn, topic, payload, 1, duplicate,", sender)
         self.assertIn(
-            "uint16_t packet_id = duplicate ? conn->fresh_tonie_packet_id : 0",
+            "delivery->packet_id = duplicate ? conn->fresh_tonie_packet_id : 0",
             sender,
         )
 
         encoder = self.server_function(
             "static bool_t mqtt_build_publish_packet",
-            "static bool_t mqtt_connection_publish_packet",
+            "static mqtt_delivery_result_t mqtt_connection_publish_packet_locked",
         )
         self.assertIn("(qos << 1)", encoder)
         self.assertIn("duplicate ? 0x08U : 0", encoder)
@@ -79,8 +79,11 @@ class MqttFreshToniesContractTests(unittest.TestCase):
             "static bool_t mqtt_send_fresh_tonie",
             "static bool_t mqtt_fresh_tonies_pump",
         )
-        self.assertIn("conn->fresh_tonie_attempts < UINT8_MAX", sender)
-        self.assertIn("state->last_publish_at = (uint32_t)time(NULL)", sender)
+        complete = self.server_function("static void mqtt_local_fresh_completed",
+                                        "static bool_t mqtt_send_fresh_tonie")
+        self.assertNotIn("conn->fresh_tonie_attempts++", sender)
+        self.assertIn("conn->fresh_tonie_attempts < UINT8_MAX", complete)
+        self.assertIn("state->last_publish_at = (uint32_t)time(NULL)", complete)
 
     def test_matching_puback_advances_without_clearing_persistent_cache(self):
         ack = self.server_function(
@@ -88,7 +91,7 @@ class MqttFreshToniesContractTests(unittest.TestCase):
             "bool_t mqtt_server_publish_fresh_tonies",
         )
         self.assertIn("packet_id != conn->fresh_tonie_packet_id", ack)
-        self.assertIn("conn->fresh_tonie_inflight->delivered = TRUE", ack)
+        self.assertIn("conn->fresh_tonie_inflight->delivered = !conn->fresh_tonie_requeued", ack)
         self.assertIn("conn->fresh_tonie_inflight = NULL", ack)
         self.assertNotIn("settings_set_bool_id", ack)
 

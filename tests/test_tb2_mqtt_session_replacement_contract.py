@@ -30,11 +30,9 @@ class Tb2MqttSessionReplacementContractTests(unittest.TestCase):
         self.assertLess(connect.index("connack write failed"), connect.index("mqtt_connection_replace_existing_box_sessions(conn)"))
         self.assertLess(connect.index("conn->established = TRUE"), connect.index("mqtt_connection_replace_existing_box_sessions(conn)"))
 
-        passthrough = self.mqtt[
-            self.mqtt.index("tb2_mqtt_passthrough_forward_initial") - 500 :
-            self.mqtt.index("tb2_mqtt_passthrough_forward_initial") + 500
-        ]
-        self.assertIn("if (!error)", passthrough)
+        start = self.mqtt.index("tb2_mqtt_passthrough_forward_initial")
+        passthrough = self.mqtt[start:self.mqtt.index("if (handled)", start)]
+        self.assertIn("if (!error && tb2_mqtt_passthrough_is_established(conn->passthrough))", passthrough)
         self.assertIn("conn->established = TRUE", passthrough)
         self.assertIn("mqtt_connection_replace_existing_box_sessions(conn)", passthrough)
 

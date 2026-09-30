@@ -2,6 +2,7 @@
 
 #include "error.h"
 #include "handler.h"
+#include "mqtt_delivery.h"
 
 typedef enum
 {
@@ -29,9 +30,12 @@ bool_t mqtt_server_publish_fresh_tonie_for_overlay(uint8_t overlay_id,
 void mqtt_server_mark_toniebox2_settings_changed(uint8_t overlay_id);
 void mqtt_server_mark_toniebox2_setting_changed(uint8_t overlay_id, const char *setting_name);
 bool_t mqtt_server_publish_toniebox2_settings_desired_for_overlay(uint8_t overlay_id);
-bool_t mqtt_server_publish_playback_for_overlay(uint8_t overlay_id, mqtt_server_playback_action_t action);
-bool_t mqtt_server_publish_playback_position_for_overlay(uint8_t overlay_id, uint32_t chapter, uint32_t position_ms);
-bool_t mqtt_server_publish_volume_for_overlay(uint8_t overlay_id, uint32_t level);
-bool_t mqtt_server_publish_ping_for_overlay(uint8_t overlay_id, char *request_id, size_t request_id_size);
-bool_t mqtt_server_publish_app_control_stl_for_overlay(uint8_t overlay_id, const char *payload_json);
-bool_t mqtt_server_publish_app_control_sleep_for_overlay(uint8_t overlay_id);
+mqtt_delivery_result_t mqtt_server_publish_playback_for_overlay(uint8_t overlay_id, mqtt_server_playback_action_t action);
+mqtt_delivery_result_t mqtt_server_publish_playback_position_for_overlay(uint8_t overlay_id, uint32_t chapter, uint32_t position_ms);
+mqtt_delivery_result_t mqtt_server_publish_volume_for_overlay(uint8_t overlay_id, uint32_t level);
+mqtt_delivery_result_t mqtt_server_publish_ping_for_overlay(uint8_t overlay_id, char *request_id, size_t request_id_size);
+mqtt_delivery_result_t mqtt_server_publish_app_control_stl_for_overlay(uint8_t overlay_id, const char *payload_json);
+mqtt_delivery_result_t mqtt_server_publish_app_control_sleep_for_overlay(uint8_t overlay_id);
+/** Atomically admit optional STL and Sleep on packet-aware connections. */
+mqtt_delivery_result_t mqtt_server_publish_shutdown_for_overlay(uint8_t overlay_id,
+    const char *bedtime_payload_json, bool_t *bedtime_sent);

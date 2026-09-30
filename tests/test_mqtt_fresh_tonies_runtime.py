@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Exercise production freshness delivery with controlled clock and I/O boundaries.
+"""Exercise the production freshness delivery state machine with controlled I/O.
 
-Queue, sender, pump and acknowledgement functions are compiled verbatim from
-the current checkout. Run using Python and gcc on Linux/WSL.
+Only the clock, publish boundary and settings storage are stubbed. Production
+queue/sender/pump/acknowledgement bodies are compiled verbatim, like the existing
+MQTT server runtime tests. Run using Python and gcc on Linux/WSL.
 """
 from pathlib import Path
 import re
@@ -19,7 +20,7 @@ def main():
         "mqtt_clear_fresh_tonies_pending", "mqtt_fresh_tonie_find",
         "mqtt_fresh_tonies_sync_connection", "mqtt_fresh_tonies_next",
         "mqtt_fresh_tonies_cache_contains", "mqtt_build_fresh_tonie_payload",
-        "mqtt_send_fresh_tonie", "mqtt_fresh_tonies_pump",
+        "mqtt_local_fresh_completed", "mqtt_send_fresh_tonie", "mqtt_fresh_tonies_pump",
         "mqtt_handle_fresh_tonies_puback", "mqtt_server_publish_fresh_tonie_for_overlay",
     )
     functions = []
@@ -32,17 +33,16 @@ def main():
             raise AssertionError(f"Freshness function missing: {name}")
         functions.append(match.group())
     start = source.index("typedef struct {\n    char topic[256];")
-    end = source.index("} MqttClientConnection;", start) + len("} MqttClientConnection;")
-    state = re.search(
-        r"typedef struct \{\n    bool_t pending;[\s\S]*?\n\} MqttFreshToniesPublishState;",
-        source,
-    )
-    if state is None:
-        raise AssertionError("Freshness overlay state missing")
+    end = source.index("} MqttFreshToniesPublishState;", start)
+    end += len("} MqttFreshToniesPublishState;")
     declarations = "\n".join(re.findall(
         r"^#define MQTT_(?:MAX_(?:PACKET_SIZE|CONNECTIONS|SUBSCRIPTIONS)|"
         r"FRESH_TONIES_\w+|MILLISECONDS_PER_SECOND) .+$", source, re.M,
-    )) + "\n" + source[start:end] + "\n" + state.group()
+    )) + "\n" + source[start:end]
+    declarations += "\n" + re.search(
+        r"typedef struct \{\n    MqttClientConnection \*conn;\n"
+        r"    tb2_mqtt_passthrough_session_t \*session;\n    uint64_t uid;[\s\S]*?\n\} MqttFreshDelivery;",
+        source).group()
     fixture = (root / "tests/test_mqtt_fresh_tonies_runtime.c").read_text(encoding="utf-8")
     fixture = fixture.replace("/* SERVER_TYPES */", declarations)
     fixture = fixture.replace("/* SERVER_FUNCTIONS */", "\n\n".join(functions))

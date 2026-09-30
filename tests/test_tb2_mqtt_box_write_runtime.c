@@ -1,7 +1,8 @@
 /* Actual production/vendor function bodies are inserted by the Python runner. */
 #include <assert.h>
-#include <errno.h>
 #include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
 #define clock_gettime test_clock_gettime
 /* PRODUCTION_DECLARATIONS */
 #undef clock_gettime
@@ -43,57 +44,7 @@ static size_t step_count, send_calls, wire_length, encryptions;
 static unsigned tls_calls, boundary_violation;
 static uint32_t monotonic_now, wall_now;
 static bool_t clock_available;
-static bool_t mutex_created, require_io_mutex;
-static size_t capture_count, forwarded_messages, forwarded_bytes;
-static struct {
-    bool_t forwarded;
-    size_t sends;
-    char action[48];
-} captures[16];
-
-void osAcquireMutex(OsMutex *mutex) { assert(pthread_mutex_lock(mutex) == 0); }
-void osReleaseMutex(OsMutex *mutex) { assert(pthread_mutex_unlock(mutex) == 0); }
-
-static error_t tb2_mqtt_capture_packet_ex(tb2_mqtt_capture_t *capture,
-    const char *direction, const uint8_t *data, size_t length,
-    const uint8_t *wire_data, size_t wire_length, uint8_t packet_type,
-    const char *topic, bool_t forwarded, const char *filter_id,
-    bool_t generated, bool_t packet_complete, const char *action,
-    uint16_t packet_id, uint16_t wire_packet_id, size_t removed_count)
-{
-    (void)data; (void)length; (void)wire_data; (void)wire_length;
-    (void)packet_type; (void)topic; (void)filter_id; (void)generated;
-    (void)packet_complete; (void)packet_id; (void)wire_packet_id; (void)removed_count;
-    assert(capture == &session.capture);
-    assert(strcmp(direction, "upstream_to_box") == 0);
-    assert(pthread_mutex_trylock(&session.io_mutex) == EBUSY);
-    assert(capture_count < sizeof(captures) / sizeof(captures[0]));
-    captures[capture_count].forwarded = forwarded;
-    captures[capture_count].sends = send_calls;
-    snprintf(captures[capture_count].action, sizeof(captures[0].action), "%s", action ? action : "");
-    capture_count++;
-    return NO_ERROR;
-}
-
-static void tb2_mqtt_status_add_bytes(bool_t box_to_upstream, size_t length)
-{
-    assert(!box_to_upstream);
-    forwarded_bytes += length;
-}
-
-static void tb2_mqtt_status_add_message(bool_t box_to_upstream, bool_t blocked)
-{
-    assert(!box_to_upstream && !blocked);
-    forwarded_messages++;
-}
-
-static void tb2_mqtt_add_nocloud_stats(tb2_mqtt_passthrough_session_t *context,
-    bool_t box_to_upstream, bool_t rewritten, size_t removed_count)
-{
-    assert(context == &session && !box_to_upstream);
-    (void)rewritten;
-    assert(removed_count == 0);
-}
+static bool_t control_allowed, control_closes;
 
 int test_clock_gettime(clockid_t clock_id, struct timespec *sample)
 {
@@ -108,9 +59,11 @@ systime_t osGetSystemTime(void) { return wall_now; }
 
 error_t tlsConnect(TlsContext *context)
 {
-    (void)context;
-    assert(!"The established-session write must not start a TLS handshake");
-    return ERROR_NOT_CONNECTED;
+    assert(control_allowed && !session.box_write_active);
+    if (control_closes) { context->state = TLS_STATE_CLOSED; return ERROR_TIMEOUT; }
+    /* Installed client/server FSM first flushes pending control data, even in
+     * APPLICATION_DATA; retain the real record-layer implementation here. */
+    return tlsWriteProtocolData(context, NULL, 0, TLS_TYPE_NONE);
 }
 
 error_t tlsSendAlert(TlsContext *context, uint8_t level, uint8_t description)
@@ -140,7 +93,10 @@ static error_t send_callback(TlsSocketHandle handle, const void *data, size_t le
                              size_t *written, uint_t flags)
 {
     assert(handle == &tls && flags == 0);
-    if (require_io_mutex) assert(pthread_mutex_trylock(&session.io_mutex) == EBUSY);
+    *written = 0;
+    if (!session.box_io_ops || !session.box_io_bytes) return ERROR_WOULD_BLOCK;
+    session.box_io_ops--;
+    length = MIN(length, session.box_io_bytes);
     send_step_t step = { .accepted = length, .error = NO_ERROR };
     if (send_calls < step_count) step = steps[send_calls];
     send_calls++;
@@ -148,7 +104,12 @@ static error_t send_callback(TlsSocketHandle handle, const void *data, size_t le
     assert(wire_length + *written <= sizeof(wire));
     memcpy(wire + wire_length, data, *written);
     wire_length += *written;
+    session.box_io_bytes -= *written;
     monotonic_now += step.elapsed;
+    if (*written) {
+        session.box_last_progress = monotonic_now;
+        session.box_progress_clock = clock_available;
+    }
     wall_now = send_calls % 2 ? UINT32_MAX - 100U : 1U;
     if (step.close_context) tls.state = TLS_STATE_CLOSED;
     return step.error;
@@ -183,27 +144,21 @@ static error_t test_tls_write(TlsContext *context, const void *data, size_t leng
 
 static void initialize(void)
 {
-    if (mutex_created) assert(pthread_mutex_destroy(&session.io_mutex) == 0);
     memset(&session, 0, sizeof(session));
-    assert(pthread_mutex_init(&session.io_mutex, NULL) == 0);
-    mutex_created = TRUE;
-    require_io_mutex = FALSE;
     memset(&settings, 0, sizeof(settings));
     memset(&tls, 0, sizeof(tls));
     memset(steps, 0, sizeof(steps));
     memset(tx_buffer, 0, sizeof(tx_buffer));
     step_count = send_calls = wire_length = encryptions = 0;
-    capture_count = forwarded_messages = forwarded_bytes = 0;
-    memset(captures, 0, sizeof(captures));
     tls_calls = boundary_violation = 0;
     monotonic_now = wall_now = 1000;
     clock_available = TRUE;
+    control_allowed = control_closes = FALSE;
     settings.commonName = "test-box";
     settings.internal.overlayNumber = 7;
     session.box_tls = &tls;
     session.box_settings = &settings;
-    session.capture_opened = TRUE;
-    strcpy(session.capture.session_id, "test-session-17");
+    session.owner = 17;
     atomic_init(&session.box_write_error, NO_ERROR);
     tls.state = TLS_STATE_APPLICATION_DATA;
     tls.version = TLS_VERSION_1_2;
@@ -241,6 +196,13 @@ static void expect_wire(const uint8_t *payload, size_t length)
     assert(tb2_mqtt_passthrough_box_write_error(&session) == NO_ERROR);
 }
 
+static error_t tick(const uint8_t *data, size_t length, size_t *offset)
+{
+    session.box_io_ops = TB2_MQTT_BOX_IO_OPS_PER_TICK;
+    session.box_io_bytes = TB2_MQTT_BOX_IO_BYTES_PER_TICK;
+    return tb2_mqtt_tls_write_step(&session, data, length, offset);
+}
+
 static void test_retry_and_buffered_ciphertext(void)
 {
     const uint8_t payload[] = "abcdefghijk";
@@ -248,7 +210,11 @@ static void test_retry_and_buffered_ciphertext(void)
         initialize();
         steps[0] = (send_step_t){0, variant ? ERROR_WOULD_BLOCK : ERROR_TIMEOUT, 500, FALSE};
         step_count = 1;
-        assert(tb2_mqtt_box_write_all(&session, payload, 4) == NO_ERROR);
+        size_t offset = 0;
+        assert(tick(payload, 4, &offset) == ERROR_WOULD_BLOCK);
+        assert(offset == 0 && tls.txRecordLen > 0 && tls.txRecordPos == 0);
+        assert(tb2_mqtt_passthrough_box_write_error(&session) == NO_ERROR);
+        assert(tick(payload, 4, &offset) == NO_ERROR && offset == 4);
         assert(send_calls == 2);
         expect_wire(payload, 4);
     }
@@ -257,7 +223,10 @@ static void test_retry_and_buffered_ciphertext(void)
     steps[1] = (send_step_t){3, NO_ERROR, 0, FALSE};
     steps[2] = (send_step_t){2, ERROR_TIMEOUT, 500, FALSE};
     step_count = 3;
-    assert(tb2_mqtt_box_write_all(&session, payload, sizeof(payload) - 1) == NO_ERROR);
+    size_t offset = 0;
+    assert(tick(payload, sizeof(payload) - 1, &offset) == ERROR_WOULD_BLOCK);
+    assert(offset == 4 && tls.txRecordPos == 5 && encryptions == 2);
+    assert(tick(payload, sizeof(payload) - 1, &offset) == NO_ERROR);
     assert(send_calls == 5 && tls_calls == 2);
     expect_wire(payload, sizeof(payload) - 1);
 
@@ -266,35 +235,50 @@ static void test_retry_and_buffered_ciphertext(void)
     initialize();
     steps[0] = (send_step_t){SIZE_MAX, ERROR_TIMEOUT, 500, FALSE};
     step_count = 1;
-    assert(tb2_mqtt_box_write_all(&session, payload, 4) == NO_ERROR);
+    offset = 0;
+    assert(tick(payload, 4, &offset) == ERROR_WOULD_BLOCK && offset == 0);
+    assert(tls.txRecordPos == tls.txRecordLen);
+    assert(tick(payload, 4, &offset) == NO_ERROR && offset == 4);
     assert(send_calls == 1 && tls_calls == 2);
     expect_wire(payload, 4);
 }
 
-static void test_retry_limits_and_sticky_error(void)
+static void test_stall_deadline_and_sticky_error(void)
 {
     const uint8_t payload[] = "abcd";
     initialize();
-    for (size_t i = 0; i < 4; i++) steps[i] = (send_step_t){0, ERROR_TIMEOUT, 100, FALSE};
+    for (size_t i = 0; i < 4; i++) steps[i] = (send_step_t){0, ERROR_TIMEOUT, 0, FALSE};
     step_count = 4;
-    assert(tb2_mqtt_box_write_all(&session, payload, 4) == ERROR_TIMEOUT);
-    assert(send_calls == 1 + TB2_MQTT_BOX_WRITE_MAX_RETRIES);
+    size_t offset = 0;
+    for (size_t i = 0; i < 3; i++) assert(tick(payload, 4, &offset) == ERROR_WOULD_BLOCK);
+    monotonic_now += TB2_MQTT_BOX_WRITE_STALL_MS - 1;
+    assert(tick(payload, 4, &offset) == ERROR_WOULD_BLOCK);
+    monotonic_now++;
+    assert(tick(payload, 4, &offset) == ERROR_TIMEOUT);
+    assert(send_calls == 4);
     assert(tb2_mqtt_passthrough_box_write_error(&session) == ERROR_TIMEOUT);
     tls.state = TLS_STATE_CLOSED;
-    assert(tb2_mqtt_box_write_all(&session, payload, 4) == ERROR_TIMEOUT);
-    assert(send_calls == 3);
+    assert(tick(payload, 4, &offset) == ERROR_TIMEOUT);
+    assert(send_calls == 4);
 
     initialize();
-    steps[0] = (send_step_t){0, ERROR_TIMEOUT, TB2_MQTT_BOX_WRITE_RETRY_BUDGET_MS, FALSE};
-    step_count = 1;
-    assert(tb2_mqtt_box_write_all(&session, payload, 4) == ERROR_TIMEOUT);
-    assert(send_calls == 1);
+    offset = 0;
+    steps[0] = (send_step_t){1, ERROR_TIMEOUT, 100000, FALSE};
+    steps[1] = (send_step_t){1, ERROR_TIMEOUT, 100000, FALSE};
+    step_count = 2;
+    assert(tick(payload, 4, &offset) == ERROR_WOULD_BLOCK);
+    assert(tick(payload, 4, &offset) == ERROR_WOULD_BLOCK);
+    assert(offset == 0 && tls.txRecordPos == 2);
+    assert(tick(payload, 4, &offset) == NO_ERROR);
+    expect_wire(payload, 4);
 
     initialize();
     monotonic_now = UINT32_MAX - 10U;
     steps[0] = (send_step_t){0, ERROR_TIMEOUT, 20, FALSE};
     step_count = 1;
-    assert(tb2_mqtt_box_write_all(&session, payload, 4) == NO_ERROR);
+    offset = 0;
+    assert(tick(payload, 4, &offset) == ERROR_WOULD_BLOCK);
+    assert(tick(payload, 4, &offset) == NO_ERROR);
     expect_wire(payload, 4);
 }
 
@@ -304,15 +288,17 @@ static void test_fatal_context_and_transport_error(void)
     initialize();
     steps[0] = (send_step_t){0, ERROR_WRITE_FAILED, 0, FALSE};
     step_count = 1;
-    assert(tb2_mqtt_box_write_all(&session, payload, 4) == ERROR_WRITE_FAILED);
+    size_t offset = 0;
+    assert(tick(payload, 4, &offset) == ERROR_WRITE_FAILED);
     assert(tls.state == TLS_STATE_CLOSED && send_calls == 1);
-    assert(tb2_mqtt_box_write_all(&session, payload, 4) == ERROR_WRITE_FAILED);
+    assert(tick(payload, 4, &offset) == ERROR_WRITE_FAILED);
     assert(send_calls == 1);
 
     initialize();
     steps[0] = (send_step_t){0, ERROR_TIMEOUT, 0, TRUE};
     step_count = 1;
-    assert(tb2_mqtt_box_write_all(&session, payload, 4) == ERROR_TIMEOUT);
+    offset = 0;
+    assert(tick(payload, 4, &offset) == ERROR_TIMEOUT);
     assert(send_calls == 1 && tls.state == TLS_STATE_CLOSED);
 }
 
@@ -322,58 +308,80 @@ static void test_defensive_contract_and_unavailable_clock(void)
     for (unsigned violation = 1; violation <= 2; violation++) {
         initialize();
         boundary_violation = violation;
-        assert(tb2_mqtt_box_write_all(&session, payload, 4) == ERROR_WRITE_FAILED);
+        size_t offset = 0;
+        assert(tick(payload, 4, &offset) == ERROR_WRITE_FAILED);
         assert(tls_calls == 1 && send_calls == 0);
         assert(tb2_mqtt_passthrough_box_write_error(&session) == ERROR_WRITE_FAILED);
-        assert(tb2_mqtt_box_write_all(&session, payload, 4) == ERROR_WRITE_FAILED);
+        assert(tick(payload, 4, &offset) == ERROR_WRITE_FAILED);
         assert(tls_calls == 1);
     }
     initialize();
     clock_available = FALSE;
     steps[0] = (send_step_t){0, ERROR_TIMEOUT, 0, FALSE};
     step_count = 1;
-    assert(tb2_mqtt_box_write_all(&session, payload, 4) == ERROR_TIMEOUT);
-    assert(send_calls == 1 && tls_calls == 1);
+    size_t offset = 0;
+    assert(tick(payload, 4, &offset) == ERROR_FAILURE);
+    assert(send_calls == 0 && tls_calls == 0);
 }
 
-static void test_capture_follows_actual_delivery(void)
+static void test_native_nonblocking_callbacks(void)
 {
-    const uint8_t original[] = {1, 2, 3, 4};
-    const uint8_t outgoing[] = {5, 6, 7, 8};
-    for (unsigned failed = 0; failed <= 1; failed++) {
-        initialize();
-        require_io_mutex = TRUE;
-        step_count = failed ? 3 : 1;
-        for (size_t i = 0; i < step_count; i++)
-            steps[i] = (send_step_t){0, ERROR_TIMEOUT, 100, FALSE};
-        error_t error = tb2_mqtt_record_packet_ex(&session, FALSE,
-            original, sizeof(original), outgoing, sizeof(outgoing),
-            TB2_MQTT_PACKET_PUBLISH, "test", TRUE, NULL, FALSE, TRUE,
-            "test_delivery", 0, 0, FALSE, TRUE, 0);
-        assert(error == (failed ? ERROR_TIMEOUT : NO_ERROR));
-        assert(capture_count == 2);
-        assert(!captures[0].forwarded && captures[0].sends == 0);
-        assert(strcmp(captures[0].action, "box_write_pending") == 0);
-        assert(captures[1].forwarded == !failed && captures[1].sends == send_calls);
-        assert(strcmp(captures[1].action, failed ? "box_write_failed" : "test_delivery") == 0);
-        assert(forwarded_messages == !failed);
-        assert(forwarded_bytes == (failed ? 0 : sizeof(outgoing)));
-        assert(session.capture.messages_forwarded_upstream_to_box == !failed);
-        assert(session.capture.bytes_upstream_to_box == (failed ? 0 : sizeof(outgoing)));
-        assert(pthread_mutex_trylock(&session.io_mutex) == 0);
-        assert(pthread_mutex_unlock(&session.io_mutex) == 0);
-        if (!failed) expect_wire(outgoing, sizeof(outgoing));
+    initialize();
+    int pair[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0);
+    Socket sock = {0};
+    sock.descriptor = pair[0];
+    session.box_socket = &sock;
+    int original_flags = fcntl(pair[0], F_GETFL);
+    uint8_t bytes[1024] = {0};
+    size_t written, received;
+    session.box_io_ops = TB2_MQTT_BOX_IO_OPS_PER_TICK;
+    session.box_io_bytes = TB2_MQTT_BOX_IO_BYTES_PER_TICK;
+    assert(tb2_mqtt_box_receive(&session, bytes, sizeof(bytes), &received, 0) == ERROR_WOULD_BLOCK);
+    assert(!received && !session.box_write_stalled);
+    session.box_io_ops = 0;
+    assert(tb2_mqtt_box_send(&session, bytes, sizeof(bytes), &written, 0) == ERROR_WOULD_BLOCK);
+    assert(!written && !session.box_write_stalled);
+    for (size_t i = 0; i < 10000 && !session.box_write_stalled; i++) {
+        session.box_io_ops = 1;
+        session.box_io_bytes = sizeof(bytes);
+        error_t error = tb2_mqtt_box_send(&session, bytes, sizeof(bytes), &written, 0);
+        assert(error == NO_ERROR || error == ERROR_WOULD_BLOCK);
     }
+    assert(session.box_write_stalled && fcntl(pair[0], F_GETFL) == original_flags);
+    assert(recv(pair[1], bytes, sizeof(bytes), MSG_DONTWAIT) > 0);
+    close(pair[0]); close(pair[1]);
+}
+
+static void test_control_output_deadline_and_closed_state(void)
+{
+    initialize();
+    control_allowed = TRUE;
+    const uint8_t alert[] = {1, 100};
+    steps[0] = steps[1] = (send_step_t){0, ERROR_WOULD_BLOCK, 0, FALSE};
+    step_count = 2;
+    session.box_io_ops = 4;
+    session.box_io_bytes = 16384;
+    assert(tlsWriteProtocolData(&tls, alert, sizeof(alert), TLS_TYPE_ALERT) == ERROR_WOULD_BLOCK);
+    assert(tb2_mqtt_box_control_step(&session) == ERROR_WOULD_BLOCK);
+    assert(session.box_control_active && session.keepalive == 0);
+    monotonic_now += TB2_MQTT_BOX_WRITE_STALL_MS;
+    assert(tb2_mqtt_box_control_step(&session) == ERROR_TIMEOUT);
+    assert(send_calls == 2 && tb2_mqtt_passthrough_box_write_error(&session) == ERROR_TIMEOUT);
+    initialize();
+    control_allowed = control_closes = TRUE;
+    assert(tb2_mqtt_box_control_step(&session) == ERROR_TIMEOUT);
+    assert(tb2_mqtt_passthrough_box_write_error(&session) == ERROR_TIMEOUT);
 }
 
 int main(void)
 {
     test_retry_and_buffered_ciphertext();
-    test_retry_limits_and_sticky_error();
+    test_stall_deadline_and_sticky_error();
     test_fatal_context_and_transport_error();
     test_defensive_contract_and_unavailable_clock();
-    test_capture_follows_actual_delivery();
-    assert(pthread_mutex_destroy(&session.io_mutex) == 0);
-    puts("TB2 box write runtime: vendor buffering, bounded retries, sticky errors and capture completion passed");
+    test_native_nonblocking_callbacks();
+    test_control_output_deadline_and_closed_state();
+    puts("TB2 box write runtime: cross-tick vendor records, native nonblocking callbacks, raw progress and sticky errors passed");
     return 0;
 }

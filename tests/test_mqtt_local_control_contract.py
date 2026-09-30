@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import json
+import re
 import unittest
 
 
@@ -33,14 +34,20 @@ class MqttLocalControlContractTests(unittest.TestCase):
             ROOT / "teddycloud_web/src/types/tonieboxTypes.ts"
         ).read_text(encoding="utf-8")
         cls.web_handler = (
-            ROOT / "teddyCloud_web/src/data/SettingsDataHandler.ts"
+            ROOT / "teddycloud_web/src/data/SettingsDataHandler.ts"
         ).read_text(encoding="utf-8")
         cls.layout = json.loads(
             (
                 ROOT
-                / "teddyCloud_web/src/components/common/form/settingsLayout.json"
+                / "teddycloud_web/src/components/common/form/settingsLayout.json"
             ).read_text(encoding="utf-8")
         )
+
+    def server_function(self, name):
+        match = re.search(r"^(?:static )?[\w *]+\b" + re.escape(name) +
+                          r"\([^;]*?\n\{[\s\S]*?\n\}", self.server, re.M)
+        self.assertIsNotNone(match, name)
+        return match.group()
 
     def test_setting_defaults_off_and_is_overlay_eligible(self):
         self.assertIn(
@@ -84,13 +91,14 @@ class MqttLocalControlContractTests(unittest.TestCase):
             "mqtt_server_publish_fresh_tonies(&conn->client_ctx);", self.server
         )
         self.assertIn("if (conn->passthrough != NULL)", self.server)
-        self.assertIn("tb2_mqtt_passthrough_write_local_publish", self.server)
+        self.assertIn("tb2_mqtt_passthrough_submit_local_publish", self.server)
 
         writer = self.proxy[
-            self.proxy.index("error_t tb2_mqtt_passthrough_write_local_publish") :
-            self.proxy.index("void tb2_mqtt_passthrough_close")
+            self.proxy.index("mqtt_delivery_result_t tb2_mqtt_passthrough_submit_local_batch") :
+            self.proxy.index("mqtt_delivery_result_t tb2_mqtt_passthrough_submit_local_publish")
         ]
-        self.assertIn("session, FALSE, packet, packet_size", writer)
+        self.assertIn("MQTT_DELIVERY_QUEUED", writer)
+        self.assertNotIn("tlsWrite(", writer)
         self.assertNotIn("session->upstream.tlsContext", writer)
 
     def test_cloud_to_box_commands_remain_transparent(self):
@@ -142,11 +150,10 @@ class MqttLocalControlContractTests(unittest.TestCase):
         self.assertIn("last_stl->valid = FALSE;", self.server)
 
     def test_app_control_accepts_matching_wildcard_subscriptions(self):
-        publisher = self.server[
-            self.server.index("static bool_t mqtt_server_publish_app_control_for_overlay") :
-            self.server.index("bool_t mqtt_server_has_playback_control")
-        ]
-        self.assertIn("mqtt_connection_has_sub(conn, topic)", publisher)
+        publisher = self.server_function("mqtt_server_publish_app_control_for_overlay")
+        availability = self.server_function("mqtt_control_connection_available")
+        self.assertIn("mqtt_control_connection_available", publisher)
+        self.assertIn("mqtt_connection_has_sub(conn, topic)", availability)
         self.assertNotIn("mqtt_connection_has_exact_sub", self.server)
 
     def test_consumed_qos_is_acked_without_blocked_counter(self):
@@ -213,7 +220,7 @@ class MqttLocalControlContractTests(unittest.TestCase):
             self.server,
         )
         self.assertIn(
-            'mqtt_server_publish_app_control_for_overlay(overlay_id, "sleep", "{}", FALSE)',
+            'mqtt_server_publish_app_control_for_overlay(overlay_id, "sleep", "{}")',
             self.server,
         )
         self.assertIn(
@@ -246,8 +253,8 @@ class MqttLocalControlContractTests(unittest.TestCase):
         self.assertIn("level > TBS_TB2_VOLUME_LEVEL_MAX", incoming)
 
         publisher = self.server[
-            self.server.index("bool_t mqtt_server_publish_volume_for_overlay") :
-            self.server.index("bool_t mqtt_server_publish_ping_for_overlay")
+            self.server.index("mqtt_delivery_result_t mqtt_server_publish_volume_for_overlay") :
+            self.server.index("mqtt_delivery_result_t mqtt_server_publish_ping_for_overlay")
         ]
         self.assertIn("level < TBS_TB2_VOLUME_LEVEL_MIN", publisher)
         self.assertIn("level > TBS_TB2_VOLUME_LEVEL_MAX", publisher)
@@ -297,10 +304,11 @@ class MqttLocalControlContractTests(unittest.TestCase):
             self.handler_api.index("error_t handleApiBoxVolume") :
             self.handler_api.index("error_t handleApiBoxPing")
         ]
-        publish_position = command.index("mqtt_server_publish_volume_for_overlay")
-        record_position = command.index("tbs_toniebox2_volume_command")
-        self.assertLess(publish_position, record_position)
-        self.assertIn("previous_volume.revision", command)
+        self.assertIn("mqtt_server_publish_volume_for_overlay", command)
+        self.assertNotIn("tbs_toniebox2_volume_command", command)
+        completion = self.server_function("mqtt_control_delivery_commit")
+        self.assertIn("tbs_toniebox2_volume_command", completion)
+        self.assertIn("expected_revision", completion)
         self.assertIn("volume->revision != expected_revision", self.state)
 
         self.assertIn("const VOLUME_FALLBACK = 2", self.web_controls)
@@ -350,7 +358,7 @@ class MqttLocalControlContractTests(unittest.TestCase):
         self.assertIn("mqtt_server_has_bedtime_control", shutdown)
         self.assertIn("API_TB2_BEDTIME_DURATION_MIN", shutdown)
         self.assertIn('{\\"state\\":\\"on\\",\\"duration\\":%u}', shutdown)
-        self.assertIn("mqtt_server_publish_app_control_sleep_for_overlay", shutdown)
+        self.assertIn("mqtt_server_publish_shutdown_for_overlay", shutdown)
         self.assertIn('{REQ_POST, "/api/box/shutdown"', self.routes)
 
     def test_web_moon_control_exposes_bedtime_alarm_and_sleep(self):
