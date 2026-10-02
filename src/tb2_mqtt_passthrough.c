@@ -1,3 +1,8 @@
+/* musl exposes struct tcp_info through the GNU libc interface. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1
+#endif
+
 #include <stdint.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -13,7 +18,6 @@
 #include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <linux/sockios.h>
 #endif
 #endif
 
@@ -3386,7 +3390,7 @@ static void tb2_mqtt_debug_snapshot(tb2_mqtt_passthrough_session_t *session, uin
         if (ioctl(session->box_socket->descriptor, FIONREAD, &count) == 0)
             cJSON_AddNumberToObject(detail, "kernel_rx_bytes", count);
         else cJSON_AddStringToObject(detail, "kernel_rx_status", "unavailable");
-        if (ioctl(session->box_socket->descriptor, SIOCOUTQ, &count) == 0)
+        if (ioctl(session->box_socket->descriptor, TIOCOUTQ, &count) == 0)
             cJSON_AddNumberToObject(detail, "kernel_tx_bytes", count);
         else cJSON_AddStringToObject(detail, "kernel_tx_status", "unavailable");
         struct tcp_info info;
