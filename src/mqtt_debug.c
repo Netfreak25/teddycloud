@@ -559,7 +559,7 @@ static void debug_writer(void *context)
         if (!event.line) osWaitForEvent(&debug.wake, 100);
     }
     osAcquireMutex(&debug.mutex); debug.stopped = true; osReleaseMutex(&debug.mutex);
-    osDeleteTask(OS_SELF_TASK_ID);
+    osDeleteTask((OsTaskId)OS_SELF_TASK_ID);
 }
 void mqtt_debug_deinit(void)
 {
