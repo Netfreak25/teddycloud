@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scoped diagnostic opt-in/export contracts for the coupled GitHub MQTT path."""
+"""Scoped diagnostic default/export contracts for the coupled GitHub MQTT path."""
 
 from pathlib import Path
 import re
@@ -43,16 +43,20 @@ class MqttDebugContractTests(unittest.TestCase):
             index.index("cJSON *jsonEntry"),
         )
 
-    def test_diagnostic_enable_is_explicit_and_never_global_or_inherited(self):
+    def test_diagnostic_default_is_box_local_and_explicit_false_is_preserved(self):
         self.assertIn(
-            'OPTION_BOOL("mqtt_server.debug_enabled", &settings->mqtt_server.debug_enabled, FALSE,',
+            'OPTION_BOOL("mqtt_server.debug_enabled", &settings->mqtt_server.debug_enabled, settingsId > 0,',
             SETTINGS,
         )
         inheritance = function(SETTINGS, "void overlay_settings_init_opt")
         self.assertIn('!osStrcmp(opt->option_name, "mqtt_server.debug_enabled")', inheritance)
-        self.assertIn("? false :", inheritance)
+        self.assertIn("? opt->init.bool_value :", inheritance)
         loader = function(SETTINGS, "static error_t settings_load_ovl")
         self.assertIn('!overlay && !osStrcmp(option_name, "mqtt_server.debug_enabled")', loader)
+        self.assertLess(loader.index("overlay_settings_init();"), loader.index('strcmp(value_str, "false")'))
+        self.assertIn('else if (strcmp(value_str, "false") == 0)\n                            {\n                                *((bool *)opt->ptr) = false;', loader)
+        reset = function(SETTINGS, "bool settings_reset_id")
+        self.assertIn("overlay_settings_init_opt(option, globalOption);", reset)
         self.assertIn(
             '!osStrcmp(item, "mqtt_server.debug_enabled") && settingsId == 0 && value',
             SETTINGS,

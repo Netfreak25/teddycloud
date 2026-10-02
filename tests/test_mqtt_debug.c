@@ -3,15 +3,12 @@
 #include "../src/mqtt_debug.c"
 
 static settings_t settings_fixture[3];
-static bool explicit_selection[3];
 
 settings_t *get_settings(void) { return &settings_fixture[0]; }
 settings_t *get_settings_id(uint8_t id) { return id < 3 ? &settings_fixture[id] : NULL; }
 setting_item_t *settings_get_ovl(int index, const char *overlay)
 { (void)index; (void)overlay; return NULL; }
 uint16_t settings_get_size(void) { return 0; }
-bool settings_is_overlayed_id(const char *name, uint8_t id)
-{ assert(!strcmp(name, "mqtt_server.debug_enabled")); return id < 3 && explicit_selection[id]; }
 bool_t settings_canonicalize_box_id(const char *input, char *output, size_t capacity)
 {
     if (!input || strlen(input) != 12 || capacity < 13) return false;
@@ -90,9 +87,21 @@ static bool count_name(const char *name, void *context)
 static void test_selection_packets_and_redaction(char session[64])
 {
     assert(!mqtt_debug_enabled(&settings_fixture[0]));
-    assert(!mqtt_debug_enabled(&settings_fixture[1])); /* Inheritance never arms a box. */
-    explicit_selection[1] = true;
+    /* A box-local default is sufficient; an explicit override is not required. */
     assert(mqtt_debug_enabled(&settings_fixture[1]));
+    settings_fixture[0].mqtt_server.debug_enabled = false;
+    assert(mqtt_debug_enabled(&settings_fixture[1])); /* Not inherited globally. */
+    settings_fixture[1].mqtt_server.debug_enabled = false;
+    assert(!mqtt_debug_enabled(&settings_fixture[1])); /* Explicit opt-out. */
+    settings_fixture[1].mqtt_server.debug_enabled = true;
+    settings_fixture[1].toniebox.boxGeneration = GENERATION_TB1;
+    assert(!mqtt_debug_enabled(&settings_fixture[1]));
+    settings_fixture[1].toniebox.boxGeneration = GENERATION_UNKNOWN;
+    assert(!mqtt_debug_enabled(&settings_fixture[1]));
+    settings_fixture[1].toniebox.boxGeneration = GENERATION_TB2;
+    settings_fixture[1].internal.config_used = false;
+    assert(!mqtt_debug_enabled(&settings_fixture[1]));
+    settings_fixture[1].internal.config_used = true;
     assert(!mqtt_debug_enabled(&settings_fixture[2]));
     mqtt_debug_sync(100, &settings_fixture[1], false);
     mqtt_debug_sync(200, &settings_fixture[2], true);
@@ -362,6 +371,7 @@ int main(int argc, char **argv)
         settings_fixture[i].toniebox.boxGeneration = GENERATION_TB2;
         settings_fixture[i].mqtt_server.debug_enabled = true;
     }
+    settings_fixture[2].mqtt_server.debug_enabled = false;
     mqtt_debug_init(); assert(debug.ready && !debug.error[0]);
     char session[64];
     test_selection_packets_and_redaction(session);
@@ -371,6 +381,6 @@ int main(int argc, char **argv)
     test_status_and_unassigned();
     test_failure_pause_and_shutdown(session);
     test_listener_reload_and_mid_session(session);
-    puts("MQTT debug PASS: opt-in, redaction, queue gaps, rotation/retention, pinned export, status, failure latch, UTC milliseconds and listener reload");
+    puts("MQTT debug PASS: TB2 default-on and opt-out, redaction, queue gaps, rotation/retention, pinned export, status, failure latch, UTC milliseconds and listener reload");
     return 0;
 }

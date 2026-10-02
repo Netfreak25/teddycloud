@@ -608,7 +608,6 @@ bool mqtt_debug_enabled(settings_t *settings)
 {
     return settings && settings->internal.config_used && settings->internal.overlayNumber > 0 &&
         settings->toniebox.boxGeneration == GENERATION_TB2 &&
-        settings_is_overlayed_id("mqtt_server.debug_enabled", settings->internal.overlayNumber) &&
         settings->mqtt_server.debug_enabled;
 }
 static debug_session_t *debug_find(uint64_t owner)

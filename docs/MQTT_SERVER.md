@@ -953,9 +953,13 @@ as `BatteryPercent`, `BatteryRaw`, `BatteryCurrent`, `BatteryStatus`,
 
 ## Per-box MQTT diagnostic recordings
 
-In the TB2 box settings, enable **MQTT-Diagnose aufzeichnen** and save the
-settings. `mqtt_server.debug_enabled` is an explicit box-only value (default
-false), not a global/inherited switch. It survives reconnects and TC restarts.
+In the TB2 box settings, **MQTT-Diagnose aufzeichnen** is enabled by default,
+including existing boxes without an explicit value. `mqtt_server.debug_enabled`
+uses a box-local default, not a global/inherited switch. An explicitly saved
+false remains disabled across reconnects and TC restarts; resetting the box
+setting restores enabled. TB1, unknown generations and global settings never
+start a recording. Message contents can contain personal data despite masking
+recognized credentials; turn the box setting off when recording is not wanted.
 Turning it on during a connection starts a `mid_session_start` snapshot; turning
 it off stops recording, not MQTT. It does not enable the legacy raw capture or
 change its existing failure handling.

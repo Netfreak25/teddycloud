@@ -527,7 +527,7 @@ static void option_map_init(uint8_t settingsId)
     OPTION_READONLY_STRING("mqtt_server.cert.rotation_status", &settings->mqtt_server.cert_status, "Not checked", "ICI certificate status", "Last TB2 ICI certificate reconciliation result", LEVEL_EXPERT)
     OPTION_BOOL("mqtt_server.log_full_payloads", &settings->mqtt_server.log_full_payloads, FALSE, "Log full MQTT payloads", "Log large MQTT server payloads as base64 for reverse-engineering exports.", LEVEL_EXPERT)
     OPTION_BOOL("mqtt_server.log_connect_details", &settings->mqtt_server.log_connect_details, FALSE, "Log MQTT CONNECT details", "Log MQTT CONNECT structure and plain client ID at debug level 5. Username, password and Will fields remain masked.", LEVEL_EXPERT)
-    OPTION_BOOL("mqtt_server.debug_enabled", &settings->mqtt_server.debug_enabled, FALSE, "Record MQTT diagnostics", "Explicit TB2 box-only recording. Message contents may contain personal data; recognized credentials are masked. Does not change MQTT behavior.", LEVEL_BASIC)
+    OPTION_BOOL("mqtt_server.debug_enabled", &settings->mqtt_server.debug_enabled, settingsId > 0, "Record MQTT diagnostics", "TB2 box-only recording, enabled by default. Message contents may contain personal data; recognized credentials are masked. Does not change MQTT behavior.", LEVEL_BASIC)
 
     OPTION_TREE_DESC("hass", "Home Assistant", LEVEL_DETAIL)
     OPTION_STRING("hass.name", &settings->hass.name, "teddyCloud - Server", "Home Assistant name", "Home Assistant name", LEVEL_DETAIL)
@@ -568,10 +568,10 @@ void overlay_settings_init_opt(setting_item_t *opt, setting_item_t *opt_src)
         switch (opt->type)
         {
         case TYPE_BOOL:
-            /* Recording is opt-in per box, even if an old/manual global file
-             * contains a true value. Reset must also return to disabled. */
+            /* Diagnostics use their own box default, never the global value.
+             * Explicit choices are loaded afterwards; reset restores this default. */
             *((bool *)opt->ptr) = !osStrcmp(opt->option_name, "mqtt_server.debug_enabled")
-                ? false : *((bool *)opt_src->ptr);
+                ? opt->init.bool_value : *((bool *)opt_src->ptr);
             break;
         case TYPE_SIGNED:
         case TYPE_UNSIGNED:
