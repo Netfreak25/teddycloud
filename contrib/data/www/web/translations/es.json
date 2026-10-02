@@ -1034,6 +1034,30 @@
         "teddycloudStatusOnline": "Servidor de Teddycloud funcionando correctamente"
     },
     "settings": {
+        "mqttDebug": {
+            "title": "Archivos de diagnóstico MQTT",
+            "enabled": "Registrar el diagnóstico MQTT de esta caja",
+            "saveHint": "Aplicar con Guardar. El registro continúa en TeddyCloud aunque se cierre este diálogo o el navegador, hasta desactivarlo para esta caja.",
+            "pending": "Cambio sin guardar: el registro mantiene el ajuste guardado hasta pulsar Guardar.",
+            "privacy": "Las contraseñas y los tokens se ocultan antes de guardar. Los temas, identificadores y mensajes pueden contener datos personales. Revisa los archivos antes de compartirlos.",
+            "refresh": "Actualizar estado",
+            "loadFailed": "No se pudo cargar el diagnóstico MQTT",
+            "states": {
+                "disabled": "Desactivado",
+                "armed": "Preparado — esperando conexión",
+                "recording": "Registrando",
+                "error": "Error de registro"
+            },
+            "storage": "Guardado: {{bytes}} B",
+            "dropped": "Eventos descartados: {{count}}",
+            "snapshotHint": "Las descargas contienen solo los prefijos de archivo indicados. El registro activo continúa. Los archivos ZIP se dividen en partes de hasta 64 MiB de entrada; el navegador puede solicitar permiso para varias descargas.",
+            "empty": "No hay sesiones de diagnóstico.",
+            "active": "Instantánea activa",
+            "truncated": "Incompleto / retención aplicada",
+            "download": "Descargar ZIP de diagnóstico",
+            "part": "Preparando parte {{part}} de {{total}}",
+            "downloadFailed": "La descarga falló después de {{completed}} parte(s). La lista se ha actualizado; las partes ya descargadas no forman una exportación completa. {{error}}"
+        },
         "diagnostics": {
             "navigationTitle": "Diagnóstico",
             "title": "Diagnóstico de certificados",

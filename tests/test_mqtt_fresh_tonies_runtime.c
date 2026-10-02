@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <inttypes.h>
+#include <stdatomic.h>
+#include "mqtt_debug.h"
 #include "core/net.h"
 #include "core/socket.h"
 #include "tls.h"
@@ -22,6 +25,13 @@
 #define TRACE_WARNING(...) if (TRUE) { record_log(2, __VA_ARGS__); }
 #define TRACE_ERROR(...) if (TRUE) { record_log(3, __VA_ARGS__); }
 /* SERVER_TYPES */
+
+uint64_t tb2_mqtt_passthrough_debug_owner(const tb2_mqtt_passthrough_session_t *session)
+{ (void)session; return 0; }
+void mqtt_debug_test_reset(bool active, uint64_t now);
+void mqtt_debug_test_time(uint64_t now);
+unsigned mqtt_debug_test_count(const char *stage);
+const cJSON *mqtt_debug_test_last(const char *stage);
 
 static MqttClientConnection connections[MQTT_MAX_CONNECTIONS];
 static MqttFreshToniesPublishState fresh_tonies_publish_state[MAX_OVERLAYS];
@@ -354,14 +364,66 @@ static void test_deferred_completion_retains_uid_and_retry_boundary(void)
     assert(!conn->fresh_tonie_attempts && !conn->fresh_tonie_sent_at_valid);
 }
 
+static void test_cached_diagnostic_owner_has_no_relay_dependency(void)
+{
+    MqttClientConnection conn = {0};
+    assert(mqtt_connection_debug_owner(NULL) == 0);
+    assert(mqtt_connection_debug_owner(&conn) == 0);
+    atomic_store_explicit(&conn.debug_owner, 42, memory_order_release);
+    assert(mqtt_connection_debug_owner(&conn) == 42);
+    /* The fixed-slot snapshot remains safe even if no relay can be accessed. */
+    conn.passthrough = (tb2_mqtt_passthrough_session_t *)1;
+    assert(mqtt_connection_debug_owner(&conn) == 42);
+    atomic_store_explicit(&conn.debug_owner, 0, memory_order_release);
+    assert(mqtt_connection_debug_owner(&conn) == 0);
+}
+
+static void test_hass_diagnostic_throttle_has_no_relay_dependency(void)
+{
+    MqttClientConnection conn = {0};
+    client_ctx_t client_ctx = {0};
+    client_ctx.mqtt_connection = &conn;
+    conn.passthrough = (tb2_mqtt_passthrough_session_t *)1;
+    atomic_store_explicit(&conn.debug_owner, 42, memory_order_release);
+    mqtt_debug_test_reset(true, 5000);
+    mqtt_server_debug_hass_duration(&client_ctx, 4901);
+    assert(mqtt_debug_test_count("hass_call_slow") == 0);
+    mqtt_server_debug_hass_duration(&client_ctx, 4900);
+    assert(mqtt_debug_test_count("hass_call_slow") == 1);
+    mqtt_server_debug_hass_duration(&client_ctx, 4800);
+    assert(mqtt_debug_test_count("hass_call_slow") == 1);
+    mqtt_debug_test_time(5999);
+    mqtt_server_debug_hass_duration(&client_ctx, 5800);
+    assert(mqtt_debug_test_count("hass_call_slow") == 1);
+    mqtt_debug_test_time(6000);
+    mqtt_server_debug_hass_duration(&client_ctx, 5900);
+    assert(mqtt_debug_test_count("hass_call_slow") == 2);
+    assert(atomic_load_explicit(&conn.debug_hass_report_ms, memory_order_relaxed) == 6000);
+    const cJSON *event = mqtt_debug_test_last("hass_call_slow");
+    assert(cJSON_GetObjectItemCaseSensitive(event, "message_id")->valuedouble == 0);
+    mqtt_debug_test_reset(false, 0);
+}
+
 int main(void)
 {
+    test_cached_diagnostic_owner_has_no_relay_dependency();
+    test_hass_diagnostic_throttle_has_no_relay_dependency();
     test_schedule_and_delayed_ack();
     test_counter_saturates_and_reset();
     test_clock_failure_and_wrap();
     test_sync_and_targeted_changes_keep_inflight();
     test_unsent_publish_does_not_advance_delivery();
     test_deferred_completion_retains_uid_and_retry_boundary();
+    mqtt_debug_test_reset(true, 5000);
+    connections[0].debug_fresh_first_ms = 1000;
+    connections[0].debug_fresh_last_ms = 2000;
+    mqtt_debug_fresh_event(&connections[0], "freshness_puback", UINT64_C(0x0102030405060708), 42, FALSE);
+    const cJSON *diagnostic = mqtt_debug_test_last("freshness_puback");
+    assert(diagnostic != NULL);
+    assert(!strcmp(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(diagnostic, "ruid")), "0807060504030201"));
+    assert(cJSON_GetObjectItemCaseSensitive(diagnostic, "since_first_write_ms")->valuedouble == 4000);
+    assert(cJSON_GetObjectItemCaseSensitive(diagnostic, "since_last_write_ms")->valuedouble == 3000);
+    mqtt_debug_test_reset(false, 0);
     mqtt_fresh_tonies_reset_connection(&connections[0]);
     puts("MQTT fresh delivery PASS: schedule 0/5/10/40/70, delayed ACK, saturation, monotonic failures/wrap, unchanged cache and targeted coalescing");
     return 0;

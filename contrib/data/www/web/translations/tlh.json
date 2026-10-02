@@ -95,6 +95,30 @@
         }
     },
     "settings": {
+        "mqttDebug": {
+            "title": "MQTT diagnostic teywI'",
+            "enabled": "Boxvam MQTT diagnostic yIqon",
+            "saveHint": "Save yI'uy. Dialog browser joq SoQchugh TeddyCloud taH qon; BoxvamvaD yIchu'Ha'.",
+            "pending": "Save wej. Save yI'uy; DuH polpu'bogh lo' qonwI'.",
+            "privacy": "Password token je So'lu' polpa'. Topic, device ID, message je ngoq lughajlaH. latlhvaD Danobpa' teywI' yInuD.",
+            "refresh": "Dotlh yIchu'",
+            "loadFailed": "MQTT diagnostic laDlaHbe'",
+            "states": {
+                "disabled": "chu'Ha'",
+                "armed": "SuH — connection loS",
+                "recording": "qonlI'",
+                "error": "qon Qagh"
+            },
+            "storage": "pol: {{bytes}} B",
+            "dropped": "Events chIl: {{count}}",
+            "snapshotHint": "TeywI' prefix law'bogh neH ngaS download. qonlI' taH. 64 MiB input 'aqroS ghaj Hoch ZIP part; downloads law'vaD chaw' tlhoblaH browser.",
+            "empty": "Diagnostic session tu'lu'be'.",
+            "active": "Snapshot chu'",
+            "truncated": "naQbe' / retention",
+            "download": "Diagnostic ZIP yItlhap",
+            "part": "Part {{part}} / {{total}} chenmoHlI'",
+            "downloadFailed": "{{completed}} part(s) ghIq download Qagh. TeywI' tetlh chu'lu'; parts Datlhapta'bogh export naQ bIHbe'. {{error}}"
+        },
         "diagnostics": {
             "navigationTitle": "Qagh nej",
             "title": "Certificate Doctor",

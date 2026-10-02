@@ -951,6 +951,110 @@ as `BatteryPercent`, `BatteryRaw`, `BatteryCurrent`, `BatteryStatus`,
 | `src/handler.c` | Routes TAP-related freshness callbacks through the overlay MQTT publisher. |
 | `docs/TAP_PLAYLIST_BACKEND.md` | TAP-specific notes for `fresh-tonies`; not a general MQTT server reference. |
 
+## Per-box MQTT diagnostic recordings
+
+In the TB2 box settings, enable **MQTT-Diagnose aufzeichnen** and save the
+settings. `mqtt_server.debug_enabled` is an explicit box-only value (default
+false), not a global/inherited switch. It survives reconnects and TC restarts.
+Turning it on during a connection starts a `mid_session_start` snapshot; turning
+it off stops recording, not MQTT. It does not enable the legacy raw capture or
+change its existing failure handling.
+
+Open the diagnostic section to refresh recording status, storage usage, lost
+events and errors. Downloads contain only the new redacted diagnostic files,
+never the legacy `tb2-mqtt-passthrough` raw capture. Each browser-created ZIP uses
+at most 64 MiB of input (including its manifest); larger recordings are split
+into numbered parts. Refresh and retry if retention removed a selected file.
+An active JSONL file is downloaded only through a complete-line prefix listed
+by the server. Metadata changing since the listing can require a refresh.
+
+Storage is separate:
+
+```text
+<datadirfull>/diagnostics/tb2-mqtt-debug/<BOX-ID>/<DIAGNOSE-ID>/
+  session.json
+  events-000001.jsonl
+  ...
+  summary.txt
+```
+
+`session.json` identifies the build, process, connection and box, and records
+the relevant settings at recording start, limits and gaps. Later effective
+forwarding decisions are recorded per packet. Event records use UTC milliseconds and monotonic milliseconds.
+This fork retains its coupled Box/TONIES transport; this diagnostic port does
+not introduce the DEV upstream worker or independent cloud sessions. Events are
+captured at their existing processing boundaries. File order is recorder order,
+**not** a claimed total network order across threads.
+Logical message IDs are distinct from reusable MQTT packet IDs. Follow a
+message through input, observer/filter routing, queueing, actual full write and
+ACK links. An unknown/ambiguous ACK is explicitly unlinked. Packet-ID links are
+bounded, direction/type/cloud-generation scoped; they are diagnostic evidence,
+not another protocol state machine.
+
+The recording distinguishes these boundaries:
+
+- Socket receive, TLS plaintext and completed MQTT packet are separate events.
+- Queue acceptance is not successful transmission; completion callbacks follow
+  a full write. Retries retain their packet identity and progress.
+- MQTT PUBACK/PUBREC/PUBCOMP confirms the protocol phase, not application success.
+- Settings confirmation and the existing overlay-scoped Pong/STL reply
+  correlation remain unchanged. The recorder reports the result of that logic;
+  it does not strengthen a heuristic into an exact request or connection match.
+- Freshness trigger, completed send, retry and matching PUBACK are recorded
+  separately. They do not modify Source-change or persistent stale markers.
+
+Transport snapshots every five seconds include parser occupancy/expected bytes,
+receive and send ages, write queue state and available Linux TCP information for
+the box socket (not a packet trace of the TONIES socket).
+An incomplete buffer at close is reported with its age and parser state; it is
+not automatically blamed for the close. Normal repeated WOULD_BLOCK observations
+are aggregated. Slow stages (100 ms or more) and sustained stalls are throttled
+to at most one summary per second per measured category. HASS timing measures
+the local event/enqueue call, not delivery to the external broker.
+
+Before reliable box assignment, only a bounded RAM prelude of transport metadata
+is available. Peer IP, MQTT client ID or a failed TLS handshake do not constitute
+verified box identity. Unassigned events remain explicitly unassigned.
+
+A single diagnostic writer keeps disk operations outside MQTT I/O locks. Its
+queue is bounded to 1,024 events / 8 MiB; overflow drops diagnostics only and is
+visible as loss counters and sequence gaps. Segments rotate between complete
+records at 16 MiB. Retention is seven days, 512 MiB per box and 2 GiB total,
+removing oldest completed segments first and marking gaps in the session index.
+Small session summaries remain as evidence of retained/removed recordings;
+the byte limits include them. Flush is
+performed at least once per second during normal operation and on orderly
+close. Writer failure pauses the diagnostic recording and reports an error;
+it must never close a box connection. This is not a crash/power-loss journal.
+
+Passwords, known authentication/token fields and credential URL parameters are
+masked before persistence. JSON is readable; text uses known-pattern redaction.
+Binary, incomplete or unsafe payloads are omitted with a reason. There is no
+hidden unredacted Base64 copy. Arbitrary secrets embedded in otherwise innocuous
+free text cannot be universally recognized. Recordings still contain personal
+device, content and usage data; keep them private and review before sharing.
+
+Read-only web endpoints:
+
+- `GET /api/diagnostics/mqtt?overlay=<existing-TB2-overlay>`: status/file index.
+- `GET /api/diagnostics/mqtt/file?overlay=...&session=...&file=...&length=...`:
+  a validated server-resolved file or complete-line prefix, with `no-store`.
+
+No arbitrary path is accepted. These routes have the same existing WebUI/LAN
+access boundary as other settings APIs; they do not introduce user authentication.
+
+For the next **natural** failure: enable only the affected box, save, let normal
+playback continue, then download the recording and note the approximate failure
+time and observed symptoms. Compare last socket RX, last plaintext, parser
+progress, last full MQTT packet, outgoing queue/fullwrite and the final reason.
+Do not provoke firmware hangs against a production box.
+
+The static TB2 1.6.28 findings are hypotheses to compare with these measurements:
+missing PUBACK cannot retroactively block a completed publish; a short firmware
+payload read could leave unread bytes. A TC full write cannot prove that the box
+consumed those bytes. The suite adds **no** packet reshaping, synthetic ACKs,
+timeouts or transport workaround for that unproven cause.
+
 ## Practical Notes
 
 - The `mqtt.*` settings belong to the external MQTT client/broker path and are

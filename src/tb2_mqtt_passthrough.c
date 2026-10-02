@@ -9,6 +9,12 @@
 #include <winsock2.h>
 #else
 #include <sys/socket.h>
+#ifdef __linux__
+#include <sys/ioctl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <linux/sockios.h>
+#endif
 #endif
 
 #include "cJSON.h"
@@ -22,6 +28,7 @@
 #include "encoding/base64.h"
 #include "fs_ext.h"
 #include "fs_port.h"
+#include "hash/sha256.h"
 #include "handler.h"
 #include "http/http_client.h"
 #include "http/http_client_transport.h"
@@ -29,6 +36,7 @@
 #include "mqtt_forward_filter.h"
 #include "mqtt_nocloud_filter.h"
 #include "mqtt_time.h"
+#include "mqtt_debug.h"
 #include "os_ext.h"
 #include "os_port.h"
 #include "platform.h"
@@ -58,12 +66,28 @@
 #define TB2_MQTT_PACKET_SUBSCRIBE 8U
 #define TB2_MQTT_PACKET_UNSUBSCRIBE 10U
 #define TB2_MQTT_LOCAL_RESPONSE_HISTORY_MAX 32U
+#define TB2_MQTT_DEBUG_SNAPSHOT_MS 5000U
+#define TB2_MQTT_DEBUG_SLOW_MS 100U
+#define TB2_MQTT_DEBUG_SLOW_REPORT_MS 1000U
+#define TB2_MQTT_DEBUG_ACKS 64U
+
+enum {
+    TB2_DEBUG_TX_MUTEX, TB2_DEBUG_ADMISSION_MUTEX, TB2_DEBUG_RX_MUTEX,
+    TB2_DEBUG_TX_PUMP, TB2_DEBUG_RX_PHASE, TB2_DEBUG_CLOUD_RX_PHASE,
+    TB2_DEBUG_LOOP_GAP, TB2_DEBUG_TASK, TB2_DEBUG_SLOW_CATEGORIES
+};
 
 typedef struct
 {
     uint8_t *data;
     size_t length;
     size_t capacity;
+    uint64_t debug_first_ms;
+    uint64_t debug_last_ms;
+    uint64_t debug_message;
+    uint64_t debug_wait_ms;
+    size_t debug_expected;
+    size_t debug_latest_chunk_offset;
 } tb2_mqtt_stream_t;
 
 typedef struct tb2_mqtt_qos2_entry
@@ -145,10 +169,16 @@ typedef struct
     uint64_t nocloud_items_removed_box_to_upstream;
     uint64_t nocloud_items_removed_upstream_to_box;
     time_t started_at;
+    uint64_t debug_owner;
+    uint64_t debug_slow_at;
 } tb2_mqtt_capture_t;
 
 typedef struct {
     uint8_t *original;
+    uint64_t debug_message;
+    uint64_t debug_enqueued_ms;
+    uint64_t debug_epoch;
+    const char *debug_origin;
     size_t original_length;
     uint8_t *wire;
     size_t wire_length;
@@ -216,6 +246,37 @@ struct tb2_mqtt_passthrough_session
     TlsSocketSendCallback previous_send;
     TlsSocketReceiveCallback previous_receive;
     TlsSocketHandle previous_handle;
+    uint64_t debug_epoch;
+    uint64_t debug_snapshot_ms;
+    uint64_t debug_tick_ms;
+    uint64_t debug_raw_rx_ms;
+    uint64_t debug_raw_tx_ms;
+    uint64_t debug_raw_rx_bytes;
+    uint64_t debug_raw_tx_bytes;
+    uint64_t debug_socket_rx_waits;
+    uint64_t debug_socket_tx_waits;
+    uint64_t debug_tls_rx_ms;
+    uint64_t debug_cloud_rx_ms;
+    uint64_t debug_packet_rx_ms;
+    uint64_t debug_tls_report_ms;
+    uint64_t debug_tls_read_begin_ms;
+    uint64_t debug_tls_write_begin_ms;
+    uint64_t debug_defer_ms;
+    uint64_t debug_slow_at[TB2_DEBUG_SLOW_CATEGORIES];
+    uint64_t debug_message;
+    uint64_t debug_callback_epoch;
+    const uint8_t *debug_packet;
+    const char *debug_origin;
+    struct {
+        uint16_t packet_id;
+        uint8_t expected_type;
+        bool_t to_cloud;
+        uint64_t epoch;
+        uint64_t message;
+        uint64_t sent_ms;
+        uint8_t fingerprint[SHA256_DIGEST_SIZE];
+    } debug_acks[TB2_MQTT_DEBUG_ACKS];
+    size_t debug_ack_cursor;
 };
 
 static tb2_mqtt_passthrough_status_t mqtt_passthrough_status;
@@ -225,6 +286,205 @@ static __declspec(thread) tb2_mqtt_passthrough_session_t *parser_session;
 #else
 static _Thread_local tb2_mqtt_passthrough_session_t *parser_session;
 #endif
+
+uint64_t tb2_mqtt_passthrough_debug_owner(const tb2_mqtt_passthrough_session_t *session)
+{
+    return session != NULL ? session->owner : 0;
+}
+
+uint64_t tb2_mqtt_passthrough_debug_message(const tb2_mqtt_passthrough_session_t *session)
+{
+    return session != NULL ? session->debug_message : 0;
+}
+
+uint64_t tb2_mqtt_passthrough_debug_epoch(const tb2_mqtt_passthrough_session_t *session)
+{
+    return session != NULL ? session->debug_callback_epoch : 0;
+}
+
+static void tb2_mqtt_debug_io(tb2_mqtt_passthrough_session_t *session,
+    uint64_t message, const char *origin, const char *stage, error_t error,
+    size_t requested, size_t transferred, uint64_t started)
+{
+    if (!mqtt_debug_active(session->owner)) return;
+    uint64_t now = mqtt_debug_now_ms();
+    cJSON *detail = cJSON_CreateObject();
+    TlsContext *tls = !osStrncmp(origin, "tonies", 6) ? session->upstream.tlsContext : session->box_tls;
+    cJSON_AddNumberToObject(detail, "error", error);
+    cJSON_AddNumberToObject(detail, "requested_bytes", (double)requested);
+    cJSON_AddNumberToObject(detail, "transferred_bytes", (double)transferred);
+    cJSON_AddNumberToObject(detail, "tls_state", tls != NULL ? tlsGetState(tls) : 0);
+    if (tls != NULL)
+    {
+        cJSON_AddBoolToObject(detail, "tls_fatal_alert_sent", tls->fatalAlertSent);
+        cJSON_AddBoolToObject(detail, "tls_fatal_alert_received", tls->fatalAlertReceived);
+        cJSON_AddBoolToObject(detail, "tls_close_notify_sent", tls->closeNotifySent);
+        cJSON_AddBoolToObject(detail, "tls_close_notify_received", tls->closeNotifyReceived);
+    }
+    cJSON_AddNumberToObject(detail, "duration_ms", started && now >= started ? (double)(now - started) : 0);
+    mqtt_debug_event(session->owner, session->debug_epoch, message, origin, stage, detail);
+}
+
+/* IDs are diagnostic only. No protocol allocation, ACK ownership or timeout is
+ * changed; a bounded ledger links full writes to later acknowledgements. */
+static uint64_t tb2_mqtt_debug_retry(tb2_mqtt_passthrough_session_t *session,
+    const tb2_mqtt_pending_write_t *packet, bool_t to_cloud, uint8_t digest[SHA256_DIGEST_SIZE])
+{
+    if (!packet->wire_length || packet->packet_type != TB2_MQTT_PACKET_PUBLISH ||
+        !packet->wire_id || !(packet->wire[0] & 6U)) return 0;
+    uint8_t header = packet->wire[0];
+    if (packet->packet_type == TB2_MQTT_PACKET_PUBLISH) header &= ~0x08U;
+    Sha256Context hash;
+    sha256Init(&hash);
+    sha256Update(&hash, &header, 1);
+    sha256Update(&hash, packet->wire + 1, packet->wire_length - 1);
+    sha256Final(&hash, digest);
+    if (packet->packet_type != TB2_MQTT_PACKET_PUBLISH || !(packet->wire[0] & 0x08U) ||
+        !packet->wire_id) return 0;
+    uint8_t expected = (packet->wire[0] & 6U) == 4U ? TB2_MQTT_PACKET_PUBREC : TB2_MQTT_PACKET_PUBACK;
+    for (size_t n = 0; n < TB2_MQTT_DEBUG_ACKS && n < session->debug_ack_cursor; n++)
+    {
+        size_t index = (session->debug_ack_cursor - n - 1) % TB2_MQTT_DEBUG_ACKS;
+        if (session->debug_acks[index].packet_id == packet->wire_id &&
+            session->debug_acks[index].to_cloud == to_cloud &&
+            session->debug_acks[index].expected_type == expected &&
+            (!to_cloud || session->debug_acks[index].epoch == packet->debug_epoch) &&
+            !osMemcmp(session->debug_acks[index].fingerprint, digest, SHA256_DIGEST_SIZE))
+            return session->debug_acks[index].message;
+    }
+    return 0;
+}
+
+/* Extract an ID only for diagnostic correlation; never allocate/remap one. */
+static uint16_t tb2_mqtt_debug_packet_id(const uint8_t *data, size_t length)
+{
+    if (length < 2) return 0;
+    size_t position = 1;
+    do {
+        if (position >= length || position > 4) return 0;
+    } while (data[position++] & 0x80U);
+    uint8_t type = data[0] >> 4;
+    if (type == TB2_MQTT_PACKET_PUBLISH)
+    {
+        if (!(data[0] & 6U) || length - position < 2) return 0;
+        size_t topic = ((size_t)data[position] << 8) | data[position + 1];
+        position += 2;
+        if (topic > length - position) return 0;
+        position += topic;
+    }
+    else if (!(type >= 4 && type <= 11)) return 0;
+    return length - position >= 2 ? ((uint16_t)data[position] << 8) | data[position + 1] : 0;
+}
+
+static void tb2_mqtt_debug_sent(tb2_mqtt_passthrough_session_t *session,
+    const tb2_mqtt_pending_write_t *packet, bool_t to_cloud, uint64_t occurred)
+{
+    if (!mqtt_debug_active(session->owner)) return;
+    uint64_t now = mqtt_debug_now_ms();
+    tb2_mqtt_pending_write_t metadata = *packet;
+    if (!metadata.wire_id) metadata.wire_id = tb2_mqtt_debug_packet_id(packet->wire, packet->wire_length);
+    packet = &metadata;
+    uint8_t digest[SHA256_DIGEST_SIZE] = {0};
+    uint64_t retry_of = tb2_mqtt_debug_retry(session, packet, to_cloud, digest);
+    cJSON *detail = cJSON_CreateObject();
+    if (retry_of) cJSON_AddNumberToObject(detail, "retry_of", (double)retry_of);
+    else if (packet->packet_type == TB2_MQTT_PACKET_PUBLISH && (packet->wire[0] & 0x08U))
+        cJSON_AddStringToObject(detail, "retry_correlation", "unmatched");
+    cJSON_AddNumberToObject(detail, "packet_id", packet->wire_id);
+    cJSON_AddNumberToObject(detail, "bytes", (double)packet->wire_length);
+    cJSON_AddStringToObject(detail, "direction", to_cloud ? "TC_TO_TONIES" : "TC_TO_BOX");
+    cJSON_AddNumberToObject(detail, "occurred_at_ms", (double)occurred);
+    cJSON_AddNumberToObject(detail, "queue_to_fullwrite_ms", occurred >= packet->debug_enqueued_ms ?
+        (double)(occurred - packet->debug_enqueued_ms) : 0);
+    cJSON_AddNumberToObject(detail, "completion_poll_delay_ms", now >= occurred ? (double)(now - occurred) : 0);
+    mqtt_debug_event(session->owner, packet->debug_epoch, packet->debug_message,
+        packet->debug_origin != NULL ? packet->debug_origin : "local", "tx_complete", detail);
+    if (packet->wire_id && ((packet->packet_type == TB2_MQTT_PACKET_PUBLISH && (packet->wire[0] & 6U)) ||
+        packet->packet_type == TB2_MQTT_PACKET_PUBREL || packet->packet_type == TB2_MQTT_PACKET_SUBSCRIBE ||
+        packet->packet_type == TB2_MQTT_PACKET_UNSUBSCRIBE))
+    {
+        for (size_t i = 0; i < TB2_MQTT_DEBUG_ACKS; i++)
+            if (session->debug_acks[i].packet_id == packet->wire_id &&
+                session->debug_acks[i].to_cloud == to_cloud)
+                session->debug_acks[i].packet_id = 0;
+        size_t index = session->debug_ack_cursor++ % TB2_MQTT_DEBUG_ACKS;
+        session->debug_acks[index].packet_id = packet->wire_id;
+        session->debug_acks[index].expected_type = packet->packet_type == TB2_MQTT_PACKET_PUBLISH ?
+            ((packet->wire[0] & 6U) == 4U ? TB2_MQTT_PACKET_PUBREC : TB2_MQTT_PACKET_PUBACK) :
+            packet->packet_type == TB2_MQTT_PACKET_PUBREL ? TB2_MQTT_PACKET_PUBCOMP :
+            packet->packet_type == TB2_MQTT_PACKET_SUBSCRIBE ? 9 : 11;
+        session->debug_acks[index].to_cloud = to_cloud;
+        session->debug_acks[index].epoch = packet->debug_epoch;
+        session->debug_acks[index].message = packet->debug_message;
+        session->debug_acks[index].sent_ms = occurred;
+        osMemcpy(session->debug_acks[index].fingerprint, digest, sizeof(digest));
+    }
+}
+
+static void tb2_mqtt_debug_ack(tb2_mqtt_passthrough_session_t *session,
+    bool_t from_box, const uint8_t *packet, size_t length, size_t header)
+{
+    uint8_t type = packet[0] >> 4;
+    if (!mqtt_debug_active(session->owner) || length < header + 2 ||
+        !((type >= 4 && type <= 7) || type == 9 || type == 11)) return;
+    uint16_t id = ((uint16_t)packet[header] << 8) | packet[header + 1];
+    cJSON *detail = cJSON_CreateObject();
+    cJSON_AddNumberToObject(detail, "packet_id", id);
+    cJSON_AddNumberToObject(detail, "packet_type", type);
+    bool_t linked = FALSE;
+    /* HTTP admission also consults this diagnostic ledger under io_mutex. */
+    osAcquireMutex(&session->io_mutex);
+    for (size_t n = 0; n < TB2_MQTT_DEBUG_ACKS && n < session->debug_ack_cursor; n++)
+    {
+        size_t index = (session->debug_ack_cursor - n - 1) % TB2_MQTT_DEBUG_ACKS;
+        if (session->debug_acks[index].packet_id == id && session->debug_acks[index].to_cloud != from_box &&
+            session->debug_acks[index].expected_type == type &&
+            (from_box || session->debug_acks[index].epoch == session->debug_epoch))
+        {
+            cJSON_AddNumberToObject(detail, "linked_message_id", (double)session->debug_acks[index].message);
+            cJSON_AddNumberToObject(detail, "since_fullwrite_ms",
+                (double)(mqtt_debug_now_ms() - session->debug_acks[index].sent_ms));
+            session->debug_acks[index].packet_id = 0;
+            linked = TRUE;
+            break;
+        }
+    }
+    cJSON_AddStringToObject(detail, "correlation", linked ? "completed_write_match" : "unmatched");
+    osReleaseMutex(&session->io_mutex);
+    mqtt_debug_event(session->owner, session->debug_epoch, session->debug_message,
+        from_box ? "box" : "tonies", "mqtt_ack_received", detail);
+}
+
+static bool_t tb2_mqtt_debug_slow_due(tb2_mqtt_passthrough_session_t *session,
+    size_t category, uint64_t now)
+{
+    if (!mqtt_debug_active(session->owner)) return FALSE;
+    uint64_t previous = session->debug_slow_at[category];
+    if (previous && now - previous < TB2_MQTT_DEBUG_SLOW_REPORT_MS) return FALSE;
+    session->debug_slow_at[category] = now;
+    return TRUE;
+}
+
+static void tb2_mqtt_debug_slow(tb2_mqtt_passthrough_session_t *session,
+    const char *stage, uint64_t started)
+{
+    if (!mqtt_debug_active(session->owner)) return;
+    uint64_t now = mqtt_debug_now_ms();
+    if (now - started < TB2_MQTT_DEBUG_SLOW_MS) return;
+    static const char *const phases[] = {
+        "tx_io_mutex_wait", "admission_io_mutex_wait", "rx_io_mutex_wait",
+        "box_tx_pump", "box_rx_phase", "cloud_rx_phase"
+    };
+    for (size_t i = 0; i < sizeof(phases) / sizeof(phases[0]); i++)
+    {
+        if (!osStrcmp(stage, phases[i]))
+        {
+            if (tb2_mqtt_debug_slow_due(session, i, now))
+                tb2_mqtt_debug_io(session, 0, "local", stage, NO_ERROR, 0, 0, started);
+            return;
+        }
+    }
+}
 
 static void tb2_mqtt_trace_error(const char *stage, error_t error)
 {
@@ -426,7 +686,8 @@ static error_t tb2_mqtt_outbound_tls_init(HttpClientContext *context, TlsContext
     return error;
 }
 
-static error_t tb2_mqtt_connect_upstream(settings_t *box_settings, HttpClientContext *upstream)
+static error_t tb2_mqtt_connect_upstream(settings_t *box_settings, HttpClientContext *upstream,
+                                       tb2_mqtt_passthrough_session_t *session)
 {
     settings_t *global = get_settings();
     upstream->serverName = global->mqtt_client_upstream.hostname;
@@ -455,7 +716,11 @@ static error_t tb2_mqtt_connect_upstream(settings_t *box_settings, HttpClientCon
         return error;
     }
 
+    uint64_t debug_started = mqtt_debug_now_ms();
+    tb2_mqtt_debug_io(session, 0, "tonies_transport", "dns_begin", NO_ERROR, 0, 0, debug_started);
     void *resolver = resolve_host(global->mqtt_client_upstream.hostname);
+    tb2_mqtt_debug_io(session, 0, "tonies_transport", "dns_complete",
+        resolver != NULL ? NO_ERROR : ERROR_ADDRESS_NOT_FOUND, 0, 0, debug_started);
     if (resolver == NULL)
     {
         tb2_mqtt_trace_error("dns_resolve", ERROR_ADDRESS_NOT_FOUND);
@@ -475,8 +740,12 @@ static error_t tb2_mqtt_connect_upstream(settings_t *box_settings, HttpClientCon
         TRACE_DEBUG("TB2 MQTT upstream stage=tcp_connect attempt=%d address=%s port=%u\r\n",
                     position + 1, ipAddrToString(&address, NULL),
                     (unsigned)global->mqtt_client_upstream.port);
+        session->debug_epoch++;
+        debug_started = mqtt_debug_now_ms();
+        tb2_mqtt_debug_io(session, 0, "tonies_transport", "tcp_tls_connect_begin", NO_ERROR, 0, 0, debug_started);
         error = httpClientConnect(upstream, &address,
                                   (uint16_t)global->mqtt_client_upstream.port);
+        tb2_mqtt_debug_io(session, 0, "tonies_transport", "tcp_tls_connect_complete", error, 0, 0, debug_started);
         if (!error)
         {
             tb2_mqtt_trace_upstream_client_auth(upstream);
@@ -641,7 +910,7 @@ static error_t tb2_mqtt_capture_packet_ex(tb2_mqtt_capture_t *capture,
         return ERROR_OUT_OF_MEMORY;
     }
     cJSON_AddNumberToObject(entry, "sequence", (double)++capture->sequence);
-    cJSON_AddNumberToObject(entry, "timestamp_ms", (double)time(NULL) * 1000.0);
+    cJSON_AddNumberToObject(entry, "timestamp_ms", (double)mqtt_debug_wall_ms());
     cJSON_AddStringToObject(entry, "direction", direction);
     cJSON_AddStringToObject(entry, "data_base64", encoded);
     if (wire_encoded != NULL)
@@ -688,6 +957,7 @@ static error_t tb2_mqtt_capture_packet_ex(tb2_mqtt_capture_t *capture,
         return ERROR_OUT_OF_MEMORY;
     }
 
+    uint64_t debug_started = mqtt_debug_now_ms();
     error_t error = fsWriteFile(capture->traffic, line, osStrlen(line));
     if (!error)
     {
@@ -698,6 +968,18 @@ static error_t tb2_mqtt_capture_packet_ex(tb2_mqtt_capture_t *capture,
         error = fsFlushFile(capture->traffic);
     }
     cJSON_free(line);
+    uint64_t debug_elapsed = mqtt_debug_now_ms() - debug_started;
+    uint64_t debug_now = mqtt_debug_now_ms();
+    if (mqtt_debug_active(capture->debug_owner) && (error || debug_elapsed >= TB2_MQTT_DEBUG_SLOW_MS) &&
+        (!capture->debug_slow_at || debug_now - capture->debug_slow_at >= TB2_MQTT_DEBUG_SLOW_REPORT_MS))
+    {
+        capture->debug_slow_at = debug_now;
+        cJSON *detail = cJSON_CreateObject();
+        cJSON_AddNumberToObject(detail, "duration_ms", (double)debug_elapsed);
+        cJSON_AddNumberToObject(detail, "error", error);
+        cJSON_AddNumberToObject(detail, "legacy_sequence", (double)capture->sequence);
+        mqtt_debug_event(capture->debug_owner, 0, 0, "local", "legacy_capture_write_flush", detail);
+    }
     return error;
 }
 
@@ -979,13 +1261,17 @@ static void tb2_mqtt_status_attempt_failed(const char *error_code)
 }
 
 static error_t tb2_mqtt_tls_write_all(TlsContext *destination, const uint8_t *data,
-                                      size_t length)
+                                      size_t length, tb2_mqtt_passthrough_session_t *session,
+                                      uint64_t debug_message)
 {
     size_t offset = 0;
     while (offset < length)
     {
         size_t written = 0;
+        uint64_t debug_started = mqtt_debug_now_ms();
         error_t error = tlsWrite(destination, data + offset, length - offset, &written, 0);
+        tb2_mqtt_debug_io(session, debug_message, "tonies_transport", "tls_write_part",
+            error, length - offset, written, debug_started);
         if (error)
         {
             tb2_mqtt_trace_error("tls_write", error);
@@ -1032,13 +1318,22 @@ static error_t tb2_mqtt_box_send(TlsSocketHandle handle, const void *data,
     if (n > 0)
     {
         *written = (size_t)n;
+        session->debug_raw_tx_ms = mqtt_debug_now_ms();
+        session->debug_raw_tx_bytes += (size_t)n;
+        tb2_mqtt_debug_io(session,
+            session->box_write_head ? session->box_write_head->packet.debug_message : 0,
+            "box_transport", "socket_tx", 0, length, (size_t)n, 0);
         session->box_io_bytes -= (size_t)n;
         session->box_progress_clock = mqtt_monotonic_ms(&session->box_last_progress);
         return session->box_progress_clock ? NO_ERROR : ERROR_FAILURE;
     }
+    if (blocked) session->debug_socket_tx_waits++;
     if (blocked && !session->box_write_stalled)
     {
         session->box_write_stalled = TRUE;
+        tb2_mqtt_debug_io(session,
+            session->box_write_head ? session->box_write_head->packet.debug_message : 0,
+            "box_transport", "socket_tx_blocked", code, length, 0, 0);
         TRACE_INFO("TB2 MQTT box_write_pending box=%s session=%" PRIu64
             " tls_state=%u reason=socket_backpressure\r\n", session->box_settings->commonName,
             session->owner, (unsigned)tlsGetState(session->box_tls));
@@ -1067,9 +1362,13 @@ static error_t tb2_mqtt_box_receive(TlsSocketHandle handle, void *data,
     if (n > 0)
     {
         *received = (size_t)n;
+        session->debug_raw_rx_ms = mqtt_debug_now_ms();
+        session->debug_raw_rx_bytes += (size_t)n;
+        tb2_mqtt_debug_io(session, 0, "box_transport", "socket_rx", 0, length, (size_t)n, 0);
         session->box_io_bytes -= (size_t)n;
         return NO_ERROR;
     }
+    if (retry) session->debug_socket_rx_waits++;
     return n == 0 ? ERROR_END_OF_STREAM : retry ? ERROR_WOULD_BLOCK : ERROR_READ_FAILED;
 }
 
@@ -1078,9 +1377,12 @@ static error_t tb2_mqtt_box_terminal(tb2_mqtt_passthrough_session_t *session,
 {
     int expected = NO_ERROR;
     if (atomic_compare_exchange_strong(&session->box_write_error, &expected, error))
+    {
+        tb2_mqtt_debug_io(session, 0, "box_transport", reason, error, 0, 0, 0);
         TRACE_WARNING("TB2 MQTT %s box=%s session=%" PRIu64 " tls_state=%u code=%d decision=close\r\n",
             reason, session->box_settings->commonName, session->owner,
             (unsigned)tlsGetState(session->box_tls), error);
+    }
     return tb2_mqtt_passthrough_box_write_error(session);
 }
 
@@ -1128,7 +1430,31 @@ static error_t tb2_mqtt_tls_write_step(tb2_mqtt_passthrough_session_t *session,
     size_t written = 0;
     if (!error)
     {
+        uint64_t debug_started = mqtt_debug_now_ms();
+        size_t debug_requested = length - *offset;
+        uint64_t debug_raw_before = session->debug_raw_tx_bytes;
+        bool_t debug_begin = mqtt_debug_active(session->owner) &&
+            (!session->debug_tls_write_begin_ms ||
+             debug_started - session->debug_tls_write_begin_ms >= TB2_MQTT_DEBUG_SLOW_REPORT_MS);
+        if (debug_begin)
+        {
+            session->debug_tls_write_begin_ms = debug_started;
+            tb2_mqtt_debug_io(session,
+                session->box_write_head ? session->box_write_head->packet.debug_message : 0,
+                "box_transport", "tls_write_begin", NO_ERROR, debug_requested, 0, debug_started);
+        }
         error = tlsWrite(session->box_tls, data + *offset, length - *offset, &written, 0);
+        uint64_t debug_now = mqtt_debug_now_ms();
+        if (debug_begin || written || !error || (error != ERROR_TIMEOUT && error != ERROR_WOULD_BLOCK) ||
+            debug_now - session->debug_tls_report_ms >= TB2_MQTT_DEBUG_SNAPSHOT_MS)
+        {
+            session->debug_tls_report_ms = debug_now;
+            tb2_mqtt_debug_io(session,
+                session->box_write_head ? session->box_write_head->packet.debug_message : 0,
+                "box_transport", "tls_write", error, debug_requested, written, debug_started);
+        }
+        if (written || session->debug_raw_tx_bytes != debug_raw_before)
+            session->debug_tls_write_begin_ms = 0;
         if (written > length - *offset || (!error && !written)) error = ERROR_WRITE_FAILED;
         else *offset += written;
     }
@@ -1297,6 +1623,8 @@ static void tb2_mqtt_box_writes_cancel(tb2_mqtt_passthrough_session_t *session, 
     {
         tb2_mqtt_box_write_t *next = write->next;
         tb2_mqtt_pending_write_t *p = &write->packet;
+        tb2_mqtt_debug_io(session, p->debug_message, "local", "box_write_cancelled",
+            error, p->wire_length, write->offset, 0);
         if (session->capture_opened)
             tb2_mqtt_capture_packet_ex(&session->capture, "upstream_to_box", p->original,
                 p->original_length, p->wire, p->wire_length, p->packet_type, p->topic,
@@ -1315,7 +1643,9 @@ static void tb2_mqtt_box_writes_cancel(tb2_mqtt_passthrough_session_t *session, 
  * outside io_mutex and before any response can be read from this connection. */
 static error_t tb2_mqtt_box_write_pump(tb2_mqtt_passthrough_session_t *session)
 {
+    uint64_t debug_lock_started = mqtt_debug_now_ms();
     osAcquireMutex(&session->io_mutex);
+    tb2_mqtt_debug_slow(session, "tx_io_mutex_wait", debug_lock_started);
     error_t error = tb2_mqtt_passthrough_box_write_error(session);
     if (!error) error = atomic_load(&session->local_publish_error);
     while (!error && session->box_write_head != NULL)
@@ -1330,6 +1660,7 @@ static error_t tb2_mqtt_box_write_pump(tb2_mqtt_passthrough_session_t *session)
         }
         error = tb2_mqtt_tls_write_step(session, p->wire, p->wire_length, &write->offset);
         if (error) break;
+        tb2_mqtt_debug_sent(session, p, FALSE, mqtt_debug_now_ms());
         error_t capture_error = tb2_mqtt_capture_packet_ex(&session->capture, "upstream_to_box",
             p->original, p->original_length, p->wire, p->wire_length, p->packet_type,
             p->topic, TRUE, p->filter_id, p->generated, TRUE,
@@ -1347,7 +1678,13 @@ static error_t tb2_mqtt_box_write_pump(tb2_mqtt_passthrough_session_t *session)
         session->box_write_count--;
         session->box_write_bytes -= p->budget_bytes;
         osReleaseMutex(&session->io_mutex);
+        uint64_t previous_debug_message = session->debug_message;
+        uint64_t previous_debug_epoch = session->debug_callback_epoch;
+        session->debug_message = p->debug_message;
+        session->debug_callback_epoch = p->debug_epoch;
         if (write->completed != NULL) write->completed(write->context, NO_ERROR);
+        session->debug_message = previous_debug_message;
+        session->debug_callback_epoch = previous_debug_epoch;
         tb2_mqtt_box_write_free(write);
         osAcquireMutex(&session->io_mutex);
         if (capture_error) error = tb2_mqtt_box_terminal(session, capture_error, "capture_write_failed");
@@ -1380,6 +1717,31 @@ static error_t tb2_mqtt_record_packet_ex_locked(tb2_mqtt_passthrough_session_t *
 
     const char *direction = box_to_upstream ? "box_to_upstream" : "upstream_to_box";
     const bool_t box_delivery = !box_to_upstream && forwarded;
+    bool_t debug_active = mqtt_debug_active(session->owner);
+    bool_t debug_input = parser_session == session && data == session->debug_packet;
+    uint64_t debug_message = debug_active ? (debug_input ? session->debug_message :
+        mqtt_debug_next_message(session->owner)) : 0;
+    const char *debug_origin = debug_input ? session->debug_origin : "local";
+    if (debug_active)
+    {
+        if (!debug_input)
+            mqtt_debug_packet(session->owner, session->debug_epoch, debug_message, debug_origin,
+                "packet_created", data, length);
+        if (wire_data != NULL && (wire_length != length || osMemcmp(data, wire_data, length)))
+            mqtt_debug_packet(session->owner, session->debug_epoch, debug_message, debug_origin,
+                "packet_final", wire_data, wire_length);
+        cJSON *detail = cJSON_CreateObject();
+        cJSON_AddStringToObject(detail, "action", action != NULL ? action : forwarded ? "forward" : "blocked");
+        cJSON_AddStringToObject(detail, "direction", box_to_upstream ? "TC_TO_TONIES" : "TC_TO_BOX");
+        if (filter_id != NULL) cJSON_AddStringToObject(detail, "filter", filter_id);
+        cJSON_AddNumberToObject(detail, "packet_id", packet_id);
+        cJSON_AddNumberToObject(detail, "wire_packet_id", wire_packet_id);
+        cJSON_AddNumberToObject(detail, "removed_count", (double)removed_count);
+        cJSON_AddBoolToObject(detail, "forwarding_requested", forwarded);
+        if (!debug_input && parser_session == session)
+            cJSON_AddNumberToObject(detail, "parent_message_id", (double)session->debug_message);
+        mqtt_debug_event(session->owner, session->debug_epoch, debug_message, debug_origin, "routing", detail);
+    }
     error = tb2_mqtt_capture_packet_ex(&session->capture, direction,
                                                data, length, wire_data, wire_length,
                                                packet_type, topic, box_delivery ? FALSE : forwarded, filter_id,
@@ -1413,19 +1775,48 @@ static error_t tb2_mqtt_record_packet_ex_locked(tb2_mqtt_passthrough_session_t *
         error = tb2_mqtt_box_write_create(data, length, wire_data, wire_length,
             packet_type, topic, filter_id, generated, action, packet_id,
             wire_packet_id, rewritten, removed_count, &write);
+        if (!error)
+        {
+            write->packet.debug_message = debug_message;
+            write->packet.debug_origin = debug_origin;
+            write->packet.debug_enqueued_ms = mqtt_debug_now_ms();
+            write->packet.debug_epoch = session->debug_epoch;
+        }
         if (!error) error = tb2_mqtt_box_write_append(session, write);
+        if (!error && debug_active)
+        {
+            cJSON *detail = cJSON_CreateObject();
+            cJSON_AddNumberToObject(detail, "queued_packets", (double)session->box_write_count);
+            cJSON_AddNumberToObject(detail, "queued_bytes", (double)session->box_write_bytes);
+            mqtt_debug_event(session->owner, session->debug_epoch, debug_message, debug_origin, "box_queued", detail);
+        }
         if (error) tb2_mqtt_box_write_free(write);
         return error;
     }
     const uint8_t *outgoing = wire_data != NULL ? wire_data : data;
     size_t outgoing_length = wire_data != NULL ? wire_length : length;
-    error = tb2_mqtt_tls_write_all(session->upstream.tlsContext, outgoing, outgoing_length);
+    uint64_t debug_started = mqtt_debug_now_ms();
+    tb2_mqtt_debug_io(session, debug_message, "tonies_transport", "tls_write_begin",
+        NO_ERROR, outgoing_length, 0, debug_started);
+    error = tb2_mqtt_tls_write_all(session->upstream.tlsContext, outgoing, outgoing_length, session, debug_message);
+    tb2_mqtt_debug_io(session, debug_message, "tonies_transport", "tls_write_complete",
+        error, outgoing_length, error ? 0 : outgoing_length, debug_started);
     if (error)
     {
         return error;
     }
     if (box_to_upstream)
     {
+        tb2_mqtt_pending_write_t completed = {0};
+        completed.wire = (uint8_t *)outgoing;
+        completed.wire_length = outgoing_length;
+        completed.wire_id = wire_packet_id ? wire_packet_id : packet_id;
+        completed.packet_type = packet_type;
+        completed.debug_message = debug_message;
+        completed.debug_origin = debug_origin;
+        completed.debug_epoch = session->debug_epoch;
+        completed.debug_enqueued_ms = debug_started;
+        tb2_mqtt_debug_sent(session, &completed, TRUE, mqtt_debug_now_ms());
         session->capture.bytes_box_to_upstream += outgoing_length;
         session->capture.messages_forwarded_box_to_upstream++;
     }
@@ -1454,7 +1845,9 @@ static error_t tb2_mqtt_record_packet_ex(tb2_mqtt_passthrough_session_t *session
                                          bool_t count_blocked, bool_t rewritten,
                                          size_t removed_count)
 {
+    uint64_t debug_lock_started = mqtt_debug_now_ms();
     osAcquireMutex(&session->io_mutex);
+    tb2_mqtt_debug_slow(session, "admission_io_mutex_wait", debug_lock_started);
     error_t error = tb2_mqtt_record_packet_ex_locked(session, box_to_upstream,
         data, length, wire_data, wire_length, packet_type, topic, forwarded, filter_id,
         generated, packet_complete, action, packet_id, wire_packet_id,
@@ -2119,6 +2512,7 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
                                        size_t packet_size, size_t fixed_header_size)
 {
     uint8_t type = packet[0] >> 4;
+    tb2_mqtt_debug_ack(session, box_to_upstream, packet, packet_size, fixed_header_size);
     if (box_to_upstream)
     {
         if (!mqtt_monotonic_ms(&session->last_box_rx)) return ERROR_FAILURE;
@@ -2268,9 +2662,14 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
     observer_result.action = TB2_MQTT_OBSERVER_FORWARD;
     if (session->observer != NULL)
     {
+        uint64_t debug_started = mqtt_debug_now_ms();
+        tb2_mqtt_debug_io(session, session->debug_message, box_to_upstream ? "box" : "tonies",
+            "local_observer_begin", NO_ERROR, payload_len, 0, debug_started);
         error = session->observer(session->observer_context, box_to_upstream,
                                   topic, payload, payload_len, qos,
                                   &observer_result);
+        tb2_mqtt_debug_io(session, session->debug_message, box_to_upstream ? "box" : "tonies",
+            "local_observer_complete", error, payload_len, observer_result.payload_len, debug_started);
         if (error)
         {
             osFreeMem(observer_result.payload);
@@ -2313,6 +2712,7 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
     size_t filtered_payload_len =
         nocloud_result.action == MQTT_NOCLOUD_REWRITE ?
             nocloud_result.payload_len : effective_payload_len;
+    bool_t debug_manual_checked = !blocked;
     if (!blocked)
     {
         const char *manual_filter_id = NULL;
@@ -2321,6 +2721,19 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
             filtered_payload_len, &manual_filter_id);
         if (blocked)
             filter_id = manual_filter_id;
+    }
+
+    if (mqtt_debug_active(session->owner))
+    {
+        cJSON *detail = cJSON_CreateObject();
+        cJSON_AddBoolToObject(detail, "locally_processed", observer_result.locally_processed);
+        cJSON_AddBoolToObject(detail, "local_consumed", local_consume);
+        cJSON_AddNumberToObject(detail, "automatic_action", nocloud_result.action);
+        cJSON_AddBoolToObject(detail, "manual_checked", debug_manual_checked);
+        cJSON_AddBoolToObject(detail, "blocked", blocked);
+        if (filter_id) cJSON_AddStringToObject(detail, "filter", filter_id);
+        mqtt_debug_event(session->owner, session->debug_epoch, session->debug_message,
+            box_to_upstream ? "box" : "tonies", "filter_decision", detail);
     }
 
     if (box_to_upstream && qos > 0 && (local_consume || local_rewrite))
@@ -2543,6 +2956,17 @@ static error_t tb2_mqtt_process_stream(tb2_mqtt_passthrough_session_t *session,
 {
     tb2_mqtt_stream_t *stream = box_to_upstream ? &session->box_stream :
                                                   &session->upstream_stream;
+    bool_t debugging = mqtt_debug_active(session->owner);
+    const char *origin = box_to_upstream ? "box" : "tonies";
+    if (length && debugging)
+    {
+        uint64_t received_at = mqtt_debug_now_ms();
+        if (!stream->length) stream->debug_first_ms = received_at;
+        stream->debug_last_ms = received_at;
+        stream->debug_latest_chunk_offset = stream->length;
+        tb2_mqtt_debug_io(session, stream->debug_message, origin, "mqtt_rx_chunk",
+            NO_ERROR, length, length, 0);
+    }
     error_t error = tb2_mqtt_stream_append(stream, data, length);
     if (error)
         return error;
@@ -2550,12 +2974,29 @@ static error_t tb2_mqtt_process_stream(tb2_mqtt_passthrough_session_t *session,
     unsigned processed = 0;
     while (stream->length > 0 && processed < TB2_MQTT_BOX_IO_OPS_PER_TICK)
     {
+        if (debugging && !stream->debug_message)
+            stream->debug_message = mqtt_debug_next_message(session->owner);
         size_t packet_size = 0;
         size_t fixed_header_size = 0;
         error = tb2_mqtt_packet_size(stream->data, stream->length, &packet_size,
                                      &fixed_header_size);
+        stream->debug_expected = packet_size;
         if (error == ERROR_WOULD_BLOCK || packet_size > stream->length)
+        {
+            uint64_t now = mqtt_debug_now_ms();
+            if (debugging && (!stream->debug_wait_ms || now - stream->debug_wait_ms >= TB2_MQTT_DEBUG_SNAPSHOT_MS))
+            {
+                stream->debug_wait_ms = now;
+                cJSON *detail = cJSON_CreateObject();
+                cJSON_AddNumberToObject(detail, "buffered_bytes", (double)stream->length);
+                cJSON_AddNumberToObject(detail, "expected_packet_bytes", (double)packet_size);
+                cJSON_AddStringToObject(detail, "reason", !packet_size ? "mqtt_header_incomplete" : "mqtt_payload_incomplete");
+                cJSON_AddNumberToObject(detail, "first_buffered_at_ms", (double)stream->debug_first_ms);
+                cJSON_AddNumberToObject(detail, "last_chunk_at_ms", (double)stream->debug_last_ms);
+                mqtt_debug_event(session->owner, session->debug_epoch, stream->debug_message, origin, "parser_wait", detail);
+            }
             return NO_ERROR;
+        }
         if (error)
             return error;
         if (!box_to_upstream && packet_size > TB2_MQTT_CLOUD_PACKET_BUDGET)
@@ -2563,12 +3004,39 @@ static error_t tb2_mqtt_process_stream(tb2_mqtt_passthrough_session_t *session,
         osAcquireMutex(&session->io_mutex);
         /* Reserve an empty output FIFO before observers or QoS state mutate. */
         if (session->box_write_head != NULL)
-        { osReleaseMutex(&session->io_mutex); return NO_ERROR; }
+        {
+            uint64_t now = mqtt_debug_now_ms();
+            if (debugging && (!stream->debug_wait_ms || now - stream->debug_wait_ms >= TB2_MQTT_DEBUG_SNAPSHOT_MS))
+            {
+                stream->debug_wait_ms = now;
+                cJSON *detail = cJSON_CreateObject();
+                cJSON_AddStringToObject(detail, "reason", "box_tx_queue");
+                cJSON_AddNumberToObject(detail, "buffered_bytes", (double)stream->length);
+                cJSON_AddNumberToObject(detail, "expected_packet_bytes", (double)packet_size);
+                mqtt_debug_event(session->owner, session->debug_epoch, stream->debug_message, origin, "parser_deferred", detail);
+            }
+            osReleaseMutex(&session->io_mutex); return NO_ERROR;
+        }
         session->processing_packet = TRUE;
         osReleaseMutex(&session->io_mutex);
         parser_session = session;
+        session->debug_message = debugging ? stream->debug_message : 0;
+        session->debug_callback_epoch = session->debug_epoch;
+        session->debug_packet = stream->data;
+        session->debug_origin = origin;
+        if (debugging)
+        {
+            if (box_to_upstream) session->debug_packet_rx_ms = mqtt_debug_now_ms();
+            mqtt_debug_packet(session->owner, session->debug_epoch, session->debug_message,
+                origin, "packet_received", stream->data, packet_size);
+        }
+        uint64_t debug_started = mqtt_debug_now_ms();
         error = tb2_mqtt_process_packet(session, box_to_upstream, stream->data,
                                         packet_size, fixed_header_size);
+        tb2_mqtt_debug_io(session, session->debug_message, origin, "packet_processed",
+            error, packet_size, packet_size, debug_started);
+        session->debug_packet = NULL;
+        session->debug_message = session->debug_callback_epoch = 0;
         parser_session = NULL;
         osAcquireMutex(&session->io_mutex);
         session->processing_packet = FALSE;
@@ -2577,6 +3045,15 @@ static error_t tb2_mqtt_process_stream(tb2_mqtt_passthrough_session_t *session,
             return error;
         processed++;
         stream->length -= packet_size;
+        stream->debug_wait_ms = 0;
+        stream->debug_message = 0;
+        if (packet_size >= stream->debug_latest_chunk_offset)
+        {
+            stream->debug_latest_chunk_offset = 0;
+            stream->debug_first_ms = stream->debug_last_ms;
+        }
+        else stream->debug_latest_chunk_offset -= packet_size;
+        if (!stream->length) stream->debug_first_ms = stream->debug_last_ms = 0;
         if (stream->length > 0)
         {
             osMemmove(stream->data, stream->data + packet_size, stream->length);
@@ -2588,7 +3065,9 @@ static error_t tb2_mqtt_process_stream(tb2_mqtt_passthrough_session_t *session,
 static error_t tb2_mqtt_forward_ready(tb2_mqtt_passthrough_session_t *session,
                                       bool_t box_to_upstream)
 {
+    uint64_t debug_lock_started = mqtt_debug_now_ms();
     osAcquireMutex(&session->io_mutex);
+    tb2_mqtt_debug_slow(session, "rx_io_mutex_wait", debug_lock_started);
     error_t error = tb2_mqtt_passthrough_box_write_error(session);
     if (!error)
         error = atomic_load(&session->local_publish_error);
@@ -2598,7 +3077,20 @@ static error_t tb2_mqtt_forward_ready(tb2_mqtt_passthrough_session_t *session,
         return error;
     }
     if (session->box_write_head != NULL || session->box_write_active)
-    { osReleaseMutex(&session->io_mutex); return NO_ERROR; }
+    {
+        uint64_t now = mqtt_debug_now_ms();
+        if (mqtt_debug_active(session->owner) && now - session->debug_defer_ms >= TB2_MQTT_DEBUG_SNAPSHOT_MS)
+        {
+            session->debug_defer_ms = now;
+            cJSON *detail = cJSON_CreateObject();
+            cJSON_AddStringToObject(detail, "reason", session->box_write_active ? "active_tls_write" : "box_tx_queue");
+            cJSON_AddNumberToObject(detail, "queued_packets", (double)session->box_write_count);
+            cJSON_AddNumberToObject(detail, "queued_bytes", (double)session->box_write_bytes);
+            mqtt_debug_event(session->owner, session->debug_epoch, 0,
+                box_to_upstream ? "box_transport" : "tonies_transport", "rx_deferred", detail);
+        }
+        osReleaseMutex(&session->io_mutex); return NO_ERROR;
+    }
     if (box_to_upstream &&
         (tlsIsTxReady(session->box_tls) || tlsGetState(session->box_tls) < TLS_STATE_APPLICATION_DATA))
     {
@@ -2620,7 +3112,25 @@ static error_t tb2_mqtt_forward_ready(tb2_mqtt_passthrough_session_t *session,
 
     uint8_t buffer[TB2_MQTT_TUNNEL_BUFFER_SIZE];
     size_t received = 0;
+    uint64_t debug_started = mqtt_debug_now_ms();
+    const char *debug_origin = box_to_upstream ? "box_transport" : "tonies_transport";
+    bool_t debug_begin = mqtt_debug_active(session->owner) &&
+        (!session->debug_tls_read_begin_ms ||
+         debug_started - session->debug_tls_read_begin_ms >= TB2_MQTT_DEBUG_SLOW_REPORT_MS);
+    if (debug_begin)
+    {
+        session->debug_tls_read_begin_ms = debug_started;
+        tb2_mqtt_debug_io(session, 0, debug_origin, "tls_read_begin", NO_ERROR, sizeof(buffer), 0, debug_started);
+    }
     error = tlsRead(source, buffer, sizeof(buffer), &received, 0);
+    if (received)
+    {
+        if (box_to_upstream) session->debug_tls_rx_ms = mqtt_debug_now_ms();
+        else session->debug_cloud_rx_ms = mqtt_debug_now_ms();
+        session->debug_tls_read_begin_ms = 0;
+    }
+    if (debug_begin || received || (error && error != ERROR_WOULD_BLOCK && error != ERROR_TIMEOUT))
+        tb2_mqtt_debug_io(session, 0, debug_origin, "tls_read", error, sizeof(buffer), received, debug_started);
     osReleaseMutex(&session->io_mutex);
     if (error == ERROR_WOULD_BLOCK || error == ERROR_TIMEOUT)
         return NO_ERROR;
@@ -2727,12 +3237,15 @@ error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
     created->observer_context = observer_context;
     created->next_local_packet_id = UINT16_MAX;
     created->owner = ++next_owner;
+    mqtt_debug_sync(created->owner, box_settings, FALSE);
 
     error_t error = tb2_mqtt_capture_open(&created->capture, get_settings());
+    created->capture.debug_owner = created->owner;
     if (error)
     {
         tb2_mqtt_trace_error("capture_open", error);
         tb2_mqtt_status_attempt_failed("capture_open_failed");
+        mqtt_debug_close(created->owner, "capture_open_failed");
         osDeleteMutex(&created->io_mutex);
         osFreeMem(created);
         return error;
@@ -2748,7 +3261,7 @@ error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
     if (!error)
     {
         created->upstream_initialized = TRUE;
-        error = tb2_mqtt_connect_upstream(identity_settings, &created->upstream);
+        error = tb2_mqtt_connect_upstream(identity_settings, &created->upstream, created);
     }
     if (error)
     {
@@ -2793,7 +3306,7 @@ error_t tb2_mqtt_passthrough_forward_initial(tb2_mqtt_passthrough_session_t *ses
     return tb2_mqtt_process_stream(session, TRUE, data, length);
 }
 
-error_t tb2_mqtt_passthrough_task(tb2_mqtt_passthrough_session_t *session)
+static error_t tb2_mqtt_passthrough_task_inner(tb2_mqtt_passthrough_session_t *session)
 {
     if (session == NULL) return ERROR_INVALID_PARAMETER;
     if (!tb2_mqtt_passthrough_is_enabled()) return ERROR_ABORTED;
@@ -2801,20 +3314,122 @@ error_t tb2_mqtt_passthrough_task(tb2_mqtt_passthrough_session_t *session)
     session->box_io_ops = TB2_MQTT_BOX_IO_OPS_PER_TICK;
     session->box_io_bytes = TB2_MQTT_BOX_IO_BYTES_PER_TICK;
     osReleaseMutex(&session->io_mutex);
+    uint64_t debug_phase_started = mqtt_debug_now_ms();
     error_t error = tb2_mqtt_box_write_pump(session);
+    tb2_mqtt_debug_slow(session, "box_tx_pump", debug_phase_started);
+    debug_phase_started = mqtt_debug_now_ms();
     if (!error) error = tb2_mqtt_process_stream(session, TRUE, NULL, 0);
     if (!error) error = tb2_mqtt_forward_ready(session, TRUE);
+    tb2_mqtt_debug_slow(session, "box_rx_phase", debug_phase_started);
+    debug_phase_started = mqtt_debug_now_ms();
     if (!error) error = tb2_mqtt_process_stream(session, FALSE, NULL, 0);
     if (!error) error = tb2_mqtt_forward_ready(session, FALSE);
+    tb2_mqtt_debug_slow(session, "cloud_rx_phase", debug_phase_started);
     uint32_t now;
     if (!error && !mqtt_monotonic_ms(&now)) return ERROR_FAILURE;
     if (!error && session->keepalive &&
         (uint32_t)(now - session->last_box_rx) > (uint32_t)session->keepalive * 1500U)
     {
+        if (mqtt_debug_active(session->owner))
+        {
+            cJSON *detail = cJSON_CreateObject();
+            cJSON_AddNumberToObject(detail, "keepalive_seconds", session->keepalive);
+            cJSON_AddNumberToObject(detail, "since_complete_packet_ms", (uint32_t)(now - session->last_box_rx));
+            cJSON_AddNumberToObject(detail, "buffered_bytes", (double)session->box_stream.length);
+            cJSON_AddNumberToObject(detail, "last_socket_rx_at_ms", (double)session->debug_raw_rx_ms);
+            cJSON_AddNumberToObject(detail, "last_tls_rx_at_ms", (double)session->debug_tls_rx_ms);
+            mqtt_debug_event(session->owner, session->debug_epoch, 0, "local", "mqtt_keepalive_timeout", detail);
+        }
         TRACE_WARNING("TB2 MQTT mqtt_keepalive_timeout box=%s session=%" PRIu64 " decision=close\r\n",
             session->box_settings->commonName, session->owner);
         return ERROR_TIMEOUT;
     }
+    return error;
+}
+
+/* Read-only, sampled kernel evidence. SO_ERROR is deliberately not queried:
+ * reading it can consume a pending socket error and change transport behavior. */
+static void tb2_mqtt_debug_snapshot(tb2_mqtt_passthrough_session_t *session, uint64_t now, bool_t final)
+{
+    if (!mqtt_debug_active(session->owner) ||
+        (!final && now - session->debug_snapshot_ms < TB2_MQTT_DEBUG_SNAPSHOT_MS)) return;
+    session->debug_snapshot_ms = now;
+    uint64_t lock_started = mqtt_debug_now_ms();
+    osAcquireMutex(&session->io_mutex);
+    cJSON *detail = cJSON_CreateObject();
+    cJSON_AddBoolToObject(detail, "final", final);
+    cJSON_AddNumberToObject(detail, "io_mutex_wait_ms", (double)(mqtt_debug_now_ms() - lock_started));
+    cJSON_AddNumberToObject(detail, "box_tx_packets", (double)session->box_write_count);
+    cJSON_AddNumberToObject(detail, "box_tx_bytes", (double)session->box_write_bytes);
+    cJSON_AddNumberToObject(detail, "box_buffered_bytes", (double)session->box_stream.length);
+    cJSON_AddNumberToObject(detail, "cloud_buffered_bytes", (double)session->upstream_stream.length);
+    cJSON_AddNumberToObject(detail, "box_expected_packet_bytes", (double)session->box_stream.debug_expected);
+    cJSON_AddNumberToObject(detail, "last_socket_rx_at_ms", (double)session->debug_raw_rx_ms);
+    cJSON_AddNumberToObject(detail, "last_socket_tx_at_ms", (double)session->debug_raw_tx_ms);
+    cJSON_AddNumberToObject(detail, "socket_rx_bytes", (double)session->debug_raw_rx_bytes);
+    cJSON_AddNumberToObject(detail, "socket_tx_bytes", (double)session->debug_raw_tx_bytes);
+    cJSON_AddNumberToObject(detail, "socket_rx_waits", (double)session->debug_socket_rx_waits);
+    cJSON_AddNumberToObject(detail, "socket_tx_waits", (double)session->debug_socket_tx_waits);
+    cJSON_AddNumberToObject(detail, "io_ops_left", session->box_io_ops);
+    cJSON_AddNumberToObject(detail, "io_bytes_left", (double)session->box_io_bytes);
+    cJSON_AddNumberToObject(detail, "last_tls_rx_at_ms", (double)session->debug_tls_rx_ms);
+    cJSON_AddNumberToObject(detail, "last_cloud_tls_rx_at_ms", (double)session->debug_cloud_rx_ms);
+    cJSON_AddNumberToObject(detail, "last_complete_packet_at_ms", (double)session->debug_packet_rx_ms);
+    cJSON_AddNumberToObject(detail, "keepalive_seconds", session->keepalive);
+    cJSON_AddBoolToObject(detail, "tls_write_active", session->box_write_active);
+    cJSON_AddBoolToObject(detail, "tx_stalled", session->box_write_stalled);
+    cJSON_AddNumberToObject(detail, "tls_state", tlsGetState(session->box_tls));
+#ifdef __linux__
+    if (session->box_write_stalled || now - session->debug_raw_rx_ms >= TB2_MQTT_DEBUG_SNAPSHOT_MS)
+    {
+        int count = 0;
+        if (ioctl(session->box_socket->descriptor, FIONREAD, &count) == 0)
+            cJSON_AddNumberToObject(detail, "kernel_rx_bytes", count);
+        else cJSON_AddStringToObject(detail, "kernel_rx_status", "unavailable");
+        if (ioctl(session->box_socket->descriptor, SIOCOUTQ, &count) == 0)
+            cJSON_AddNumberToObject(detail, "kernel_tx_bytes", count);
+        else cJSON_AddStringToObject(detail, "kernel_tx_status", "unavailable");
+        struct tcp_info info;
+        socklen_t size = sizeof(info);
+        memset(&info, 0, sizeof(info));
+        if (getsockopt(session->box_socket->descriptor, IPPROTO_TCP, TCP_INFO, &info, &size) == 0)
+        {
+            cJSON_AddNumberToObject(detail, "tcp_state", info.tcpi_state);
+            cJSON_AddNumberToObject(detail, "tcp_unacked", info.tcpi_unacked);
+            cJSON_AddNumberToObject(detail, "tcp_retransmits", info.tcpi_retransmits);
+            cJSON_AddNumberToObject(detail, "tcp_rtt_us", info.tcpi_rtt);
+            cJSON_AddStringToObject(detail, "tcp_info_status", "available");
+        }
+        else cJSON_AddStringToObject(detail, "tcp_info_status", "unavailable");
+    }
+    else cJSON_AddStringToObject(detail, "tcp_info_status", "not_sampled_no_stall");
+#else
+    cJSON_AddStringToObject(detail, "tcp_info_status", "unsupported_platform");
+#endif
+    osReleaseMutex(&session->io_mutex);
+    mqtt_debug_event(session->owner, session->debug_epoch, 0, "local", "transport_snapshot", detail);
+}
+
+error_t tb2_mqtt_passthrough_task(tb2_mqtt_passthrough_session_t *session)
+{
+    if (session == NULL) return ERROR_INVALID_PARAMETER;
+    mqtt_debug_sync(session->owner, session->box_settings, session->connack_sent);
+    uint64_t started = mqtt_debug_now_ms();
+    if (mqtt_debug_active(session->owner) && session->debug_tick_ms &&
+        started - session->debug_tick_ms >= TB2_MQTT_DEBUG_SLOW_MS &&
+        tb2_mqtt_debug_slow_due(session, TB2_DEBUG_LOOP_GAP, started))
+    {
+        cJSON *detail = cJSON_CreateObject();
+        cJSON_AddNumberToObject(detail, "between_visits_ms", (double)(started - session->debug_tick_ms));
+        mqtt_debug_event(session->owner, session->debug_epoch, 0, "local", "mainloop_gap", detail);
+    }
+    session->debug_tick_ms = started;
+    tb2_mqtt_debug_snapshot(session, started, FALSE);
+    error_t error = tb2_mqtt_passthrough_task_inner(session);
+    uint64_t elapsed = mqtt_debug_now_ms() - started;
+    if (error || (elapsed >= TB2_MQTT_DEBUG_SLOW_MS &&
+        tb2_mqtt_debug_slow_due(session, TB2_DEBUG_TASK, started + elapsed)))
+        tb2_mqtt_debug_io(session, 0, "local", "session_task_complete", error, 0, 0, started);
     return error;
 }
 
@@ -2904,6 +3519,25 @@ mqtt_delivery_result_t tb2_mqtt_passthrough_submit_local_batch(
         for (tb2_mqtt_box_write_t *write = head; write != NULL; write = write->next)
         {
             tb2_mqtt_pending_write_t *p = &write->packet;
+            p->debug_origin = "local";
+            p->debug_enqueued_ms = mqtt_debug_now_ms();
+            p->debug_epoch = session->debug_epoch;
+            if (mqtt_debug_active(session->owner))
+            {
+                p->debug_message = mqtt_debug_next_message(session->owner);
+                uint8_t digest[SHA256_DIGEST_SIZE] = {0};
+                uint64_t retry_of = tb2_mqtt_debug_retry(session, p, FALSE, digest);
+                if (!retry_of)
+                    mqtt_debug_packet(session->owner, session->debug_epoch, p->debug_message, "local",
+                        "packet_created", p->wire, p->wire_length);
+                cJSON *detail = cJSON_CreateObject();
+                if (retry_of) cJSON_AddNumberToObject(detail, "retry_of", (double)retry_of);
+                else if (p->wire[0] & 0x08U) cJSON_AddStringToObject(detail, "retry_correlation", "unmatched");
+                cJSON_AddNumberToObject(detail, "packet_id", p->wire_id);
+                cJSON_AddNumberToObject(detail, "queued_packets", (double)session->box_write_count);
+                cJSON_AddNumberToObject(detail, "queued_bytes", (double)session->box_write_bytes);
+                mqtt_debug_event(session->owner, session->debug_epoch, p->debug_message, "local", "box_queued", detail);
+            }
             if (session->capture_opened &&
                 tb2_mqtt_capture_packet_ex(&session->capture, "upstream_to_box", p->original,
                     p->original_length, p->wire, p->wire_length, p->packet_type, p->topic,
@@ -2951,6 +3585,30 @@ void tb2_mqtt_passthrough_close(tb2_mqtt_passthrough_session_t *session,
     {
         return;
     }
+    if (mqtt_debug_active(session->owner))
+    {
+        tb2_mqtt_debug_snapshot(session, mqtt_debug_now_ms(), TRUE);
+        tb2_mqtt_stream_t *streams[] = {&session->box_stream, &session->upstream_stream};
+        for (size_t i = 0; i < 2; i++)
+        {
+            tb2_mqtt_stream_t *stream = streams[i];
+            if (!stream->length) continue;
+            size_t expected = 0, header = 0;
+            error_t parse_error = tb2_mqtt_packet_size(stream->data, stream->length, &expected, &header);
+            cJSON *detail = cJSON_CreateObject();
+            cJSON_AddNumberToObject(detail, "buffered_bytes", (double)stream->length);
+            cJSON_AddNumberToObject(detail, "expected_packet_bytes", (double)expected);
+            cJSON_AddNumberToObject(detail, "fixed_header_bytes", (double)header);
+            cJSON_AddNumberToObject(detail, "packet_type", stream->data[0] >> 4);
+            cJSON_AddNumberToObject(detail, "packet_flags", stream->data[0] & 15);
+            cJSON_AddNumberToObject(detail, "parser_error", parse_error);
+            cJSON_AddNumberToObject(detail, "first_buffered_at_ms", (double)stream->debug_first_ms);
+            cJSON_AddNumberToObject(detail, "last_chunk_at_ms", (double)stream->debug_last_ms);
+            cJSON_AddStringToObject(detail, "close_reason", result_code != NULL ? result_code : "unknown");
+            mqtt_debug_event(session->owner, session->debug_epoch, stream->debug_message,
+                i == 0 ? "box" : "tonies", "close_residual_packet", detail);
+        }
+    }
     error_t cancel_error = tb2_mqtt_passthrough_box_write_error(session);
     tb2_mqtt_box_writes_cancel(session, cancel_error ? cancel_error : ERROR_NOT_CONNECTED);
     if (session->upstream_initialized)
@@ -2993,6 +3651,7 @@ void tb2_mqtt_passthrough_close(tb2_mqtt_passthrough_session_t *session,
     tb2_mqtt_qos2_free(&session->blocked_qos2_box);
     tb2_mqtt_qos2_free(&session->blocked_qos2_upstream);
     tb2_mqtt_local_responses_free(session);
+    mqtt_debug_close(session->owner, result_code);
     tb2_mqtt_packet_ids_free(session);
     if (session->previous_send != NULL && session->previous_receive != NULL)
         tlsSetSocketCallbacks(session->box_tls, session->previous_send,

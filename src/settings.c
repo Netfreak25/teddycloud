@@ -527,6 +527,7 @@ static void option_map_init(uint8_t settingsId)
     OPTION_READONLY_STRING("mqtt_server.cert.rotation_status", &settings->mqtt_server.cert_status, "Not checked", "ICI certificate status", "Last TB2 ICI certificate reconciliation result", LEVEL_EXPERT)
     OPTION_BOOL("mqtt_server.log_full_payloads", &settings->mqtt_server.log_full_payloads, FALSE, "Log full MQTT payloads", "Log large MQTT server payloads as base64 for reverse-engineering exports.", LEVEL_EXPERT)
     OPTION_BOOL("mqtt_server.log_connect_details", &settings->mqtt_server.log_connect_details, FALSE, "Log MQTT CONNECT details", "Log MQTT CONNECT structure and plain client ID at debug level 5. Username, password and Will fields remain masked.", LEVEL_EXPERT)
+    OPTION_BOOL("mqtt_server.debug_enabled", &settings->mqtt_server.debug_enabled, FALSE, "Record MQTT diagnostics", "Explicit TB2 box-only recording. Message contents may contain personal data; recognized credentials are masked. Does not change MQTT behavior.", LEVEL_BASIC)
 
     OPTION_TREE_DESC("hass", "Home Assistant", LEVEL_DETAIL)
     OPTION_STRING("hass.name", &settings->hass.name, "teddyCloud - Server", "Home Assistant name", "Home Assistant name", LEVEL_DETAIL)
@@ -567,7 +568,10 @@ void overlay_settings_init_opt(setting_item_t *opt, setting_item_t *opt_src)
         switch (opt->type)
         {
         case TYPE_BOOL:
-            *((bool *)opt->ptr) = *((bool *)opt_src->ptr);
+            /* Recording is opt-in per box, even if an old/manual global file
+             * contains a true value. Reset must also return to disabled. */
+            *((bool *)opt->ptr) = !osStrcmp(opt->option_name, "mqtt_server.debug_enabled")
+                ? false : *((bool *)opt_src->ptr);
             break;
         case TYPE_SIGNED:
         case TYPE_UNSIGNED:
@@ -2314,6 +2318,11 @@ static error_t settings_load_ovl(bool overlay)
                         switch (opt->type)
                         {
                         case TYPE_BOOL:
+                            if (!overlay && !osStrcmp(option_name, "mqtt_server.debug_enabled"))
+                            {
+                                *((bool *)opt->ptr) = false;
+                                break;
+                            }
                             if (overlay && !osStrcmp(option_name, CORE_SERVER_SNI_CERT_SELECTION_SETTING))
                             {
                                 TRACE_WARNING("Ignoring overlay-only value for global setting '%s'\r\n",
@@ -2625,6 +2634,10 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
     {
         return false;
     }
+
+    // Never arm diagnostics globally, including through non-Web API callers.
+    if (!osStrcmp(item, "mqtt_server.debug_enabled") && settingsId == 0 && value)
+        return false;
 
     if (!osStrcmp(item, CLOUD_TB2_CAPTURE_SETTING) ||
         !osStrcmp(item, CLOUD_TB2_LEGACY_PASSTHROUGH_SETTING) ||

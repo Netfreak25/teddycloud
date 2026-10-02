@@ -13,6 +13,9 @@ typedef enum
     MQTT_SERVER_PLAYBACK_RESTART,
 } mqtt_server_playback_action_t;
 
+/** Optional diagnostic timing only; never publishes or changes a box state. */
+void mqtt_server_debug_hass_duration(client_ctx_t *client_ctx, uint64_t started_ms);
+
 void mqtt_server_init();
 error_t mqtt_server_reload_certificate();
 void mqtt_server_task();

@@ -15,7 +15,9 @@ def main():
     root = Path(__file__).resolve().parents[1]
     source = (root / "src/mqtt_server.c").read_text(encoding="utf-8")
     names = (
-        "mqtt_fresh_tonies_reset_connection", "mqtt_uid_to_ruid",
+        "mqtt_connection_debug_owner", "mqtt_server_debug_hass_duration",
+        "mqtt_uid_to_ruid", "mqtt_debug_fresh_event",
+        "mqtt_fresh_tonies_reset_connection",
         "mqtt_fresh_tonies_publish_state", "mqtt_mark_fresh_tonies_pending",
         "mqtt_clear_fresh_tonies_pending", "mqtt_fresh_tonie_find",
         "mqtt_fresh_tonies_sync_connection", "mqtt_fresh_tonies_next",
@@ -37,7 +39,7 @@ def main():
     end += len("} MqttFreshToniesPublishState;")
     declarations = "\n".join(re.findall(
         r"^#define MQTT_(?:MAX_(?:PACKET_SIZE|CONNECTIONS|SUBSCRIPTIONS)|"
-        r"FRESH_TONIES_\w+|MILLISECONDS_PER_SECOND) .+$", source, re.M,
+        r"FRESH_TONIES_\w+|MILLISECONDS_PER_SECOND|DEBUG_SLOW(?:_REPORT)?_MS) .+$", source, re.M,
     )) + "\n" + source[start:end]
     declarations += "\n" + re.search(
         r"typedef struct \{\n    MqttClientConnection \*conn;\n"
@@ -56,7 +58,8 @@ def main():
         subprocess.run([
             "gcc", "-Wall", "-Wextra", "-Werror", "-DGPL_LICENSE_TERMS_ACCEPTED",
             "-DHTTP_SERVER_MAX_CONNECTIONS=32", "-DTRACE_NOPATH_FILE",
-            *["-I" + path for path in includes], str(generated), "-o", str(executable),
+            *["-I" + path for path in includes], str(generated),
+            "tests/mqtt_debug_stubs.c", "cJSON/cJSON.c", "-o", str(executable),
         ], cwd=root, check=True)
         subprocess.run([str(executable)], check=True, timeout=10)
 

@@ -31,6 +31,7 @@
 #include "cache.h"
 #include "content_playlist.h"
 #include "mqtt_server.h"
+#include "mqtt_debug.h"
 #include "mutex_manager.h"
 #include "toniebox_state.h"
 #include "v3_local_content.h"
@@ -202,6 +203,93 @@ error_t parsePostData(HttpConnection *connection, char_t *post_data, size_t buff
         received += size;
     }
     return NO_ERROR;
+}
+
+/** This export is deliberately separate from the general file manager. */
+static settings_t *api_mqtt_debug_box(const char *query)
+{
+    char overlay[32] = {0};
+    uint8_t id = 0;
+    if (!queryGet(query, "overlay", overlay, sizeof(overlay)) || overlay[0] == '\0' ||
+        (id = get_overlay_id(overlay)) == 0 || !get_settings_id(id)->internal.config_used)
+        return NULL;
+    settings_t *settings = get_settings_id(id);
+    return settings->toniebox.boxGeneration == GENERATION_TB2 ? settings : NULL;
+}
+
+error_t handleApiMqttDiagnostics(HttpConnection *connection, const char_t *uri,
+                                 const char_t *queryString, client_ctx_t *client_ctx)
+{
+    (void)uri;
+    (void)client_ctx;
+    settings_t *settings = api_mqtt_debug_box(queryString);
+    if (settings == NULL)
+        return api_write_certificate_doctor_error(connection, 404, "unknown_box", "A known TB2 box overlay is required");
+    cJSON *status = mqtt_debug_status(settings);
+    char *body = status != NULL ? cJSON_PrintUnformatted(status) : NULL;
+    cJSON_Delete(status);
+    if (body == NULL)
+        return ERROR_OUT_OF_MEMORY;
+    httpPrepareHeader(connection, "application/json; charset=utf-8", osStrlen(body));
+    connection->response.noCache = TRUE;
+    return httpWriteResponse(connection, body, osStrlen(body), TRUE);
+}
+
+error_t handleApiMqttDiagnosticFile(HttpConnection *connection, const char_t *uri,
+                                    const char_t *queryString, client_ctx_t *client_ctx)
+{
+    (void)uri;
+    (void)client_ctx;
+    settings_t *settings = api_mqtt_debug_box(queryString);
+    char session[80] = {0}, name[48] = {0}, prefix[24] = {0};
+    if (settings == NULL || !queryGet(queryString, "session", session, sizeof(session)) ||
+        !queryGet(queryString, "file", name, sizeof(name)))
+        return api_write_certificate_doctor_error(connection, 404, "unknown_recording", "Recording not found for this box");
+    uint64_t requested = 0;
+    bool_t has_prefix = queryGet(queryString, "length", prefix, sizeof(prefix));
+    if (has_prefix)
+    {
+        if (prefix[0] == '\0')
+            return api_write_certificate_doctor_error(connection, 400, "invalid_length", "Invalid snapshot length");
+        for (size_t i = 0; prefix[i]; i++)
+        {
+            if (prefix[i] < '0' || prefix[i] > '9' ||
+                requested > (UINT64_MAX - (uint64_t)(prefix[i] - '0')) / 10U)
+                return api_write_certificate_doctor_error(connection, 400, "invalid_length", "Invalid snapshot length");
+            requested = requested * 10U + (uint64_t)(prefix[i] - '0');
+        }
+    }
+    mqtt_debug_file_t *file = NULL;
+    uint64_t length = 0;
+    error_t error = mqtt_debug_file_open(settings, session, name, &file, &length);
+    if (error)
+        return api_write_certificate_doctor_error(connection, 404, "recording_unavailable", "Recording is unavailable or was rotated; refresh the listing");
+    if (length > SIZE_MAX || (has_prefix && mqtt_debug_file_limit(file, requested)))
+    {
+        mqtt_debug_file_close(file);
+        return api_write_certificate_doctor_error(connection, 409, "recording_changed", "Recording changed; refresh the listing");
+    }
+    if (has_prefix)
+        length = requested;
+    httpPrepareHeader(connection, "application/octet-stream", (size_t)length);
+    connection->response.noCache = TRUE;
+    error = httpWriteHeader(connection);
+    uint64_t remaining = length;
+    while (!error && remaining)
+    {
+        size_t received = 0;
+        size_t chunk = (size_t)MIN(remaining, HTTP_SERVER_BUFFER_SIZE);
+        error = mqtt_debug_file_read(file, connection->buffer, chunk, &received);
+        if (!error && received == 0)
+            error = ERROR_UNEXPECTED_END_OF_FILE;
+        if (!error)
+        {
+            error = httpWriteStream(connection, connection->buffer, received);
+            remaining -= received;
+        }
+    }
+    mqtt_debug_file_close(file);
+    return error ? error : httpFlushStream(connection);
 }
 
 static bool_t api_is_toniebox2_setting(const char *item)
@@ -478,6 +566,10 @@ error_t handleApiGetIndex(HttpConnection *connection, const char_t *uri, const c
         {
             continue;
         }
+
+        if (!osStrcmp(opt->option_name, "mqtt_server.debug_enabled") &&
+            api_mqtt_debug_box(queryString) == NULL)
+            continue;
 
         settings_level user_level = get_settings_ovl(overlay)->core.settings_level;
         if (!isNoLevel && opt->level > user_level)
@@ -901,6 +993,10 @@ error_t handleApiSettingsSet(HttpConnection *connection, const char_t *uri, cons
             TRACE_DEBUG("got overlay '%s'\r\n", overlay);
         }
 
+        if (!osStrcmp(item, "mqtt_server.debug_enabled") &&
+            api_mqtt_debug_box(queryString) == NULL)
+            return api_write_certificate_doctor_error(connection, 400, "invalid_debug_scope", "MQTT diagnostics require a known TB2 box overlay");
+
         bool success = false;
         bool isTb2Hostname = !osStrcmp(item, "core.server_cert_tb2.hostname") ||
                              !osStrcmp(item, "mqtt_server.hostname");
@@ -965,6 +1061,10 @@ error_t handleApiSettingsReset(HttpConnection *connection, const char_t *uri, co
     {
         TRACE_DEBUG("got overlay '%s'\r\n", overlay);
     }
+    if (!osStrcmp(item, "mqtt_server.debug_enabled") &&
+        api_mqtt_debug_box(queryString) == NULL)
+        return api_write_certificate_doctor_error(connection, 400, "invalid_debug_scope", "MQTT diagnostics require a known TB2 box overlay");
+
     setting_item_t *opt = settings_get_by_name_ovl(item, overlay);
     bool success = false;
 

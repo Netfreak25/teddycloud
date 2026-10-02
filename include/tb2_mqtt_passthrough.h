@@ -83,6 +83,10 @@ error_t tb2_mqtt_passthrough_forward_initial(tb2_mqtt_passthrough_session_t *ses
                                              const uint8_t *data, size_t length);
 error_t tb2_mqtt_passthrough_task(tb2_mqtt_passthrough_session_t *session);
 bool_t tb2_mqtt_passthrough_is_established(const tb2_mqtt_passthrough_session_t *session);
+/* Diagnostic identities only; message/epoch are scoped to synchronous callbacks. */
+uint64_t tb2_mqtt_passthrough_debug_owner(const tb2_mqtt_passthrough_session_t *session);
+uint64_t tb2_mqtt_passthrough_debug_message(const tb2_mqtt_passthrough_session_t *session);
+uint64_t tb2_mqtt_passthrough_debug_epoch(const tb2_mqtt_passthrough_session_t *session);
 /* First terminal box-write error; recovered transient errors are not stored. */
 error_t tb2_mqtt_passthrough_box_write_error(const tb2_mqtt_passthrough_session_t *session);
 error_t tb2_mqtt_passthrough_reserve_local_packet_id(

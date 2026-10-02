@@ -18,7 +18,8 @@ def main():
     required = {"tb2_mqtt_passthrough_submit_local_batch", "tb2_mqtt_box_write_pump",
                 "tb2_mqtt_box_writes_cancel", "tb2_mqtt_process_stream",
                 "tb2_mqtt_passthrough_is_established", "tb2_mqtt_passthrough_task",
-                "tb2_mqtt_box_write_append"}
+                "tb2_mqtt_box_write_append", "tb2_mqtt_debug_ack",
+                "tb2_mqtt_passthrough_debug_message", "tb2_mqtt_passthrough_debug_epoch"}
     selected = set()
     while required:
         name = required.pop()
@@ -42,7 +43,9 @@ def main():
         subprocess.run(["gcc", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function",
                         "-Wno-unused-variable", "-Wno-unused-parameter", "-DGPL_LICENSE_TERMS_ACCEPTED",
                         "-DHTTP_SERVER_MAX_CONNECTIONS=32", "-DTRACE_NOPATH_FILE",
-                        *["-I" + item for item in includes], str(path), "-pthread", "-o", str(executable)],
+                        *["-I" + item for item in includes], str(path), "tests/mqtt_debug_stubs.c",
+                        "cJSON/cJSON.c", "cyclone/cyclone_crypto/hash/sha256.c",
+                        "cyclone/common/cpu_endian.c", "-pthread", "-o", str(executable)],
                        cwd=root, check=True)
         subprocess.run([str(executable)], check=True, timeout=10)
 

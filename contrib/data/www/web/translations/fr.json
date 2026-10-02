@@ -1034,6 +1034,30 @@
         "teddycloudStatusOnline": "Le serveur TeddyCloud fonctionne correctement"
     },
     "settings": {
+        "mqttDebug": {
+            "title": "Fichiers de diagnostic MQTT",
+            "enabled": "Enregistrer le diagnostic MQTT de cette boîte",
+            "saveHint": "Appliquer avec Enregistrer. L’enregistrement continue sur TeddyCloud même si cette fenêtre ou le navigateur est fermé, jusqu’à sa désactivation pour cette boîte.",
+            "pending": "Modification non enregistrée : l’enregistrement suit le réglage enregistré jusqu’à validation.",
+            "privacy": "Les mots de passe et les jetons sont masqués avant le stockage. Les sujets, identifiants et messages peuvent encore contenir des données personnelles. Vérifiez les fichiers avant de les partager.",
+            "refresh": "Actualiser l’état",
+            "loadFailed": "Impossible de charger le diagnostic MQTT",
+            "states": {
+                "disabled": "Désactivé",
+                "armed": "Prêt — en attente de connexion",
+                "recording": "Enregistrement",
+                "error": "Erreur d’enregistrement"
+            },
+            "storage": "Stocké : {{bytes}} B",
+            "dropped": "Événements perdus : {{count}}",
+            "snapshotHint": "Les téléchargements contiennent uniquement les préfixes de fichiers affichés. L’enregistrement actif continue. Les archives sont divisées en parties de 64 Mio d’entrée maximum ; le navigateur peut demander d’autoriser plusieurs téléchargements.",
+            "empty": "Aucune session de diagnostic disponible.",
+            "active": "Instantané actif",
+            "truncated": "Incomplet / rétention appliquée",
+            "download": "Télécharger le ZIP de diagnostic",
+            "part": "Préparation de la partie {{part}} sur {{total}}",
+            "downloadFailed": "Échec du téléchargement après {{completed}} partie(s). La liste a été actualisée ; les parties déjà téléchargées ne constituent pas un export complet. {{error}}"
+        },
         "diagnostics": {
             "navigationTitle": "Diagnostic",
             "title": "Diagnostic des certificats",

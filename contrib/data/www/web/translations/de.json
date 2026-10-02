@@ -1034,6 +1034,30 @@
         "teddycloudStatusOnline": "TeddyCloud Server online"
     },
     "settings": {
+        "mqttDebug": {
+            "title": "MQTT-Diagnosedateien",
+            "enabled": "MQTT-Diagnose für diese Box aufzeichnen",
+            "saveHint": "Mit Speichern übernehmen. Die Aufzeichnung läuft auf TeddyCloud weiter, auch bei geschlossenem Dialog oder Browser, bis sie für diese Box deaktiviert wird.",
+            "pending": "Ungespeicherte Änderung: Bis zum Speichern gilt der bisher gespeicherte Aufzeichnungsstatus.",
+            "privacy": "Passwörter und Tokens werden vor dem Speichern maskiert. Themen, Gerätekennungen und Nachrichteninhalte können weiterhin persönliche Daten enthalten. Dateien vor dem Teilen prüfen.",
+            "refresh": "Status aktualisieren",
+            "loadFailed": "MQTT-Diagnose konnte nicht geladen werden",
+            "states": {
+                "disabled": "Deaktiviert",
+                "armed": "Bereit — wartet auf Verbindung",
+                "recording": "Aufzeichnung läuft",
+                "error": "Aufzeichnungsfehler"
+            },
+            "storage": "Gespeichert: {{bytes}} B",
+            "dropped": "Verworfene Ereignisse: {{count}}",
+            "snapshotHint": "Downloads enthalten nur die angezeigten Dateistände. Aktive Aufzeichnungen laufen weiter. Archive werden in Teile mit höchstens 64 MiB Eingabedaten aufgeteilt; der Browser fragt eventuell nach mehreren Downloads.",
+            "empty": "Keine Diagnosesitzungen vorhanden.",
+            "active": "Aktive Momentaufnahme",
+            "truncated": "Unvollständig / Aufbewahrungsgrenze",
+            "download": "Diagnose-ZIP herunterladen",
+            "part": "Teil {{part}} von {{total}} wird erstellt",
+            "downloadFailed": "Download nach {{completed}} Teil(en) fehlgeschlagen. Die Dateiliste wurde aktualisiert; bereits heruntergeladene Teile sind kein vollständiger Export. {{error}}"
+        },
         "diagnostics": {
             "navigationTitle": "Diagnose",
             "title": "Zertifikats-Doctor",

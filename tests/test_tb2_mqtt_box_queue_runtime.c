@@ -19,6 +19,11 @@ static unsigned callbacks, cancelled, sends, processed, captures, captured_sent;
 static error_t write_error;
 static tb2_mqtt_passthrough_session_t *completing;
 static const uint8_t publish[] = {0x30, 3, 0, 1, 'a'};
+static uint64_t expected_debug_message;
+void mqtt_debug_test_reset(bool active, uint64_t now);
+void mqtt_debug_test_time(uint64_t now);
+unsigned mqtt_debug_test_count(const char *stage);
+const cJSON *mqtt_debug_test_last(const char *stage);
 
 int test_clock_gettime(clockid_t id, struct timespec *sample)
 {
@@ -69,6 +74,11 @@ static error_t tb2_mqtt_forward_ready(tb2_mqtt_passthrough_session_t *s, bool_t 
 static void complete(void *context, error_t error)
 {
     assert(context == completing);
+    if (expected_debug_message && !error)
+    {
+        assert(tb2_mqtt_passthrough_debug_message(completing) == expected_debug_message);
+        assert(tb2_mqtt_passthrough_debug_epoch(completing) == completing->debug_epoch);
+    }
     assert(pthread_mutex_trylock(&completing->io_mutex) == 0);
     assert(pthread_mutex_unlock(&completing->io_mutex) == 0);
     if (error) cancelled++;
@@ -181,6 +191,72 @@ int main(void)
     finish(&s);
     finish(&other);
     assert(cancelled == 33);
+    /* Diagnostics only: queued is not written, and callback context references
+     * the exact completed message without mutating any delivery decision. */
+    init(&s, &tls, &settings);
+    completing = &s;
+    s.owner = 17;
+    s.debug_epoch = 3;
+    mqtt_debug_test_reset(true, 1000);
+    tb2_mqtt_local_publish_t diagnostic = item(&s);
+    assert(tb2_mqtt_passthrough_submit_local_batch(&s, &diagnostic, 1).status == MQTT_DELIVERY_QUEUED);
+    assert(mqtt_debug_test_count("box_queued") == 1);
+    assert(mqtt_debug_test_count("packet_created") == 1);
+    assert(mqtt_debug_test_count("tx_complete") == 0);
+    expected_debug_message = s.box_write_head->packet.debug_message;
+    assert(expected_debug_message != 0);
+    write_error = ERROR_WOULD_BLOCK;
+    assert(tb2_mqtt_box_write_pump(&s) == NO_ERROR);
+    assert(mqtt_debug_test_count("tx_complete") == 0);
+    write_error = NO_ERROR;
+    mqtt_debug_test_time(1200);
+    assert(tb2_mqtt_box_write_pump(&s) == NO_ERROR);
+    assert(mqtt_debug_test_count("tx_complete") == 1);
+    assert(tb2_mqtt_passthrough_debug_message(&s) == 0);
+    expected_debug_message = 0;
+
+    const uint8_t partial[] = {0x30, 3, 0};
+    const uint8_t remaining[] = {1, 'a'};
+    unsigned before = processed;
+    assert(tb2_mqtt_process_stream(&s, TRUE, partial, sizeof(partial)) == NO_ERROR);
+    assert(processed == before && mqtt_debug_test_count("parser_wait") == 1);
+    const cJSON *wait = mqtt_debug_test_last("parser_wait");
+    assert(cJSON_GetNumberValue(cJSON_GetObjectItem(wait, "expected_packet_bytes")) == 5);
+    uint64_t message = s.box_stream.debug_message;
+    mqtt_debug_test_time(1300);
+    assert(tb2_mqtt_process_stream(&s, TRUE, remaining, sizeof(remaining)) == NO_ERROR);
+    assert(processed == before + 1 && mqtt_debug_test_count("packet_received") == 1);
+    assert(cJSON_GetNumberValue(cJSON_GetObjectItem(mqtt_debug_test_last("packet_received"), "message_id")) == message);
+    assert(tb2_mqtt_box_write_pump(&s) == NO_ERROR);
+
+    /* Reusable protocol IDs do not reuse diagnostic message IDs. Unknown ACKs
+     * remain unmatched; a retry is linked only while its exact write is open. */
+    uint8_t qos[] = {0x32, 5, 0, 1, 'a', 0, 17};
+    tb2_mqtt_pending_write_t sent = {0};
+    sent.wire = qos; sent.wire_length = sizeof(qos);
+    sent.packet_type = 3; sent.debug_epoch = 3;
+    sent.debug_message = 41; sent.debug_enqueued_ms = 1300;
+    sent.debug_origin = "tonies";
+    tb2_mqtt_debug_sent(&s, &sent, FALSE, 1300);
+    const uint8_t ack[] = {0x40, 2, 0, 17};
+    mqtt_debug_test_time(1400);
+    tb2_mqtt_debug_ack(&s, TRUE, ack, sizeof(ack), 2);
+    assert(cJSON_GetNumberValue(cJSON_GetObjectItem(mqtt_debug_test_last("mqtt_ack_received"), "linked_message_id")) == 41);
+    tb2_mqtt_debug_ack(&s, TRUE, ack, sizeof(ack), 2);
+    assert(cJSON_GetObjectItem(mqtt_debug_test_last("mqtt_ack_received"), "linked_message_id") == NULL);
+    sent.debug_message = 42;
+    tb2_mqtt_debug_sent(&s, &sent, FALSE, 1400);
+    qos[0] |= 8;
+    sent.debug_message = 43;
+    tb2_mqtt_debug_sent(&s, &sent, FALSE, 1500);
+    assert(cJSON_GetNumberValue(cJSON_GetObjectItem(mqtt_debug_test_last("tx_complete"), "retry_of")) == 42);
+    qos[4] = 'b';
+    sent.debug_message = 44;
+    tb2_mqtt_debug_sent(&s, &sent, FALSE, 1500);
+    assert(cJSON_GetObjectItem(mqtt_debug_test_last("tx_complete"), "retry_of") == NULL);
+    finish(&s);
+    mqtt_debug_test_reset(false, 0);
     puts("TB2 Box queue: deferred completion, FIFO limits, atomic admission, independent boxes, observer reservation, CONNACK and keepalive passed");
+    puts("TB2 diagnostics: queue/write separation, callback identity, partial parser and ACK/retry correlation passed");
     return 0;
 }

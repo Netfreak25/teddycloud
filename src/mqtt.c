@@ -8,6 +8,8 @@
 #include "core/ip.h"
 #include "core/tcp.h"
 #include "settings.h"
+#include "mqtt_debug.h"
+#include "mqtt_server.h"
 #include "platform.h"
 #include "server_helpers.h"
 
@@ -124,9 +126,11 @@ error_t mqtt_sendEvent(const char *eventname, const char *content, client_ctx_t 
 
 error_t mqtt_sendBoxEvent(const char *eventname, const char *content, client_ctx_t *client_ctx)
 {
+    uint64_t debug_started = mqtt_debug_enabled(client_ctx->settings) ? mqtt_debug_now_ms() : 0;
     t_ha_info *ha_box = mqtt_get_box(client_ctx);
     if (!ha_box)
     {
+        mqtt_server_debug_hass_duration(client_ctx, debug_started);
         return ERROR_FAILURE;
     }
 
@@ -194,6 +198,7 @@ error_t mqtt_sendBoxEvent(const char *eventname, const char *content, client_ctx
     char *topic = custom_asprintf("%%s/%s", eventname);
     ha_transmit_topic(ha_box, topic, content);
     osFreeMem(topic);
+    mqtt_server_debug_hass_duration(client_ctx, debug_started);
     return NO_ERROR;
 }
 

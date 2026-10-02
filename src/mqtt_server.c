@@ -4,6 +4,8 @@
 #include <time.h>
 #include <inttypes.h>
 #include <byteswap.h>
+#include <stdatomic.h>
+#include <stddef.h>
 
 #include "core/net.h"
 #include "core/socket.h"
@@ -13,6 +15,7 @@
 #include "mqtt_server.h"
 #include "mutex_manager.h"
 #include "mqtt_time.h"
+#include "mqtt_debug.h"
 #include "tls.h"
 #include "rand.h"
 #include "tls_adapter.h"
@@ -44,6 +47,8 @@ uint_t tcpWaitForEvents(Socket *socket, uint_t eventMask, systime_t timeout);
 #define MQTT_FRESH_TONIES_REASON_MAX 32
 #define MQTT_CONNECTION_ESTABLISH_TIMEOUT_MS 15000U
 #define MQTT_CONNECTION_IO_TIMEOUT_MS 300U
+#define MQTT_DEBUG_SLOW_MS 100U
+#define MQTT_DEBUG_SLOW_REPORT_MS 1000U
 #define MQTT_CONNECT_FLAG_USERNAME 0x80U
 #define MQTT_CONNECT_FLAG_PASSWORD 0x40U
 #define MQTT_CONNECT_FLAG_WILL_RETAIN 0x20U
@@ -95,6 +100,16 @@ typedef struct {
     bool_t fresh_tonie_sent_at_valid;
     bool_t fresh_tonie_slow_retry_logged;
     bool_t observer_local_reply_matched;
+    // Diagnostic-only state; never consulted by protocol decisions.
+    uint64_t debug_accept_id;
+    uint64_t debug_accepted_ms;
+    uint64_t debug_fresh_first_ms;
+    uint64_t debug_fresh_last_ms;
+    bool_t debug_connection_described;
+    char debug_peer[64];
+    /* Atomic tail: slot resets must not memset concurrent diagnostic readers. */
+    _Atomic uint64_t debug_owner;
+    _Atomic uint64_t debug_hass_report_ms;
 } MqttClientConnection;
 
 typedef struct {
@@ -201,6 +216,119 @@ static MqttClientConnection connections[MQTT_MAX_CONNECTIONS];
 static MqttAppControlStlState app_control_stl_state[MAX_OVERLAYS];
 static MqttAppControlPingState app_control_ping_state[MAX_OVERLAYS];
 static MqttFreshToniesPublishState fresh_tonies_publish_state[MAX_OVERLAYS];
+static uint64_t debug_accept_sequence;
+static void mqtt_uid_to_ruid(uint64_t uid, char ruid[17]);
+
+static uint64_t mqtt_connection_debug_owner(const MqttClientConnection *conn)
+{
+    return conn != NULL ? atomic_load_explicit(&conn->debug_owner, memory_order_acquire) : 0;
+}
+
+static bool_t mqtt_debug_any_box_enabled(void)
+{
+    for (uint8_t i = 1; i < MAX_OVERLAYS; i++)
+        if (mqtt_debug_enabled(get_settings_id(i))) return TRUE;
+    return FALSE;
+}
+
+/** Pre-identity metadata only: no credentials, payload or guessed box identity. */
+static void mqtt_debug_connection_phase(MqttClientConnection *conn, const char *stage,
+                                         error_t error, uint64_t started, size_t bytes, const char *reason)
+{
+    if (!mqtt_debug_any_box_enabled()) return;
+    cJSON *details = cJSON_CreateObject();
+    if (details == NULL) return;
+    cJSON_AddNumberToObject(details, "accept_id", (double)conn->debug_accept_id);
+    cJSON_AddStringToObject(details, "peer", conn->debug_peer);
+    if (reason != NULL)
+        cJSON_AddStringToObject(details, "reason", reason);
+    else
+        cJSON_AddNumberToObject(details, "error", error);
+    cJSON_AddNumberToObject(details, "bytes", (double)bytes);
+    cJSON_AddNumberToObject(details, "duration_ms", (double)(mqtt_debug_now_ms() - started));
+    if (conn->tlsContext != NULL)
+        cJSON_AddNumberToObject(details, "tls_state", tlsGetState(conn->tlsContext));
+    mqtt_debug_unassigned(stage, details);
+}
+
+/** Describe provenance again when recording is enabled on an existing session. */
+static void mqtt_debug_describe_connection(MqttClientConnection *conn)
+{
+    uint64_t owner = mqtt_connection_debug_owner(conn);
+    if (!mqtt_debug_active(owner))
+    {
+        conn->debug_connection_described = FALSE;
+        return;
+    }
+    if (conn->debug_connection_described) return;
+    conn->debug_connection_described = TRUE;
+    cJSON *details = cJSON_CreateObject();
+    if (details == NULL) return;
+    cJSON_AddNumberToObject(details, "accept_id", (double)conn->debug_accept_id);
+    cJSON_AddNumberToObject(details, "accepted_mono_ms", (double)conn->debug_accepted_ms);
+    cJSON_AddStringToObject(details, "peer", conn->debug_peer);
+    cJSON_AddStringToObject(details, "box", conn->box_common_name);
+    cJSON_AddBoolToObject(details, "established", conn->established);
+    cJSON *subscriptions = cJSON_AddArrayToObject(details, "subscriptions");
+    for (size_t i = 0; i < conn->subscription_count; i++)
+    {
+        cJSON *subscription = cJSON_CreateObject();
+        if (subscription == NULL) break;
+        cJSON_AddStringToObject(subscription, "topic", conn->subscriptions[i].topic);
+        cJSON_AddNumberToObject(subscription, "qos", conn->subscriptions[i].qos);
+        cJSON_AddItemToArray(subscriptions, subscription);
+    }
+    mqtt_debug_event(owner, 0, 0, "server", "connection_snapshot", details);
+}
+
+static void mqtt_debug_fresh_event(MqttClientConnection *conn, const char *stage,
+                                   uint64_t uid, uint16_t packet_id, bool_t duplicate)
+{
+    uint64_t owner = mqtt_connection_debug_owner(conn);
+    if (!mqtt_debug_active(owner)) return;
+    cJSON *details = cJSON_CreateObject();
+    if (details == NULL) return;
+    char ruid[17];
+    mqtt_uid_to_ruid(uid, ruid);
+    cJSON_AddStringToObject(details, "ruid", ruid);
+    cJSON_AddNumberToObject(details, "packet_id", packet_id);
+    cJSON_AddBoolToObject(details, "duplicate", duplicate);
+    cJSON_AddNumberToObject(details, "attempt", conn->fresh_tonie_attempts);
+    uint64_t now = mqtt_debug_now_ms();
+    if (conn->debug_fresh_first_ms)
+        cJSON_AddNumberToObject(details, "since_first_write_ms", (double)(now - conn->debug_fresh_first_ms));
+    if (conn->debug_fresh_last_ms)
+        cJSON_AddNumberToObject(details, "since_last_write_ms", (double)(now - conn->debug_fresh_last_ms));
+    mqtt_debug_event(owner, 0, 0, "server", stage, details);
+}
+
+/** Read-only observer detail; message identity is valid inside the relay callback. */
+static void mqtt_debug_observer_result(MqttClientConnection *conn, const char *stage, cJSON *details)
+{
+    mqtt_debug_event(mqtt_connection_debug_owner(conn),
+        tb2_mqtt_passthrough_debug_epoch(conn->passthrough),
+        tb2_mqtt_passthrough_debug_message(conn->passthrough), "server", stage, details);
+}
+
+void mqtt_server_debug_hass_duration(client_ctx_t *client_ctx, uint64_t started_ms)
+{
+    MqttClientConnection *conn = client_ctx != NULL ? client_ctx->mqtt_connection : NULL;
+    uint64_t owner = mqtt_connection_debug_owner(conn);
+    if (!started_ms || !mqtt_debug_active(owner)) return;
+    uint64_t now = mqtt_debug_now_ms();
+    if (now - started_ms < MQTT_DEBUG_SLOW_MS)
+        return;
+    uint64_t last_report = atomic_load_explicit(&conn->debug_hass_report_ms, memory_order_relaxed);
+    if ((last_report && now - last_report < MQTT_DEBUG_SLOW_REPORT_MS) ||
+        !atomic_compare_exchange_strong_explicit(&conn->debug_hass_report_ms, &last_report, now,
+                                                memory_order_relaxed, memory_order_relaxed))
+        return;
+    cJSON *details = cJSON_CreateObject();
+    if (details == NULL) return;
+    cJSON_AddNumberToObject(details, "duration_ms", (double)(now - started_ms));
+    cJSON_AddStringToObject(details, "boundary", "local_HASS_event_enqueue_not_broker_delivery");
+    mqtt_debug_event(owner, 0, 0, "server", "hass_call_slow", details);
+}
 
 static MqttFreshToniesPublishState *mqtt_fresh_tonies_publish_state(settings_t *settings);
 static void mqtt_mark_fresh_tonies_pending(settings_t *settings, const char *reason);
@@ -364,11 +492,18 @@ static void mqtt_fresh_tonies_reset_connection(MqttClientConnection *conn)
     conn->fresh_tonie_sent_at = 0;
     conn->fresh_tonie_sent_at_valid = FALSE;
     conn->fresh_tonie_slow_retry_logged = FALSE;
+    conn->debug_fresh_first_ms = 0;
+    conn->debug_fresh_last_ms = 0;
 }
 
 /* Caller holds the lifetime lock; never free a session during an HTTP publish. */
 static void mqtt_connection_close_locked(MqttClientConnection *conn, const char *reason)
 {
+    if (conn != NULL)
+        atomic_store_explicit(&conn->debug_owner, 0, memory_order_release);
+    if (conn != NULL && !conn->box_connection && conn->passthrough == NULL && conn->active)
+        mqtt_debug_connection_phase(conn, "preidentity_connection_closed", NO_ERROR,
+                                    conn->debug_accepted_ms, conn->buffer_len, reason);
     if (conn == NULL)
     {
         return;
@@ -695,6 +830,7 @@ error_t mqtt_server_tls_init(TlsContext *tlsContext)
 }
 
 void mqtt_server_init() {
+    mqtt_debug_init();
     settings_t *settings = get_settings();
     if (!settings->mqtt_server.enabled) return;
 
@@ -741,7 +877,11 @@ void mqtt_server_init() {
         return;
     }
 
-    osMemset(connections, 0, sizeof(connections));
+    for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++) {
+        atomic_store_explicit(&connections[i].debug_owner, 0, memory_order_release);
+        atomic_store_explicit(&connections[i].debug_hass_report_ms, 0, memory_order_relaxed);
+        osMemset(&connections[i], 0, offsetof(MqttClientConnection, debug_owner));
+    }
     osMemset(app_control_stl_state, 0, sizeof(app_control_stl_state));
     osMemset(app_control_ping_state, 0, sizeof(app_control_ping_state));
     osMemset(fresh_tonies_publish_state, 0,
@@ -2081,6 +2221,18 @@ static error_t mqtt_process_settings_confirm(MqttClientConnection *conn,
     {
         mqtt_ack_toniebox2_settings_history(settings, history, prepare_forward,
                                             &acked, &missing, &stale, &remaining);
+        if (mqtt_debug_active(mqtt_connection_debug_owner(conn)))
+        {
+            cJSON *details = cJSON_CreateObject();
+            if (details != NULL)
+            {
+                cJSON_AddNumberToObject(details, "locally_confirmed_fields", (double)acked);
+                cJSON_AddNumberToObject(details, "missing", (double)missing);
+                cJSON_AddNumberToObject(details, "stale", (double)stale);
+                cJSON_AddNumberToObject(details, "remaining", (double)remaining);
+                mqtt_debug_observer_result(conn, "settings_confirmation_evaluated", details);
+            }
+        }
         TRACE_INFO("MQTT settings confirm for %s overlay=%u: acked=%" PRIuSIZE " missing=%" PRIuSIZE " stale=%" PRIuSIZE " remaining=%" PRIuSIZE "\r\n",
                    settings->commonName,
                    (unsigned)settings->internal.overlayNumber,
@@ -2752,6 +2904,19 @@ static error_t handle_mqtt_publish_app_reply_bedtime_state(MqttClientConnection 
         }
     }
 
+    if (mqtt_debug_active(mqtt_connection_debug_owner(conn)))
+    {
+        cJSON *details = cJSON_CreateObject();
+        if (details != NULL)
+        {
+            cJSON_AddStringToObject(details, "correlation", correlation);
+            cJSON_AddStringToObject(details, "correlation_scope", "overlay");
+            cJSON_AddStringToObject(details, "match_kind", "overlay_time_window_heuristic");
+            cJSON_AddBoolToObject(details, "matched", !osStrcmp(correlation, "matched"));
+            mqtt_debug_observer_result(conn, "stl_reply_evaluated", details);
+        }
+    }
+
     TRACE_INFO("MQTT bedtime-state for %s: state=%s duration=%s defaultDuration=%s until=%s stlReply=%s age=%u seq=%u hash=%08" PRIX32 "\r\n",
                settings->commonName,
                stl_state,
@@ -3004,6 +3169,20 @@ static error_t handle_mqtt_publish_app_reply_pong(MqttClientConnection *conn, Mq
     uint32_t round_trip_ms = 0;
     bool_t round_trip_ms_valid = mqtt_match_app_control_ping(conn->client_ctx.settings->internal.overlayNumber,
                                                              request_id->valuestring, &round_trip_ms);
+    if (mqtt_debug_active(mqtt_connection_debug_owner(conn)))
+    {
+        cJSON *details = cJSON_CreateObject();
+        if (details != NULL)
+        {
+            cJSON_AddStringToObject(details, "request_id", request_id->valuestring);
+            cJSON_AddStringToObject(details, "correlation_scope", "overlay");
+            cJSON_AddStringToObject(details, "match_kind", "request_id");
+            cJSON_AddBoolToObject(details, "exact_match", round_trip_ms_valid);
+            if (round_trip_ms_valid)
+                cJSON_AddNumberToObject(details, "round_trip_ms", round_trip_ms);
+            mqtt_debug_observer_result(conn, "pong_evaluated", details);
+        }
+    }
     if (round_trip_ms_valid)
     {
         conn->observer_local_reply_matched = TRUE;
@@ -3445,6 +3624,7 @@ void mqtt_server_task()
 
             if (conn->passthrough != NULL)
             {
+                mqtt_debug_describe_connection(conn);
                 error = tb2_mqtt_passthrough_task(conn->passthrough);
                 if (error)
                 {
@@ -3462,6 +3642,7 @@ void mqtt_server_task()
                     TRACE_INFO("TB2 MQTT local session ended: slot=%d reason=%s error=%s (%d)\r\n",
                                mqtt_connection_slot(conn), result,
                                error2text(terminal_error), terminal_error);
+                    atomic_store_explicit(&conn->debug_owner, 0, memory_order_release);
                     tb2_mqtt_passthrough_close(conn->passthrough, result, clean);
                     conn->passthrough = NULL;
                     mqtt_connection_close_locked(conn, result);
@@ -3486,7 +3667,10 @@ void mqtt_server_task()
             {
                 if (conn->tlsContext)
                 {
+                    uint64_t debug_started = mqtt_debug_now_ms();
+                    mqtt_debug_connection_phase(conn, "tls_initial_read_begin", NO_ERROR, debug_started, 0, NULL);
                     error = tlsRead(conn->tlsContext, conn->buffer + conn->buffer_len, MQTT_MAX_PACKET_SIZE - conn->buffer_len, &received, 0);
+                    mqtt_debug_connection_phase(conn, "tls_initial_read_end", error, debug_started, received, NULL);
                 }
                 else
                 {
@@ -3512,11 +3696,14 @@ void mqtt_server_task()
                                                                &passthrough_box_settings);
                             if (!error && handled)
                             {
+                                atomic_store_explicit(&conn->debug_owner,
+                                    tb2_mqtt_passthrough_debug_owner(conn->passthrough), memory_order_release);
                                 if (passthrough_box_settings != NULL)
                                 {
                                     mqtt_promote_connection_to_box(conn, passthrough_box_settings,
                                                                    passthrough_box_settings->commonName,
                                                                    "passthrough certificate");
+                                    mqtt_debug_describe_connection(conn);
                                 }
                                 error = tb2_mqtt_passthrough_forward_initial(conn->passthrough,
                                                                              conn->buffer,
@@ -3535,6 +3722,7 @@ void mqtt_server_task()
                                     mutex_lock(MUTEX_MQTT_SESSION);
                                     if (conn->passthrough != NULL)
                                     {
+                                        atomic_store_explicit(&conn->debug_owner, 0, memory_order_release);
                                         tb2_mqtt_passthrough_close(conn->passthrough,
                                                                    "initial_forward_failed", FALSE);
                                         conn->passthrough = NULL;
@@ -3717,10 +3905,16 @@ void mqtt_server_task()
 
             if (conn != NULL)
             {
-                osMemset(conn, 0, sizeof(MqttClientConnection));
+                atomic_store_explicit(&conn->debug_owner, 0, memory_order_release);
+                atomic_store_explicit(&conn->debug_hass_report_ms, 0, memory_order_relaxed);
+                osMemset(conn, 0, offsetof(MqttClientConnection, debug_owner));
                 conn->socket = clientSocket;
                 conn->active = true;
                 conn->accepted_at = osGetSystemTime();
+                conn->debug_accepted_ms = mqtt_debug_now_ms();
+                conn->debug_accept_id = ++debug_accept_sequence;
+                osSnprintf(conn->debug_peer, sizeof(conn->debug_peer), "%s:%u",
+                           ipAddrToString(&clientIpAddr, NULL), clientPort);
                 conn->next_packet_id = UINT16_MAX;
                 conn->buffer_len = 0;
                 conn->subscription_count = 0;
@@ -3732,6 +3926,7 @@ void mqtt_server_task()
                 conn->client_ctx.state = get_toniebox_state();
                 conn->client_ctx.mqtt_connection = conn;
 
+                mqtt_debug_connection_phase(conn, "tcp_accepted", NO_ERROR, conn->debug_accepted_ms, 0, NULL);
                 conn->tlsContext = tlsInit();
                 if (conn->tlsContext == NULL)
                 {
@@ -3787,6 +3982,7 @@ void mqtt_server_deinit() {
     }
     mqtt_server_cert_len = 0;
     mqtt_server_key_len = 0;
+    mqtt_debug_deinit();
 }
 
 static bool_t mqtt_mark_toniebox2_settings_pending(uint8_t overlay_id, const char *setting_name)
@@ -4323,6 +4519,21 @@ static void mqtt_mark_fresh_tonies_pending(settings_t *settings, const char *rea
               reason != NULL && reason[0] != '\0' ? reason : "unknown",
               sizeof(state->reason) - 1);
     state->reason[sizeof(state->reason) - 1] = '\0';
+    // Observe the trigger separately; the aggregate reason can be overwritten later.
+    for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
+    {
+        MqttClientConnection *conn = &connections[i];
+        uint64_t owner = mqtt_connection_debug_owner(conn);
+        if (!conn->active || conn->client_ctx.settings != settings || !mqtt_debug_active(owner))
+            continue;
+        cJSON *details = cJSON_CreateObject();
+        if (details == NULL) continue;
+        cJSON_AddStringToObject(details, "trigger", reason != NULL ? reason : "unknown");
+        cJSON_AddNumberToObject(details, "coalesced", state->coalesced_count);
+        cJSON_AddBoolToObject(details, "inflight", conn->fresh_tonie_inflight != NULL);
+        cJSON_AddBoolToObject(details, "queued", conn->fresh_tonie_queued);
+        mqtt_debug_event(owner, 0, 0, "server", "freshness_trigger", details);
+    }
 }
 
 static void mqtt_clear_fresh_tonies_pending(settings_t *settings)
@@ -4491,11 +4702,15 @@ static void mqtt_local_fresh_completed(void *context, error_t error)
             if (!delivery->duplicate)
             {
                 conn->fresh_tonie_inflight = entry;
+                conn->debug_fresh_first_ms = mqtt_debug_now_ms();
                 conn->fresh_tonie_attempts = 1;
                 conn->fresh_tonie_slow_retry_logged = FALSE;
             }
             else if (conn->fresh_tonie_attempts < UINT8_MAX)
                 conn->fresh_tonie_attempts++;
+            conn->debug_fresh_last_ms = mqtt_debug_now_ms();
+            mqtt_debug_fresh_event(conn, "freshness_write_complete", delivery->uid,
+                                  delivery->packet_id, delivery->duplicate);
             MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(conn->client_ctx.settings);
             if (state != NULL)
                 state->last_publish_at = (uint32_t)time(NULL);
@@ -4693,6 +4908,8 @@ static bool_t mqtt_handle_fresh_tonies_puback(MqttClientConnection *conn,
     settings_t *settings = conn->client_ctx.settings;
     char ruid[17];
     mqtt_uid_to_ruid(conn->fresh_tonie_inflight->uid, ruid);
+    mqtt_debug_fresh_event(conn, "freshness_puback", conn->fresh_tonie_inflight->uid,
+                          packet_id, FALSE);
     TRACE_INFO("MQTT fresh-tonies acknowledged for %s ruid=%s packet_id=%u attempts=%u\r\n",
                settings != NULL ? settings->commonName : "-", ruid,
                (unsigned)packet_id, (unsigned)conn->fresh_tonie_attempts);

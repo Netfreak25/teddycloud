@@ -160,6 +160,7 @@ typedef struct
     char *cert_status;
     bool log_full_payloads;
     bool log_connect_details;
+    bool debug_enabled;
 } settings_mqtt_server_t;
 
 typedef enum

@@ -1034,6 +1034,30 @@
         "teddycloudStatusOnline": "Teddycloud server running fine"
     },
     "settings": {
+        "mqttDebug": {
+            "title": "MQTT diagnostic files",
+            "enabled": "Record MQTT diagnostics for this box",
+            "saveHint": "Apply with Save. Recording runs on TeddyCloud, including when this dialog or browser is closed, until disabled for this box.",
+            "pending": "Unsaved change: recording follows the saved setting until you press Save.",
+            "privacy": "Passwords and tokens are masked before storage. Topics, device IDs and message contents can still contain personal data. Check the files before sharing.",
+            "refresh": "Refresh status",
+            "loadFailed": "Could not load MQTT diagnostics",
+            "states": {
+                "disabled": "Disabled",
+                "armed": "Armed — waiting for connection",
+                "recording": "Recording",
+                "error": "Recording error"
+            },
+            "storage": "Stored: {{bytes}} B",
+            "dropped": "Dropped events: {{count}}",
+            "snapshotHint": "Downloads contain only the listed file prefixes. Active recordings continue. Archives are split into parts of at most 64 MiB input; your browser may ask to allow multiple downloads.",
+            "empty": "No diagnostic sessions available.",
+            "active": "Active snapshot",
+            "truncated": "Incomplete / retention applied",
+            "download": "Download diagnostic ZIP",
+            "part": "Preparing part {{part}} of {{total}}",
+            "downloadFailed": "Download failed after {{completed}} part(s). The file list has been refreshed; previously downloaded parts are not a complete export. {{error}}"
+        },
         "diagnostics": {
             "navigationTitle": "Diagnostics",
             "title": "Certificate Doctor",

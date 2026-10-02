@@ -60,6 +60,7 @@ def main():
                         "-Wno-unused-variable", "-Wno-unused-parameter", "-DGPL_LICENSE_TERMS_ACCEPTED",
                         "-DHTTP_SERVER_MAX_CONNECTIONS=32", "-DTRACE_NOPATH_FILE",
                         *["-I" + path for path in includes], str(test_source), "cyclone/common/cpu_endian.c",
+                        "tests/mqtt_debug_stubs.c", "cJSON/cJSON.c",
                         "-pthread", "-o", str(executable)], cwd=root, check=True)
         subprocess.run([str(executable)], check=True, timeout=10)
 

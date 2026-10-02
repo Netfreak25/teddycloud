@@ -141,6 +141,13 @@ class MqttLocalControlContractTests(unittest.TestCase):
         self.assertIn("observer_local_reply_matched = TRUE", self.server)
         self.assertIn('"local_control.app_reply"', self.server)
         self.assertIn("does not match a local pending action", self.server)
+        for name, kind in (
+            ("handle_mqtt_publish_app_reply_pong", "request_id"),
+            ("handle_mqtt_publish_app_reply_bedtime_state", "overlay_time_window_heuristic"),
+        ):
+            handler = self.server_function(name)
+            self.assertIn('"correlation_scope", "overlay"', handler)
+            self.assertIn(f'"match_kind", "{kind}"', handler)
 
     def test_app_control_pending_markers_expire(self):
         self.assertIn(
