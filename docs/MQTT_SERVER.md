@@ -554,7 +554,9 @@ Payload:
 {"tonie":"0123456789ABCDEF"}
 ```
 
-One QoS-1 `PUBLISH` is sent per UID from `internal.freshnessCache`. UIDs are
+At most one new QoS-1 notification is needed per UID and change generation from
+`internal.freshnessCache`, unless HTTPS has already communicated that generation.
+UIDs are
 deduplicated in their existing cache order and converted to rUID strings via
 byte-swap formatting. There is no extra item limit. Delivery only starts when
 the active box connection has a matching subscription for the topic and the
@@ -577,9 +579,36 @@ Freshness invalidations are coalesced per overlay. The first pending
 invalidation opens a two-second debounce window; additional invalidations during
 that window are appended without opening another debounce window. Only one UID
 is in flight: the next UID is sent after the previous `PUBACK`. A targeted
-content-mapping invalidation can requeue an already acknowledged UID while
-identical queued or in-flight invalidations remain coalesced. Active playback
-does not delay freshness delivery.
+content-mapping invalidation starts a new generation even if an older generation
+of that UID is queued or in flight. The older PUBACK cannot acknowledge the newer
+change. Inventory checks, subscriptions, claims and ordinary tag changes do not
+create new generations by themselves. Active playback does not delay delivery.
+
+The notification ledger is owned by the box overlay, not the MQTT connection.
+Its reload hooks become active after the mutex manager is initialized and before
+HTTP threads start; initial configuration loading does not use an uninitialized lock.
+It contains UID, a volatile generation and whether that generation has been
+communicated. Reconnecting the same box retains this state; deleting or reusing
+an overlay discards it. It is RAM-only: after a TeddyCloud process restart,
+remaining stale content may be announced once again. The ledger does not clear
+`internal.freshnessCache`, source-change markers or forced content versions.
+
+Local and cloud-merged V3 HTTPS responses share one completion path. Each request
+owns a generation snapshot. Its final outgoing UID/generation pairs are reserved
+while writing the response, preventing the MQTT pump from admitting another job
+for them. Only successful header, body and flush completion marks those exact
+generations as communicated. Failure releases the reservation and leaves MQTT
+notification available. A newer change occurring during the request is preserved
+and cannot be acknowledged by its older completion. A failed TONIES request uses
+the existing local decision if no box response has begun; a partial response is
+never followed by a second response. Body completion followed by EOF finalizes
+only once.
+
+Already admitted MQTT packets still finish their real QoS exchange, including
+the existing retransmissions. HTTPS completion neither invents a PUBACK nor
+releases their packet ID. Diagnostic `freshness_trigger` events represent new
+pending work, not empty background polling; HTTP completion, MQTT writes,
+retransmissions and PUBACKs remain separate observations.
 
 The initial publish uses a newly reserved non-zero packet ID and `DUP=0`. If no
 matching `PUBACK` arrives, the same packet ID and payload are retried after five
@@ -610,8 +639,9 @@ completed only by a valid `playback/state` whose canonical rUID matches the
 pending rUID and whose `contentVersion` exactly equals the expected effective
 version. Old versions, other rUIDs and missing or unparseable fields leave the
 marker, `internal.freshnessCacheChanged` and its cache entry untouched. A
-reconnect therefore requeues every UID still present in the cache. Hard socket
-or TLS write errors close the connection while preserving that pending state.
+reconnect only queues generations that have not yet been communicated, rather
+than replaying every still-stale UID. Hard socket or TLS write errors close the
+connection while preserving the overlay's content and notification state.
 
 ### Outgoing `app-control/*`
 
@@ -919,9 +949,9 @@ as `BatteryPercent`, `BatteryRaw`, `BatteryCurrent`, `BatteryStatus`,
 | File | Trigger |
 |------|---------|
 | `src/handler_api.c` | Changes to supported `toniebox2.*` settings call `mqtt_server_mark_toniebox2_setting_changed()` with the concrete setting name. |
-| `src/handler_cloud.c` | Freshness checks update `internal.freshnessCache`, set `internal.freshnessCacheChanged` and call the overlay publisher. |
+| `src/handler_cloud.c` | V3 Freshness checks take an owned request snapshot and share the checked HTTP completion path; the existing content/version decisions are retained. |
 | `src/handler_cloud.c` | Content mapping changes can proactively mark rUIDs for V3 freshness and call the overlay publisher. |
-| `src/handler.c` | TAP streaming callbacks call the overlay publisher when freshness state changes outside an MQTT connection context. |
+| `src/handler.c` | V3 cloud responses merge only eligible UIDs and complete once, checking header/body/flush before notifying the overlay ledger. TAP streaming callbacks retain their existing overlay publisher. |
 | `src/mqtt_server.c` | Certificate-mapped and trusted-topic-mapped active connections update `internal.online` and `internal.last_connection`. |
 | `src/mqtt_server.c` | Subscribe/request/background handlers publish pending settings and coalesced freshness data to the active connection. Proxy settings delivery obeys the effective local-control setting; `settings/confirm` clears and consumes only matching local revisions. |
 | `src/mqtt_server.c` | App-control helpers build typed playback, volume and ping commands; experimental `stl` remains raw JSON until its schema is confirmed. Proxy commands obey the effective local-control setting and replies require exact local correlation. |
@@ -931,15 +961,16 @@ as `BatteryPercent`, `BatteryRaw`, `BatteryCurrent`, `BatteryStatus`,
 
 | File | Server-relevant occurrence |
 |------|----------------------------|
-| `include/mqtt_server.h` | Public lifecycle and direct publish APIs for the internal server. |
+| `include/mqtt_server.h` | Lifecycle/direct publish APIs and owned, internal HTTP notification snapshots; no new public HTTP fields or settings. |
+| `include/handler.h` | Per-request V3 completion state so body/EOF/disconnect share one finalizer instead of sending duplicate responses. |
 | `include/mqtt_delivery.h` | Sent/queued/busy/failed admission result shared by the relay, local senders and HTTP endpoints. |
 | `include/toniebox_state_type.h` | Adds bounded TB2 bedtime/STL, playback, claim, battery, headphone, volume, pong and diagnostic snapshot state to the runtime box state. |
 | `src/toniebox_state.c` | Stores semantic TB2 runtime updates and emits the existing playback plus detailed TB2 box events. |
 | `include/settings.h` | `settings_mqtt_server_t` and internal pending-state fields for freshness/settings delivery, including TB2 desired-setting revisions, `internal.v3ForcedVersionUids`/`internal.v3ForcedVersions`/`internal.v3ForcedVersionBaseAudioIds` and the `internal.v3HashedChapterUids` migration guard. |
-| `src/settings.c` | Registers `mqtt_server.*`, including `mqtt_server.log_full_payloads`, `toniebox2.*` and internal pending-state/revision settings. |
+| `src/settings.c` | Registers MQTT settings; reconciles the RAM notification ledger after overlay reload and clears it on slot reuse. Array replacements allocate before freeing old storage, preserving pending changes on allocation failure and avoiding dangling arrays after reload. |
 | `src/cert.c` | Generates the ICI server certificate and binds it to the `mqtt_server.cert.*` paths. |
 | `src/server.c` | Starts, polls and stops the internal MQTT server. |
-| `src/mqtt_server.c` | Owns the TCP/TLS listener, packet parsing, subscription tracking, topic handlers and box publishes. |
+| `src/mqtt_server.c` | Owns the TCP/TLS listener, packet parsing, subscriptions, topic handlers and box publishes. The existing freshness list is overlay-owned; generation snapshots separate notification delivery from content completion without another queue or persisted store. |
 | `include/mqtt_nocloud_filter.h` | Declares the per-publish noCloud allow/block/rewrite decision and its rewritten payload ownership. |
 | `src/mqtt_nocloud_filter.c` | Performs lightweight per-packet content-policy lookups and selective claim, playback, metrics, BI-event, log and freshness filtering. |
 | `src/tb2_mqtt_passthrough.c` | Applies the automatic noCloud decision after manual filters, rebuilds partial PUBLISH packets, preserves QoS/packet-ID translation and records capture/status counters. |

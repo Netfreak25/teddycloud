@@ -23,6 +23,13 @@ class MqttFreshToniesContractTests(unittest.TestCase):
             end_index = len(self.server)
         return self.server[start_index:end_index]
 
+    def test_reload_hooks_start_after_mutexes_and_before_http_threads(self):
+        lifecycle = (ROOT / "src/server.c").read_text(encoding="utf-8")
+        self.assertLess(lifecycle.index("mutex_manager_init();"),
+                        lifecycle.index("mqtt_server_freshness_init();"))
+        self.assertLess(lifecycle.index("mqtt_server_freshness_init();"),
+                        lifecycle.index("httpServerStart("))
+
     def test_payload_is_one_json_object_per_uid(self):
         builder = self.server_function(
             "static char *mqtt_build_fresh_tonie_payload",
@@ -34,7 +41,7 @@ class MqttFreshToniesContractTests(unittest.TestCase):
 
     def test_queue_preserves_cache_order_and_deduplicates(self):
         sync = self.server_function(
-            "static bool_t mqtt_fresh_tonies_sync_connection",
+            "static bool_t mqtt_fresh_tonies_sync(",
             "static MqttFreshTonieEntry *mqtt_fresh_tonies_next",
         )
         self.assertIn("for (size_t index = 0; index < cache_len; index++)", sync)
@@ -66,11 +73,13 @@ class MqttFreshToniesContractTests(unittest.TestCase):
         self.assertIn("#define MQTT_FRESH_TONIES_SLOW_RETRY_INTERVAL_SEC 30", self.server)
         self.assertIn("#define MQTT_FRESH_TONIES_MAX_ATTEMPTS 3", self.server)
         pump = self.server_function(
-            "static bool_t mqtt_fresh_tonies_pump",
+            "static bool_t mqtt_fresh_tonies_select",
             "static bool_t mqtt_handle_fresh_tonies_puback",
         )
         self.assertIn("conn->fresh_tonie_attempts >= MQTT_FRESH_TONIES_MAX_ATTEMPTS", pump)
-        self.assertIn("mqtt_send_fresh_tonie(conn, conn->fresh_tonie_inflight, TRUE)", pump)
+        self.assertIn("*selected = *conn->fresh_tonie_inflight", pump)
+        self.assertIn("*duplicate = TRUE", pump)
+        self.assertIn("mqtt_send_fresh_tonie(conn, &selected, duplicate)", pump)
         self.assertNotIn("mqtt_connection_close", pump)
         self.assertIn("mqtt_monotonic_ms(&now)", pump)
         self.assertIn("(uint32_t)(now - conn->fresh_tonie_sent_at)", pump)
@@ -91,21 +100,23 @@ class MqttFreshToniesContractTests(unittest.TestCase):
             "bool_t mqtt_server_publish_fresh_tonies",
         )
         self.assertIn("packet_id != conn->fresh_tonie_packet_id", ack)
-        self.assertIn("conn->fresh_tonie_inflight->delivered = !conn->fresh_tonie_requeued", ack)
+        self.assertIn("entry->generation == conn->fresh_tonie_inflight->generation", ack)
+        self.assertIn("entry->delivered = TRUE", ack)
         self.assertIn("conn->fresh_tonie_inflight = NULL", ack)
         self.assertNotIn("settings_set_bool_id", ack)
 
     def test_targeted_content_change_requeues_only_its_uid(self):
         targeted = self.server_function(
-            "bool_t mqtt_server_publish_fresh_tonie_for_overlay",
+            "bool_t mqtt_server_publish_fresh_tonie_for_overlay_locked",
             "static bool_t mqtt_app_control_topic",
         )
-        self.assertIn("mqtt_fresh_tonie_find(conn, uid)", targeted)
+        self.assertIn("mqtt_fresh_tonie_find(mqtt_fresh_tonies_publish_state(settings), uid)", targeted)
         self.assertIn("entry->delivered = FALSE", targeted)
-        self.assertIn("entry != conn->fresh_tonie_inflight", targeted)
+        self.assertIn("entry->generation = ++fresh_tonies_generation", targeted)
+        self.assertNotIn("conn->fresh_tonie_inflight", targeted)
         self.assertIn("mqtt_server_publish_fresh_tonie_for_overlay", self.header)
         self.assertIn(
-            "mqtt_server_publish_fresh_tonie_for_overlay(settings->internal.overlayNumber, uid)",
+            "mqtt_server_publish_fresh_tonie_for_overlay_locked(settings->internal.overlayNumber, uid)",
             self.cloud,
         )
 
@@ -209,7 +220,7 @@ class MqttFreshToniesContractTests(unittest.TestCase):
 
     def test_missing_subscription_is_logged_once_per_pending_series(self):
         pump = self.server_function(
-            "static bool_t mqtt_fresh_tonies_pump",
+            "static bool_t mqtt_fresh_tonies_select",
             "static bool_t mqtt_handle_fresh_tonies_puback",
         )
         self.assertIn("waiting_for_subscription_logged", pump)
@@ -219,6 +230,28 @@ class MqttFreshToniesContractTests(unittest.TestCase):
             "static MqttFreshTonieEntry *mqtt_fresh_tonie_find",
         )
         self.assertIn("waiting_for_subscription_logged = FALSE", clear)
+
+    def test_connection_reset_preserves_overlay_notifications(self):
+        reset = self.server_function(
+            "static void mqtt_fresh_tonies_reset_connection",
+            "static void mqtt_connection_close_locked",
+        )
+        self.assertNotIn("state->entries", reset)
+        self.assertNotIn("fresh_tonies_publish_state", reset)
+        self.assertNotIn("osFreeMem", reset)
+
+    def test_http_and_source_hooks_use_owned_generations(self):
+        prepare = self.server_function(
+            "error_t mqtt_server_freshness_prepare", "void mqtt_server_freshness_finish"
+        )
+        self.assertIn("snapshot->epoch != state->epoch", prepare)
+        self.assertIn(
+            "mqtt_freshness_snapshot_generation(snapshot, entry->uid) != entry->generation",
+            prepare,
+        )
+        self.assertIn("entry->http_claims++", prepare)
+        self.assertNotIn("connections[", prepare)
+        self.assertNotIn("mqtt_server_publish_fresh_tonies_for_overlay", prepare)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@
 #include "version.h"
 #include "debug.h"
 #include "settings.h"
+#include "mqtt_server.h"
 #include "mutex_manager.h"
 #include "tls_adapter.h"
 
@@ -24,6 +25,7 @@ static void settings_generate_internal_dirs(settings_t *settings);
 static void settings_changed();
 static error_t settings_save_ovl(bool overlay);
 static error_t settings_load_ovl(bool overlay);
+static error_t settings_read_ovl(bool overlay);
 static setting_item_t *settings_get_by_name_id(const char *item, uint8_t settingsId);
 static char *settings_sanitize_box_id(const char *input_id);
 static bool settings_migrate_id(uint8_t settingsId);
@@ -1218,6 +1220,7 @@ settings_t *get_settings_cn(const char *commonName)
                 char *boxPrefix = "teddyCloud Box ";
                 char *boxName = custom_asprintf("%s%s", boxPrefix, boxId);
 
+                mqtt_server_freshness_forget_overlay(i);
                 settings_set_string_id("commonName", boxId, i);
                 settings_set_string_id("internal.overlayUniqueId", boxId, i);
                 settings_set_string_id("boxName", boxName, i);
@@ -1868,6 +1871,7 @@ static void settings_deinit_ovl(uint8_t overlayNumber)
             if (opt->size > 0)
             {
                 osFreeMem(*((uint64_t **)opt->ptr));
+                *((uint64_t **)opt->ptr) = NULL;
                 opt->size = 0;
             }
             break;
@@ -2199,6 +2203,18 @@ error_t settings_load()
 }
 
 static error_t settings_load_ovl(bool overlay)
+{
+    /* Do not inspect transiently freed/reassigned overlays while loading.
+     * Keep the notification ledger for unchanged identities across reloads. */
+    if (overlay)
+        mqtt_server_freshness_begin_reload();
+    error_t error = settings_read_ovl(overlay);
+    if (overlay)
+        mqtt_server_freshness_reconcile_overlays();
+    return error;
+}
+
+static error_t settings_read_ovl(bool overlay)
 {
     char_t *config_path = (!overlay ? config_file_path : config_overlay_file_path);
 
@@ -3073,23 +3089,23 @@ bool settings_set_u64_array_id(const char *item, const uint64_t *value, size_t l
         return false;
     }
 
-    uint64_t **ptr = (uint64_t **)opt->ptr;
-    if (*ptr)
-    {
-        opt->size = 0;
-        osFreeMem(*ptr);
-        *ptr = NULL;
-    }
-
+    /* Publish only a complete replacement. In particular a failed freshness
+     * snapshot allocation must not erase pending content changes. */
+    uint64_t *replacement = NULL;
     if (len > 0)
     {
-        *ptr = osAllocMem(sizeof(uint64_t) * len);
-        if (*ptr == NULL)
+        if (len > SIZE_MAX / sizeof(uint64_t))
+            return false;
+        replacement = osAllocMem(sizeof(uint64_t) * len);
+        if (replacement == NULL)
         {
             return false;
         }
-        osMemcpy(*ptr, value, sizeof(uint64_t) * len);
+        osMemcpy(replacement, value, sizeof(uint64_t) * len);
     }
+    uint64_t **ptr = (uint64_t **)opt->ptr;
+    osFreeMem(*ptr);
+    *ptr = replacement;
     opt->size = len;
 
     if (settingsId > 0)

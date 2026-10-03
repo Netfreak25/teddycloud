@@ -1,4 +1,5 @@
 #include "handler.h"
+#include <limits.h>
 #include "toniesJson.h"
 #include "server_helpers.h"
 #include "fs_ext.h"
@@ -241,12 +242,21 @@ req_cbr_t getCloudCbr(HttpConnection *connection, const char_t *uri, const char_
 }
 void cbrCloudResponsePassthrough(void *src_ctx, HttpClientContext *cloud_ctx)
 {
-    cbrGenericResponsePassthrough(src_ctx, cloud_ctx);
+    cbr_ctx_t *ctx = (cbr_ctx_t *)src_ctx;
+    if (ctx->api != V3_FRESHNESS_CHECK)
+        cbrGenericResponsePassthrough(src_ctx, cloud_ctx);
 }
 
 void cbrCloudHeaderPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const char *header, const char *value)
 {
     cbr_ctx_t *ctx = (cbr_ctx_t *)src_ctx;
+    if (ctx->api == V3_FRESHNESS_CHECK)
+    {
+        /* No status/header bytes before the single local/cloud merge. */
+        if (ctx->status != PROX_STATUS_DONE)
+            ctx->status = PROX_STATUS_HEAD;
+        return;
+    }
     char line[256];
     bool passthrough = true;
 
@@ -266,7 +276,6 @@ void cbrCloudHeaderPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, cons
     switch (ctx->api)
     {
     case V1_FRESHNESS_CHECK:
-    case V3_FRESHNESS_CHECK:
         if (!header || osStrcmp(header, "Content-Length") == 0) // Skip empty line at the and + contentlen
         {
             passthrough = false;
@@ -312,6 +321,157 @@ bool fillCbrBodyCache(cbr_ctx_t *ctx, HttpClientContext *httpClientContext, cons
     osMemcpy(&ctx->buffer[ctx->bufferPos], payload, length);
     ctx->bufferPos += length;
     return (ctx->bufferPos == ctx->bufferLen);
+}
+
+error_t finishFreshnessResponseV3(cbr_ctx_t *ctx)
+{
+    if (ctx->status == PROX_STATUS_DONE)
+        return ctx->freshnessResponseError;
+
+    /* DONE is terminal even on a partial header/body write. A later cloud EOF
+     * or failure must never append another HTTP response to this connection. */
+    ctx->status = PROX_STATUS_DONE;
+    TonieFreshnessCheckResponse *freshResp = ctx->customData;
+    cJSON *json = cJSON_CreateObject();
+    cJSON *items = json != NULL ? cJSON_AddArrayToObject(json, "items") : NULL;
+    error_t error = items != NULL ? NO_ERROR : ERROR_OUT_OF_MEMORY;
+    char *response = NULL;
+    for (size_t i = 0; !error && i < freshResp->n_tonie_marked; i++)
+    {
+        char uid[17], ruid[17];
+        osSprintf(uid, "%016" PRIX64, freshResp->tonie_marked[i]);
+        for (size_t j = 0; j < 8; j++)
+        {
+            ruid[j * 2] = uid[14 - j * 2];
+            ruid[j * 2 + 1] = uid[15 - j * 2];
+        }
+        ruid[16] = '\0';
+        cJSON *item = cJSON_CreateString(ruid);
+        if (item == NULL || !cJSON_AddItemToArray(items, item))
+        {
+            cJSON_Delete(item);
+            error = ERROR_OUT_OF_MEMORY;
+        }
+    }
+    if (!error)
+    {
+        response = cJSON_PrintUnformatted(json);
+        if (response == NULL)
+            error = ERROR_OUT_OF_MEMORY;
+    }
+    if (!error)
+        error = mqtt_server_freshness_prepare(ctx->freshnessSnapshot,
+                                             freshResp->tonie_marked,
+                                             freshResp->n_tonie_marked);
+    if (!error)
+    {
+        httpPrepareHeader(ctx->connection, "application/json; charset=utf-8",
+                          osStrlen(response));
+        error = httpWriteHeader(ctx->connection);
+        if (!error)
+            error = httpWriteStream(ctx->connection, response, osStrlen(response));
+        if (!error)
+            error = httpFlushStream(ctx->connection);
+    }
+    mqtt_server_freshness_finish(ctx->freshnessSnapshot, error == NO_ERROR);
+    ctx->freshnessSnapshot = NULL;
+    ctx->freshnessResponseError = error;
+    free(response);
+    cJSON_Delete(json);
+    if (error)
+    {
+        TRACE_WARNING("V3 freshness response delivery failed: %s\r\n", error2text(error));
+    }
+    return error;
+}
+
+static void mergeFreshnessCloudResponseV3(cbr_ctx_t *ctx)
+{
+    TonieFreshnessCheckResponse *freshResp = ctx->customData;
+    const char *parsedEnd = NULL;
+    cJSON *json = cJSON_ParseWithLengthOpts(ctx->buffer, ctx->bufferPos, &parsedEnd, false);
+    cJSON *items = cJSON_GetObjectItemCaseSensitive(json, "items");
+    while (parsedEnd != NULL && parsedEnd < ctx->buffer + ctx->bufferPos &&
+           isspace((unsigned char)*parsedEnd))
+        parsedEnd++;
+    if (!cJSON_IsObject(json) || !cJSON_IsArray(items) ||
+        parsedEnd != ctx->buffer + ctx->bufferPos)
+    {
+        cJSON_Delete(json);
+        return;
+    }
+    cJSON *item = NULL;
+    cJSON_ArrayForEach(item, items)
+    {
+        if (!cJSON_IsString(item) || osStrlen(item->valuestring) != 16)
+            continue;
+        char uid[17];
+        bool valid = true;
+        for (size_t j = 0; j < 16; j++)
+            valid = valid && isxdigit((unsigned char)item->valuestring[j]);
+        if (!valid)
+            continue;
+        for (size_t j = 0; j < 8; j++)
+        {
+            uid[j * 2] = item->valuestring[14 - j * 2];
+            uid[j * 2 + 1] = item->valuestring[15 - j * 2];
+        }
+        uid[16] = '\0';
+        uint64_t marked_uid = strtoull(uid, NULL, 16);
+        bool requested = false, found = false;
+        for (size_t j = 0; j < ctx->freshnessCloudUidCount; j++)
+            requested = requested || marked_uid == ctx->freshnessCloudUids[j];
+        for (size_t j = 0; j < freshResp->n_tonie_marked; j++)
+            found = found || marked_uid == freshResp->tonie_marked[j];
+        if (requested && !found && freshResp->n_tonie_marked < ctx->customDataLen)
+            freshResp->tonie_marked[freshResp->n_tonie_marked++] = marked_uid;
+    }
+    cJSON_Delete(json);
+}
+
+static void receiveFreshnessCloudResponseV3(cbr_ctx_t *ctx, HttpClientContext *cloud,
+                                          const char *payload, size_t length,
+                                          error_t error)
+{
+    if (ctx->status == PROX_STATUS_DONE)
+        return;
+    bool complete = false;
+    if (error != NO_ERROR && error != ERROR_END_OF_STREAM)
+    {
+        /* An interrupted cloud response contributes nothing, but local stale
+         * decisions remain usable. */
+        finishFreshnessResponseV3(ctx);
+        return;
+    }
+    if (length > BODY_BUFFER_SIZE - ctx->bufferPos)
+    {
+        finishFreshnessResponseV3(ctx);
+        return;
+    }
+    if (length > 0)
+    {
+        if (ctx->buffer == NULL)
+        {
+            ctx->buffer = osAllocMem(BODY_BUFFER_SIZE);
+            ctx->bufferLen = cloud->chunkedEncoding || cloud->bodyLen == UINT_MAX
+                ? 0 : cloud->bodyLen;
+        }
+        if (ctx->buffer == NULL)
+        {
+            finishFreshnessResponseV3(ctx);
+            return;
+        }
+        osMemcpy(ctx->buffer + ctx->bufferPos, payload, length);
+        ctx->bufferPos += length;
+        complete = ctx->bufferLen > 0 && ctx->bufferPos == ctx->bufferLen;
+    }
+    if (error == ERROR_END_OF_STREAM || complete)
+    {
+        if (ctx->buffer != NULL && cloud->statusCode >= 200 && cloud->statusCode < 300 &&
+            (ctx->bufferLen == 0 || ctx->bufferPos == ctx->bufferLen))
+            mergeFreshnessCloudResponseV3(ctx);
+        finishFreshnessResponseV3(ctx);
+    }
 }
 
 void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const char *payload, size_t length, error_t error)
@@ -402,125 +562,8 @@ void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const 
         total_sent += length;
         break;
     case V3_FRESHNESS_CHECK:
-    {
-        bool finished = false;
-        if (length > 0 && fillCbrBodyCache(ctx, httpClientContext, payload, length))
-        {
-            finished = true;
-        }
-        if (error == ERROR_END_OF_STREAM)
-        {
-            finished = true;
-        }
-
-        if (finished && ctx->status != PROX_STATUS_DONE)
-        {
-            ctx->status = PROX_STATUS_DONE;
-            TonieFreshnessCheckResponse *freshResp = (TonieFreshnessCheckResponse *)ctx->customData;
-
-            if (ctx->buffer)
-            {
-                cJSON *respJson = cJSON_ParseWithLengthOpts((const char *)ctx->buffer, ctx->bufferLen, 0, 0);
-                if (respJson)
-                {
-                    cJSON *itemsArray = cJSON_GetObjectItem(respJson, "items");
-                    if (cJSON_IsArray(itemsArray))
-                    {
-                        int num_items = cJSON_GetArraySize(itemsArray);
-                        TRACE_INFO("Cloud marked tonies V3: %d\r\n", num_items);
-
-                        cJSON *item = itemsArray->child;
-                        while (item)
-                        {
-                            if (cJSON_IsString(item))
-                            {
-                                char ruidStr[17];
-                                osStrncpy(ruidStr, item->valuestring, 16);
-                                ruidStr[16] = '\0';
-
-                                char uidStr[17];
-                                for (int j = 0; j < 8; j++)
-                                {
-                                    uidStr[j * 2] = ruidStr[14 - j * 2];
-                                    uidStr[j * 2 + 1] = ruidStr[15 - j * 2];
-                                }
-                                uidStr[16] = '\0';
-
-                                uint64_t marked_uid = strtoull(uidStr, NULL, 16);
-                                bool found = false;
-                                for (size_t j = 0; j < freshResp->n_tonie_marked; j++)
-                                {
-                                    if (marked_uid == freshResp->tonie_marked[j])
-                                    {
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                                if (!found)
-                                {
-                                    if (ctx->customDataLen > freshResp->n_tonie_marked)
-                                    {
-                                        freshResp->tonie_marked[freshResp->n_tonie_marked++] = marked_uid;
-                                        TRACE_INFO("Marked UID %016" PRIX64 " as updated from cloud\r\n", marked_uid);
-                                    }
-                                    else
-                                    {
-                                        TRACE_WARNING("Could not add UID %016" PRIX64 " to freshnessCheck response, as not enough slots allocated!\r\n", marked_uid);
-                                    }
-                                }
-                            }
-                            item = item->next;
-                        }
-                    }
-                    cJSON_Delete(respJson);
-                }
-            }
-
-            TRACE_INFO("Setting freshnessCache with %" PRIuSIZE " entries\r\n", freshResp->n_tonie_marked);
-            settings_set_u64_array_id("internal.freshnessCache", freshResp->tonie_marked, freshResp->n_tonie_marked, ctx->client_ctx->settings->internal.overlayNumber);
-            freshness_cache_sync_source_changed_uids(ctx->client_ctx->settings);
-            settings_set_bool_id("internal.freshnessCacheChanged", freshResp->n_tonie_marked > 0, ctx->client_ctx->settings->internal.overlayNumber);
-            mqtt_server_publish_fresh_tonies_for_overlay(ctx->client_ctx->settings->internal.overlayNumber);
-
-            // Re-build json response from updated freshResp
-            cJSON *newRespJson = cJSON_CreateObject();
-            cJSON *newItemsArray = cJSON_CreateArray();
-            cJSON_AddItemToObject(newRespJson, "items", newItemsArray);
-
-            for (size_t j = 0; j < freshResp->n_tonie_marked; j++)
-            {
-                char ruidStr[17];
-                char uidStr[17];
-                osSprintf(uidStr, "%016" PRIX64, freshResp->tonie_marked[j]);
-                for (int m = 0; m < 8; m++)
-                {
-                    ruidStr[m * 2] = uidStr[14 - m * 2];
-                    ruidStr[m * 2 + 1] = uidStr[15 - m * 2];
-                }
-                ruidStr[16] = '\0';
-
-                cJSON_AddItemToArray(newItemsArray, cJSON_CreateString(ruidStr));
-            }
-
-            char *response_json = cJSON_PrintUnformatted(newRespJson);
-            size_t dataLen = osStrlen(response_json);
-
-            char line[128];
-            osSnprintf(line, 128, "Content-Length: %" PRIuSIZE "\r\n\r\n", dataLen);
-            httpSend(ctx->connection, line, osStrlen(line), HTTP_FLAG_DELAY);
-
-            httpSend(ctx->connection, response_json, dataLen, HTTP_FLAG_DELAY);
-
-            free(response_json);
-            cJSON_Delete(newRespJson);
-            if (ctx->buffer)
-            {
-                osFreeMem(ctx->buffer);
-                ctx->buffer = NULL;
-            }
-        }
-        break;
-    }
+        receiveFreshnessCloudResponseV3(ctx, httpClientContext, payload, length, error);
+        return; /* Preserve DONE across the subsequent zero-byte EOF callback. */
     case V1_FRESHNESS_CHECK:
         if (length > 0 && fillCbrBodyCache(ctx, httpClientContext, payload, length))
         {
@@ -596,9 +639,11 @@ void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const 
             tonie_freshness_check_response__pack(freshResp, (uint8_t *)ctx->buffer);
 
             TRACE_INFO("Setting freshnessCache with %" PRIuSIZE " entries\r\n", freshResp->n_tonie_marked);
+            mutex_lock(MUTEX_MQTT_SESSION);
             settings_set_u64_array_id("internal.freshnessCache", freshResp->tonie_marked, freshResp->n_tonie_marked, ctx->client_ctx->settings->internal.overlayNumber);
             freshness_cache_sync_source_changed_uids(ctx->client_ctx->settings);
             settings_set_bool_id("internal.freshnessCacheChanged", freshResp->n_tonie_marked > 0, ctx->client_ctx->settings->internal.overlayNumber);
+            mutex_unlock(MUTEX_MQTT_SESSION);
             mqtt_server_publish_fresh_tonies_for_overlay(ctx->client_ctx->settings->internal.overlayNumber);
 
             char line[128];
@@ -627,6 +672,12 @@ void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const 
 
 void cbrCloudServerDiscoPassthrough(void *src_ctx, HttpClientContext *cloud_ctx)
 {
+    cbr_ctx_t *ctx = src_ctx;
+    if (ctx->api == V3_FRESHNESS_CHECK)
+    {
+        finishFreshnessResponseV3(ctx);
+        return;
+    }
     cbrGenericServerDiscoPassthrough(src_ctx, cloud_ctx);
 }
 

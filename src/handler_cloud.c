@@ -1990,9 +1990,12 @@ static bool_t freshness_settings_array_contains(settings_t *settings, const char
         return FALSE;
     }
 
+    mutex_lock(MUTEX_MQTT_SESSION);
     size_t len = 0;
     uint64_t *items = settings_get_u64_array_id(key, settings->internal.overlayNumber, &len);
-    return freshness_uid_array_contains(items, len, uid);
+    bool_t found = freshness_uid_array_contains(items, len, uid);
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    return found;
 }
 
 static bool_t freshness_settings_array_add_uid(settings_t *settings, const char *key, uint64_t uid, bool_t *added)
@@ -2132,6 +2135,8 @@ static bool_t freshness_cache_remove_source_changed_uid(settings_t *settings, ui
 
 void freshness_cache_sync_source_changed_uids(settings_t *settings)
 {
+    /* Cache replacement and marker intersection share the caller's short
+     * MQTT lifetime lock. No content evaluation or transport happens here. */
     if (settings == NULL)
     {
         return;
@@ -2182,8 +2187,10 @@ static bool_t freshness_cache_remove_uid(settings_t *settings, uint64_t uid)
         return FALSE;
     }
 
+    mutex_lock(MUTEX_MQTT_SESSION);
     if (!freshness_settings_array_remove_uid(settings, "internal.freshnessCache", uid))
     {
+        mutex_unlock(MUTEX_MQTT_SESSION);
         return FALSE;
     }
     freshness_cache_remove_source_changed_uid(settings, uid);
@@ -2194,6 +2201,7 @@ static bool_t freshness_cache_remove_uid(settings_t *settings, uint64_t uid)
     {
         settings_set_bool_id("internal.freshnessCacheChanged", false, settings->internal.overlayNumber);
     }
+    mutex_unlock(MUTEX_MQTT_SESSION);
     return TRUE;
 }
 
@@ -2951,14 +2959,16 @@ static void freshness_evaluate_tonie(settings_t *settings, tonie_info_t *tonieIn
     }
 }
 
-void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckRequest *freshReq, TonieFreshnessCheckResponse *freshResp, TonieFreshnessCheckRequest *freshReqCloud, size_t *freshnessCacheLenOut, bool_t allow_cloud_override)
+void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckRequest *freshReq, TonieFreshnessCheckResponse *freshResp, TonieFreshnessCheckRequest *freshReqCloud, size_t *freshnessCacheLenOut, bool_t allow_cloud_override, const mqtt_freshness_snapshot_t *snapshot)
 {
     settings_t *settings = client_ctx->settings;
     TRACE_INFO("Found %" PRIuSIZE " tonies:\n", freshReq->n_tonie_infos);
     freshResp->n_tonie_marked = 0;
 
     size_t freshnessCacheLen = 0;
-    uint64_t *freshnessCache = settings_get_u64_array_id("internal.freshnessCache", settings->internal.overlayNumber, &freshnessCacheLen);
+    const uint64_t *freshnessCache = snapshot != NULL
+        ? mqtt_server_freshness_cache(snapshot, &freshnessCacheLen)
+        : settings_get_u64_array_id("internal.freshnessCache", settings->internal.overlayNumber, &freshnessCacheLen);
     if (freshnessCacheLenOut) *freshnessCacheLenOut = freshnessCacheLen;
 
     size_t freshRespCapacity = freshReq->n_tonie_infos + freshnessCacheLen;
@@ -2973,7 +2983,7 @@ void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckReques
 
     uint64_t *boxCorrectedUids = NULL;
     size_t boxCorrectedLen = 0;
-    if (freshReq->n_tonie_infos > 0)
+    if (snapshot == NULL && freshReq->n_tonie_infos > 0)
     {
         boxCorrectedUids = malloc(sizeof(uint64_t) * freshReq->n_tonie_infos);
         if (boxCorrectedUids == NULL)
@@ -3055,7 +3065,10 @@ void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckReques
 
     for (size_t i = 0; i < boxCorrectedLen; i++)
     {
-        freshness_cache_remove_uid(settings, boxCorrectedUids[i]);
+        /* V3 commits corrections with the request generations after evaluation.
+         * A concurrent source change must not be removed by this old inventory. */
+        if (snapshot == NULL)
+            freshness_cache_remove_uid(settings, boxCorrectedUids[i]);
     }
     free(boxCorrectedUids);
 }
@@ -3097,6 +3110,9 @@ static bool_t freshness_mark_content_mapping_changed_for_overlay(settings_t *set
         should_mark_freshness = should_mark_freshness || decision.should_mark_freshness;
     }
 
+    /* Publish the cache, source marker and notification generation as one
+     * state change. Slow content/version evaluation above stays outside. */
+    mutex_lock(MUTEX_MQTT_SESSION);
     bool_t queued = FALSE;
     if (should_mark_freshness && freshness_cache_add_uid(settings, uid, NULL))
     {
@@ -3113,9 +3129,10 @@ static bool_t freshness_mark_content_mapping_changed_for_overlay(settings_t *set
                    forced_version_set ? "source changed, forced version" :
                        (source_changed ? "source changed" : "freshness comparison"),
                    inventory_available ? "present" : "absent");
-        mqtt_server_publish_fresh_tonie_for_overlay(settings->internal.overlayNumber, uid);
+        mqtt_server_publish_fresh_tonie_for_overlay_locked(settings->internal.overlayNumber, uid);
         queued = TRUE;
     }
+    mutex_unlock(MUTEX_MQTT_SESSION);
 
     if (tonieInfo != NULL)
     {
@@ -3199,7 +3216,7 @@ error_t handleCloudFreshnessCheck(HttpConnection *connection, const char_t *uri,
             TonieFreshnessCheckRequest freshReqCloud = TONIE_FRESHNESS_CHECK_REQUEST__INIT;
             size_t freshnessCacheLen = 0;
 
-            process_freshness_check(client_ctx, freshReq, &freshResp, &freshReqCloud, &freshnessCacheLen, FALSE);
+            process_freshness_check(client_ctx, freshReq, &freshResp, &freshReqCloud, &freshnessCacheLen, FALSE, NULL);
 
             if (settings->cloud.enabled && settings->cloud.enableV1FreshnessCheck)
             {
@@ -3220,9 +3237,11 @@ error_t handleCloudFreshnessCheck(HttpConnection *connection, const char_t *uri,
             }
 
             TRACE_INFO("Setting freshnessCache with %" PRIuSIZE " entries\r\n", freshResp.n_tonie_marked);
+            mutex_lock(MUTEX_MQTT_SESSION);
             settings_set_u64_array_id("internal.freshnessCache", freshResp.tonie_marked, freshResp.n_tonie_marked, client_ctx->settings->internal.overlayNumber);
             freshness_cache_sync_source_changed_uids(client_ctx->settings);
             settings_set_bool_id("internal.freshnessCacheChanged", freshResp.n_tonie_marked > 0, client_ctx->settings->internal.overlayNumber);
+            mutex_unlock(MUTEX_MQTT_SESSION);
             mqtt_server_publish_fresh_tonies_for_overlay(client_ctx->settings->internal.overlayNumber);
 
             tonie_freshness_check_request__free_unpacked(freshReq, NULL);
@@ -3332,101 +3351,83 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
     TonieFreshnessCheckResponse freshResp = TONIE_FRESHNESS_CHECK_RESPONSE__INIT;
     TonieFreshnessCheckRequest freshReqCloud = TONIE_FRESHNESS_CHECK_REQUEST__INIT;
     size_t freshnessCacheLen = 0;
-
-    process_freshness_check(client_ctx, &freshReq, &freshResp, &freshReqCloud, &freshnessCacheLen, TRUE);
-    
-    if (client_ctx->settings->cloud.tb2_v3_enabled && client_ctx->settings->cloud.enableV3FreshnessCheck)
+    cbr_ctx_t ctx;
+    req_cbr_t cbr = getCloudCbr(connection, uri, queryString, V3_FRESHNESS_CHECK, &ctx, client_ctx);
+    ctx.customData = &freshResp;
+    ctx.freshnessSnapshot = mqtt_server_freshness_begin(client_ctx->settings->internal.overlayNumber);
+    if (ctx.freshnessSnapshot == NULL)
     {
-        cJSON *cloudReqJson = cJSON_CreateObject();
-        cJSON *cloudContentObj = cJSON_CreateObject();
-        cJSON_AddItemToObject(cloudReqJson, "content", cloudContentObj);
-        
-        for (size_t k = 0; k < freshReqCloud.n_tonie_infos; k++) {
-            char ruidStr[17];
-            char uidStr[17];
-            osSprintf(uidStr, "%016" PRIX64, freshReqCloud.tonie_infos[k]->uid);
-            for (int j = 0; j < 8; j++) {
-                ruidStr[j*2] = uidStr[14 - j*2];
-                ruidStr[j*2 + 1] = uidStr[15 - j*2];
-            }
-            ruidStr[16] = '\0';
-            
-            cJSON_AddNumberToObject(cloudContentObj, ruidStr, freshReqCloud.tonie_infos[k]->audio_id);
-        }
-        
-        char *cloud_req_str = cJSON_PrintUnformatted(cloudReqJson);
-        size_t cloud_req_len = osStrlen(cloud_req_str);
-        
-        cbr_ctx_t ctx;
-        req_cbr_t cbr = getCloudCbr(connection, uri, queryString, V3_FRESHNESS_CHECK, &ctx, client_ctx);
-        ctx.customData = (void *)&freshResp;
-        ctx.customDataLen = freshReq.n_tonie_infos + freshnessCacheLen;
-        
-        if (!cloud_request_tb2_post(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, (const uint8_t *)cloud_req_str, cloud_req_len, NULL, &cbr))
-        {
-            free(cloud_req_str);
-            cJSON_Delete(cloudReqJson);
-            free(fcInfos);
-            free(freshReq.tonie_infos);
-            if (freshReqCloud.tonie_infos) free(freshReqCloud.tonie_infos);
-            if (freshResp.tonie_marked) free(freshResp.tonie_marked);
-            cJSON_Delete(inputJson);
-            return NO_ERROR;
-        }
-        
-        free(cloud_req_str);
-        cJSON_Delete(cloudReqJson);
         free(fcInfos);
         free(freshReq.tonie_infos);
-        if (freshReqCloud.tonie_infos) free(freshReqCloud.tonie_infos);
-        if (freshResp.tonie_marked) free(freshResp.tonie_marked);
         cJSON_Delete(inputJson);
-        return NO_ERROR;
+        return ERROR_OUT_OF_MEMORY;
     }
 
-    TRACE_INFO("Setting freshnessCache with %" PRIuSIZE " entries\r\n", freshResp.n_tonie_marked);
-    settings_set_u64_array_id("internal.freshnessCache", freshResp.tonie_marked, freshResp.n_tonie_marked, client_ctx->settings->internal.overlayNumber);
-    freshness_cache_sync_source_changed_uids(client_ctx->settings);
-    settings_set_bool_id("internal.freshnessCacheChanged", freshResp.n_tonie_marked > 0, client_ctx->settings->internal.overlayNumber);
-    mqtt_server_publish_fresh_tonies_for_overlay(client_ctx->settings->internal.overlayNumber);
+    process_freshness_check(client_ctx, &freshReq, &freshResp, &freshReqCloud,
+                            &freshnessCacheLen, TRUE, ctx.freshnessSnapshot);
+    ctx.customDataLen = freshReq.n_tonie_infos + freshnessCacheLen;
+    if ((ctx.customDataLen > 0 && freshResp.tonie_marked == NULL) ||
+        (freshReq.n_tonie_infos > 0 && freshReqCloud.tonie_infos == NULL))
+    {
+        mqtt_server_freshness_finish(ctx.freshnessSnapshot, FALSE);
+        free(fcInfos);
+        free(freshReq.tonie_infos);
+        free(freshReqCloud.tonie_infos);
+        free(freshResp.tonie_marked);
+        cJSON_Delete(inputJson);
+        return ERROR_OUT_OF_MEMORY;
+    }
 
-    // No settings for TB2 in freshnessCheck
-    // setTonieboxSettings(&freshResp, client_ctx->settings); 
-
-    // Now create json response
-    cJSON *respJson = cJSON_CreateObject();
-    cJSON *itemsArray = cJSON_CreateArray();
-    cJSON_AddItemToObject(respJson, "items", itemsArray);
-    
-    for (size_t j = 0; j < freshResp.n_tonie_marked; j++) {
-        char ruidStr[17];
-        char uidStr[17];
-        osSprintf(uidStr, "%016" PRIX64, freshResp.tonie_marked[j]);
-        for (int m = 0; m < 8; m++) {
-            ruidStr[m*2] = uidStr[14 - m*2];
-            ruidStr[m*2 + 1] = uidStr[15 - m*2];
+    if (client_ctx->settings->cloud.tb2_v3_enabled &&
+        client_ctx->settings->cloud.enableV3FreshnessCheck)
+    {
+        cJSON *cloudReqJson = cJSON_CreateObject();
+        cJSON *cloudContentObj = cloudReqJson != NULL
+            ? cJSON_AddObjectToObject(cloudReqJson, "content") : NULL;
+        bool_t requestReady = cloudContentObj != NULL;
+        for (size_t k = 0; requestReady && k < freshReqCloud.n_tonie_infos; k++)
+        {
+            char ruidStr[17], uidStr[17];
+            osSprintf(uidStr, "%016" PRIX64, freshReqCloud.tonie_infos[k]->uid);
+            for (size_t j = 0; j < 8; j++)
+            {
+                ruidStr[j * 2] = uidStr[14 - j * 2];
+                ruidStr[j * 2 + 1] = uidStr[15 - j * 2];
+            }
+            ruidStr[16] = '\0';
+            requestReady = cJSON_AddNumberToObject(cloudContentObj, ruidStr,
+                               freshReqCloud.tonie_infos[k]->audio_id) != NULL;
         }
-        ruidStr[16] = '\0';
-
-        cJSON_AddItemToArray(itemsArray, cJSON_CreateString(ruidStr));
+        char *cloudRequest = requestReady ? cJSON_PrintUnformatted(cloudReqJson) : NULL;
+        ctx.freshnessCloudUids = malloc(sizeof(uint64_t) * freshReqCloud.n_tonie_infos);
+        if (cloudRequest != NULL &&
+            (freshReqCloud.n_tonie_infos == 0 || ctx.freshnessCloudUids != NULL))
+        {
+            ctx.freshnessCloudUidCount = freshReqCloud.n_tonie_infos;
+            for (size_t k = 0; k < ctx.freshnessCloudUidCount; k++)
+                ctx.freshnessCloudUids[k] = freshReqCloud.tonie_infos[k]->uid;
+            error = cloud_request_tb2_post(client_ctx->settings->cloud.remote_hostname_tb2,
+                0, uri, queryString, (const uint8_t *)cloudRequest,
+                osStrlen(cloudRequest), NULL, &cbr);
+            if (error && ctx.status != PROX_STATUS_DONE)
+            {
+                TRACE_WARNING("V3 cloud freshness unavailable; retaining local decision: %s\r\n",
+                              error2text(error));
+            }
+        }
+        free(cloudRequest);
+        cJSON_Delete(cloudReqJson);
     }
-    
-    char *response_json = cJSON_PrintUnformatted(respJson);
-    size_t dataLen = osStrlen(response_json);
-    
-    TRACE_INFO("V3 Freshness check response: size=%" PRIuSIZE ", content=%s\n", dataLen, response_json);
-    
-    httpPrepareHeader(connection, "application/json; charset=utf-8", dataLen);
-    error = httpWriteResponse(connection, (uint8_t *)response_json, dataLen, false);
-    
-    free(response_json);
-    cJSON_Delete(respJson);
-    
+
+    /* Also covers a failed cloud connect/read: if no response was started,
+     * answer the existing local decision. DONE prevents any second response. */
+    error = finishFreshnessResponseV3(&ctx);
+    free(ctx.freshnessCloudUids);
+    osFreeMem(ctx.buffer);
     free(fcInfos);
     free(freshReq.tonie_infos);
-    if (freshReqCloud.tonie_infos) free(freshReqCloud.tonie_infos);
-    if (freshResp.tonie_marked) free(freshResp.tonie_marked);
-    
+    free(freshReqCloud.tonie_infos);
+    free(freshResp.tonie_marked);
     cJSON_Delete(inputJson);
     return error;
 }

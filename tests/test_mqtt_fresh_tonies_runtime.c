@@ -14,6 +14,7 @@
 #include "toniebox_state.h"
 #include "tb2_mqtt_passthrough.h"
 #include "handler.h"
+#include "mqtt_server.h"
 #include "mutex_manager.h"
 #undef TRACE_DEBUG
 #undef TRACE_INFO
@@ -35,9 +36,15 @@ const cJSON *mqtt_debug_test_last(const char *stage);
 
 static MqttClientConnection connections[MQTT_MAX_CONNECTIONS];
 static MqttFreshToniesPublishState fresh_tonies_publish_state[MAX_OVERLAYS];
+static uint64_t fresh_tonies_generation;
+static bool_t fresh_tonies_reload_pending;
+static bool_t fresh_tonies_ready;
 static settings_t settings;
-static uint64_t cache[3];
+static settings_t other_settings;
+static uint64_t cache[32];
 static size_t cache_count;
+static uint64_t other_cache[32];
+static size_t other_cache_count;
 static time_t wall_now;
 static uint32_t monotonic_now;
 static bool_t clock_available, publish_succeeds, lose_clock_on_publish;
@@ -84,28 +91,37 @@ static bool_t mqtt_monotonic_ms(uint32_t *now)
 
 void *osAllocMem(size_t size) { return allocation_succeeds ? malloc(size) : NULL; }
 void osFreeMem(void *pointer) { free(pointer); }
-void mutex_lock(mutex_id_t id) { assert(id == MUTEX_MQTT_SESSION && !lock_held); lock_held = TRUE; }
+void mutex_lock(mutex_id_t id) { assert(fresh_tonies_ready && id == MUTEX_MQTT_SESSION && !lock_held); lock_held = TRUE; }
 void mutex_unlock(mutex_id_t id) { assert(id == MUTEX_MQTT_SESSION && lock_held); lock_held = FALSE; }
 
 settings_t *get_settings_id(uint8_t overlay)
 {
-    assert(overlay == settings.internal.overlayNumber);
-    return &settings;
+    if (overlay == 1) return &settings;
+    if (overlay == 2) return &other_settings;
+    return NULL;
 }
 
 uint64_t *settings_get_u64_array_id(const char *name, uint8_t overlay, size_t *length)
 {
     assert(!strcmp(name, "internal.freshnessCache"));
-    assert(overlay == settings.internal.overlayNumber);
-    *length = cache_count;
-    return cache;
+    assert(overlay == 1 || overlay == 2);
+    *length = overlay == 1 ? cache_count : other_cache_count;
+    return overlay == 1 ? cache : other_cache;
 }
 
-static bool_t mqtt_connection_matches_box_overlay(MqttClientConnection *conn,
-                                                  settings_t *target)
+bool settings_set_u64_array_id(const char *name, const uint64_t *uids, size_t count, uint8_t overlay)
 {
-    return conn->active && conn->box_connection && conn->client_ctx.settings == target;
+    assert(lock_held && !strcmp(name, "internal.freshnessCache") && (overlay == 1 || overlay == 2) && count <= 32);
+    if (!allocation_succeeds) return false;
+    if (count > 0) memcpy(overlay == 1 ? cache : other_cache, uids, count * sizeof(uint64_t));
+    if (overlay == 1) cache_count = count;
+    else other_cache_count = count;
+    return true;
 }
+
+bool settings_set_bool_id(const char *name, bool value, uint8_t overlay)
+{ assert(!strcmp(name, "internal.freshnessCacheChanged")); get_settings_id(overlay)->internal.freshnessCacheChanged = value; return true; }
+void freshness_cache_sync_source_changed_uids(settings_t *target) { assert((target == &settings || target == &other_settings) && lock_held); }
 
 static bool_t mqtt_fresh_tonies_topic(MqttClientConnection *conn, char *topic, size_t size)
 {
@@ -154,10 +170,15 @@ static MqttClientConnection *initialize(size_t entries)
     assert(!deferred_completed);
     for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
         mqtt_fresh_tonies_reset_connection(&connections[i]);
+    mqtt_server_freshness_forget_overlay(1);
+    mqtt_server_freshness_forget_overlay(2);
     memset(connections, 0, sizeof(connections));
     memset(fresh_tonies_publish_state, 0, sizeof(fresh_tonies_publish_state));
     memset(&settings, 0, sizeof(settings));
+    memset(&other_settings, 0, sizeof(other_settings));
+    other_cache_count = 0;
     settings.commonName = "AABBCCDDEEFF";
+    settings.internal.overlayUniqueId = "AABBCCDDEEFF";
     settings.internal.overlayNumber = 1;
     settings.internal.config_used = TRUE;
     settings.internal.freshnessCacheChanged = TRUE;
@@ -171,10 +192,17 @@ static MqttClientConnection *initialize(size_t entries)
     MqttClientConnection *conn = &connections[0];
     conn->active = true; conn->box_connection = TRUE;
     conn->client_ctx.settings = &settings;
+    conn->client_ctx.mqtt_connection = conn;
     mqtt_mark_fresh_tonies_pending(&settings, "test");
     wall_now += MQTT_FRESH_TONIES_DEBOUNCE_SEC;
     return conn;
 }
+
+static MqttFreshTonieEntry *find_entry(uint64_t uid)
+{ return mqtt_fresh_tonie_find(&fresh_tonies_publish_state[1], uid); }
+
+static void sync_entries(void)
+{ mutex_lock(MUTEX_MQTT_SESSION); assert(mqtt_fresh_tonies_sync(&settings)); mutex_unlock(MUTEX_MQTT_SESSION); }
 
 static void pump_at(MqttClientConnection *conn, uint32_t now)
 {
@@ -189,8 +217,8 @@ static void test_schedule_and_delayed_ack(void)
     const uint32_t start = monotonic_now;
     pump_at(conn, start);
     MqttFreshTonieEntry *first = conn->fresh_tonie_inflight;
-    assert(first && first->uid == 1 && first->next && first->next->uid == 2);
-    assert(first->next->next == NULL); /* Existing cache-order deduplication. */
+    assert(first && first->uid == 1 && find_entry(2));
+    assert(find_entry(2)->next == NULL); /* Existing cache-order deduplication. */
     const uint16_t id = conn->fresh_tonie_packet_id;
     pump_at(conn, start + 4999); assert(publish_count == 1);
     wall_now = 900000; /* Wall-clock jumps never affect retry scheduling. */
@@ -213,7 +241,7 @@ static void test_schedule_and_delayed_ack(void)
     assert(!mqtt_handle_fresh_tonies_puback(conn, id + 1));
     assert(conn->fresh_tonie_inflight == first && !first->delivered);
     assert(mqtt_handle_fresh_tonies_puback(conn, id));
-    assert(first->delivered && !conn->fresh_tonie_inflight);
+    assert(find_entry(1)->delivered && !conn->fresh_tonie_inflight);
     assert(!conn->fresh_tonie_sent_at_valid && !conn->fresh_tonie_slow_retry_logged);
     assert(!conn->fresh_tonie_attempts && !conn->fresh_tonie_packet_id);
     assert(cache_count == 3 && cache[0] == 1 && settings.internal.freshnessCacheChanged);
@@ -235,7 +263,7 @@ static void test_counter_saturates_and_reset(void)
     assert(conn->fresh_tonie_attempts == UINT8_MAX && warning_count == 1);
     assert(conn->fresh_tonie_packet_id == 1 && !conn->fresh_tonie_inflight->delivered);
     mqtt_fresh_tonies_reset_connection(conn);
-    assert(!conn->fresh_tonie_inflight && !conn->fresh_tonie_entries);
+    assert(!conn->fresh_tonie_inflight && find_entry(1));
     assert(!conn->fresh_tonie_packet_id && !conn->fresh_tonie_attempts);
     assert(!conn->fresh_tonie_sent_at_valid && !conn->fresh_tonie_slow_retry_logged);
     assert(settings.internal.freshnessCacheChanged && cache_count == 1);
@@ -286,13 +314,13 @@ static void test_sync_and_targeted_changes_keep_inflight(void)
     assert(conn->fresh_tonie_attempts == 3 && conn->fresh_tonie_sent_at == sent_at);
     assert(conn->fresh_tonie_slow_retry_logged && !inflight->delivered);
     cache[0] = 2; cache_count = 1;
-    assert(mqtt_fresh_tonies_sync_connection(conn, &settings));
-    assert(conn->fresh_tonie_inflight == inflight && !inflight->present);
+    sync_entries();
+    assert(conn->fresh_tonie_inflight == inflight && find_entry(1) == NULL);
     pump_at(conn, sent_at + 30000);
     assert(publish_count == 4 && publishes[3].packet_id == id);
     assert(!strcmp(publishes[0].payload, publishes[3].payload));
     assert(mqtt_handle_fresh_tonies_puback(conn, id));
-    assert(conn->fresh_tonie_entries->uid == 2 && !conn->fresh_tonie_entries->next);
+    assert(find_entry(2) && !find_entry(2)->next);
     assert(settings.internal.freshnessCacheChanged && cache_count == 1 && cache[0] == 2);
     pump_at(conn, monotonic_now);
     assert(conn->fresh_tonie_inflight->uid == 2 && conn->fresh_tonie_packet_id != id);
@@ -339,22 +367,22 @@ static void test_deferred_completion_retains_uid_and_retry_boundary(void)
     pump_at(conn, monotonic_now + 10000);
     assert(publish_count == 1);
     cache[0] = 2; cache_count = 1;
-    assert(mqtt_fresh_tonies_sync_connection(conn, &settings));
-    assert(mqtt_fresh_tonie_find(conn, 1) != NULL);
+    sync_entries();
+    assert(find_entry(1) == NULL); /* Transport owns its immutable UID/generation. */
     complete_deferred(NO_ERROR);
     assert(!conn->fresh_tonie_queued && conn->fresh_tonie_inflight->uid == 1);
     assert(conn->fresh_tonie_attempts == 1 && conn->fresh_tonie_sent_at == monotonic_now);
     assert(mqtt_handle_fresh_tonies_puback(conn, 1));
-    assert(mqtt_fresh_tonie_find(conn, 1) == NULL);
+    assert(find_entry(1) == NULL);
 
     conn = initialize(1);
     defer_publish = TRUE;
     pump_at(conn, monotonic_now);
     assert(mqtt_server_publish_fresh_tonie_for_overlay(1, 1));
-    assert(conn->fresh_tonie_requeued);
+    uint64_t newer = find_entry(1)->generation;
     complete_deferred(NO_ERROR);
     assert(mqtt_handle_fresh_tonies_puback(conn, 1));
-    assert(!conn->fresh_tonie_entries->delivered && settings.internal.freshnessCacheChanged);
+    assert(!find_entry(1)->delivered && find_entry(1)->generation == newer && settings.internal.freshnessCacheChanged);
 
     conn = initialize(1);
     defer_publish = TRUE;
@@ -362,6 +390,177 @@ static void test_deferred_completion_retains_uid_and_retry_boundary(void)
     complete_deferred(ERROR_WRITE_FAILED);
     assert(!conn->fresh_tonie_queued && !conn->fresh_tonie_inflight);
     assert(!conn->fresh_tonie_attempts && !conn->fresh_tonie_sent_at_valid);
+}
+
+static void test_http_notification_and_reconnect(void)
+{
+    MqttClientConnection *conn = initialize(2);
+    mqtt_freshness_snapshot_t *snapshot = mqtt_server_freshness_begin(1);
+    size_t count;
+    const uint64_t *view = mqtt_server_freshness_cache(snapshot, &count);
+    assert(snapshot && count == 2 && view[0] == 1 && view[1] == 2);
+    assert(mqtt_server_freshness_prepare(snapshot, view, count) == NO_ERROR);
+    pump_at(conn, monotonic_now); /* Reserved before HTTP writes, no MQTT admission. */
+    assert(publish_count == 0);
+    mqtt_server_freshness_finish(snapshot, TRUE);
+    assert(find_entry(1)->delivered && find_entry(2)->delivered);
+    for (unsigned i = 0; i < 5; i++) {
+        mqtt_fresh_tonies_reset_connection(conn);
+        assert(mqtt_server_publish_fresh_tonies(&conn->client_ctx));
+        pump_at(conn, monotonic_now + 1000);
+    }
+    assert(publish_count == 0 && !fresh_tonies_publish_state[1].pending);
+    assert(cache_count == 2); /* Notified is not content-updated. */
+    mqtt_server_freshness_forget_overlay(1); /* Simulate process-local RAM reset. */
+    assert(mqtt_server_publish_fresh_tonies_for_overlay(1));
+    wall_now += MQTT_FRESH_TONIES_DEBOUNCE_SEC;
+    pump_at(conn, monotonic_now);
+    assert(publish_count == 1 && conn->fresh_tonie_inflight->uid == 1);
+}
+
+static void test_http_abort_and_concurrent_source_change(void)
+{
+    MqttClientConnection *conn = initialize(1);
+    mqtt_freshness_snapshot_t *snapshot = mqtt_server_freshness_begin(1);
+    assert(snapshot && mqtt_server_freshness_prepare(snapshot, cache, 1) == NO_ERROR);
+    mqtt_server_freshness_finish(snapshot, FALSE);
+    pump_at(conn, monotonic_now);
+    assert(publish_count == 1 && !find_entry(1)->delivered);
+
+    conn = initialize(1);
+    snapshot = mqtt_server_freshness_begin(1);
+    assert(snapshot && mqtt_server_freshness_prepare(snapshot, cache, 1) == NO_ERROR);
+    uint64_t old_generation = find_entry(1)->generation;
+    assert(mqtt_server_publish_fresh_tonie_for_overlay(1, 1));
+    assert(find_entry(1)->generation != old_generation && find_entry(1)->http_claims == 0);
+    mqtt_server_freshness_finish(snapshot, TRUE);
+    assert(!find_entry(1)->delivered);
+    pump_at(conn, monotonic_now);
+    assert(publish_count == 1);
+
+    conn = initialize(1);
+    snapshot = mqtt_server_freshness_begin(1);
+    assert(mqtt_server_publish_fresh_tonie_for_overlay(1, 1));
+    assert(mqtt_server_freshness_prepare(snapshot, NULL, 0) == NO_ERROR);
+    assert(cache_count == 1 && cache[0] == 1); /* Older fresh answer cannot erase G2. */
+    mqtt_server_freshness_finish(snapshot, TRUE);
+    assert(!find_entry(1)->delivered);
+    pump_at(conn, monotonic_now);
+    assert(publish_count == 1);
+}
+
+static void test_old_inflight_ack_does_not_confirm_new_generation(void)
+{
+    MqttClientConnection *conn = initialize(1);
+    pump_at(conn, monotonic_now);
+    uint64_t first_generation = conn->fresh_tonie_inflight->generation;
+    uint16_t first_id = conn->fresh_tonie_packet_id;
+    assert(mqtt_server_publish_fresh_tonie_for_overlay(1, 1));
+    assert(find_entry(1)->generation != first_generation);
+    pump_at(conn, monotonic_now + 5000);
+    assert(conn->fresh_tonie_inflight->generation == first_generation);
+    assert(mqtt_handle_fresh_tonies_puback(conn, first_id));
+    assert(!find_entry(1)->delivered);
+    pump_at(conn, monotonic_now);
+    assert(publish_count == 3 && conn->fresh_tonie_packet_id != first_id);
+    assert(conn->fresh_tonie_inflight->generation == find_entry(1)->generation);
+    assert(mqtt_handle_fresh_tonies_puback(conn, conn->fresh_tonie_packet_id));
+    assert(find_entry(1)->delivered);
+}
+
+static void test_concurrent_http_discovery_and_completion(void)
+{
+    MqttClientConnection *conn = initialize(0);
+    const uint64_t uid = 9;
+    mqtt_freshness_snapshot_t *a = mqtt_server_freshness_begin(1);
+    mqtt_freshness_snapshot_t *b = mqtt_server_freshness_begin(1);
+    assert(a && b && mqtt_server_freshness_prepare(a, &uid, 1) == NO_ERROR);
+    uint64_t generation = find_entry(uid)->generation;
+    assert(mqtt_server_freshness_prepare(b, &uid, 1) == NO_ERROR);
+    assert(find_entry(uid)->http_claims == 2 && find_entry(uid)->generation == generation);
+    mqtt_server_freshness_finish(a, FALSE);
+    mqtt_server_freshness_finish(b, TRUE);
+    assert(find_entry(uid)->delivered && !find_entry(uid)->http_claims);
+    pump_at(conn, monotonic_now);
+    assert(publish_count == 0);
+
+    conn = initialize(0);
+    a = mqtt_server_freshness_begin(1);
+    b = mqtt_server_freshness_begin(1);
+    assert(mqtt_server_freshness_prepare(a, &uid, 1) == NO_ERROR);
+    mqtt_server_freshness_finish(a, TRUE);
+    cache_count = 0; /* Successful content/version observation removes stale entry. */
+    sync_entries();
+    assert(find_entry(uid) && !find_entry(uid)->present); /* Retained tombstone. */
+    assert(mqtt_server_freshness_prepare(b, &uid, 1) == NO_ERROR);
+    assert(cache_count == 0); /* Late discovery response must not resurrect it. */
+    mqtt_server_freshness_finish(b, TRUE);
+    assert(find_entry(uid) == NULL);
+    assert(mqtt_fresh_tonies_pump(conn) && publish_count == 0);
+}
+
+static void test_snapshot_identity_and_allocation_failures(void)
+{
+    MqttClientConnection *conn = initialize(1);
+    mqtt_freshness_snapshot_t *old = mqtt_server_freshness_begin(1);
+    mqtt_server_freshness_forget_overlay(1);
+    mqtt_freshness_snapshot_t *current = mqtt_server_freshness_begin(1);
+    assert(current && current->epoch != old->epoch);
+    assert(mqtt_server_freshness_prepare(old, cache, 1) == ERROR_INVALID_PARAMETER);
+    mqtt_server_freshness_finish(old, TRUE);
+    assert(fresh_tonies_publish_state[1].snapshots == 1);
+    allocation_succeeds = FALSE;
+    assert(mqtt_server_freshness_prepare(current, cache, 1) == ERROR_OUT_OF_MEMORY);
+    assert(cache_count == 1 && !find_entry(1)->delivered && !find_entry(1)->http_claims);
+    allocation_succeeds = TRUE;
+    mqtt_server_freshness_finish(current, FALSE);
+    assert(!fresh_tonies_publish_state[1].snapshots);
+    current = mqtt_server_freshness_begin(1);
+    assert(mqtt_server_freshness_prepare(current, cache, 1) == NO_ERROR);
+    mqtt_server_freshness_begin_reload();
+    mqtt_server_freshness_finish(current, TRUE);
+    assert(!fresh_tonies_publish_state[1].snapshots && !find_entry(1)->http_claims);
+    assert(mqtt_fresh_tonies_pump(conn) && publish_count == 0);
+    mqtt_server_freshness_reconcile_overlays();
+    wall_now += MQTT_FRESH_TONIES_DEBOUNCE_SEC;
+    pump_at(conn, monotonic_now);
+    assert(publish_count == 1);
+}
+
+static void test_http_keeps_admitted_qos_and_boxes_independent(void)
+{
+    MqttClientConnection *conn = initialize(1);
+    pump_at(conn, monotonic_now);
+    uint16_t id = conn->fresh_tonie_packet_id;
+    mqtt_freshness_snapshot_t *snapshot = mqtt_server_freshness_begin(1);
+    assert(mqtt_server_freshness_prepare(snapshot, cache, 1) == NO_ERROR);
+    mqtt_server_freshness_finish(snapshot, TRUE);
+    assert(conn->fresh_tonie_inflight && find_entry(1)->delivered);
+    pump_at(conn, monotonic_now + 5000);
+    assert(publish_count == 2 && conn->fresh_tonie_packet_id == id);
+    assert(mqtt_handle_fresh_tonies_puback(conn, id));
+    pump_at(conn, monotonic_now);
+    assert(publish_count == 2);
+
+    other_settings.commonName = "112233445566";
+    other_settings.internal.overlayUniqueId = "112233445566";
+    other_settings.internal.overlayNumber = 2;
+    other_settings.internal.config_used = TRUE;
+    other_settings.internal.freshnessCacheChanged = TRUE;
+    other_cache[0] = 1; other_cache_count = 1;
+    MqttClientConnection *other = &connections[1];
+    other->active = true; other->box_connection = TRUE;
+    other->client_ctx.settings = &other_settings;
+    assert(mqtt_server_publish_fresh_tonies_for_overlay(2));
+    wall_now += MQTT_FRESH_TONIES_DEBOUNCE_SEC;
+    assert(mqtt_fresh_tonies_pump(other));
+    assert(publish_count == 3 && other->fresh_tonie_inflight->uid == 1);
+    assert(mqtt_handle_fresh_tonies_puback(other, other->fresh_tonie_packet_id));
+    assert(mqtt_server_publish_fresh_tonie_for_overlay(1, 1));
+    assert(!find_entry(1)->delivered && fresh_tonies_publish_state[2].entries->delivered);
+    settings.internal.overlayUniqueId = "FFEEDDCCBBAA";
+    mqtt_server_freshness_reconcile_overlays();
+    assert(!fresh_tonies_publish_state[1].entries && fresh_tonies_publish_state[2].entries->delivered);
 }
 
 static void test_cached_diagnostic_owner_has_no_relay_dependency(void)
@@ -406,6 +605,13 @@ static void test_hass_diagnostic_throttle_has_no_relay_dependency(void)
 
 int main(void)
 {
+    // settings_init/load run before mutex_manager_init during process startup.
+    assert(!fresh_tonies_ready);
+    mqtt_server_freshness_forget_overlay(1);
+    mqtt_server_freshness_begin_reload();
+    mqtt_server_freshness_reconcile_overlays();
+    assert(!fresh_tonies_reload_pending && !lock_held);
+    mqtt_server_freshness_init();
     test_cached_diagnostic_owner_has_no_relay_dependency();
     test_hass_diagnostic_throttle_has_no_relay_dependency();
     test_schedule_and_delayed_ack();
@@ -414,6 +620,12 @@ int main(void)
     test_sync_and_targeted_changes_keep_inflight();
     test_unsent_publish_does_not_advance_delivery();
     test_deferred_completion_retains_uid_and_retry_boundary();
+    test_http_notification_and_reconnect();
+    test_http_abort_and_concurrent_source_change();
+    test_old_inflight_ack_does_not_confirm_new_generation();
+    test_concurrent_http_discovery_and_completion();
+    test_snapshot_identity_and_allocation_failures();
+    test_http_keeps_admitted_qos_and_boxes_independent();
     mqtt_debug_test_reset(true, 5000);
     connections[0].debug_fresh_first_ms = 1000;
     connections[0].debug_fresh_last_ms = 2000;
@@ -425,6 +637,6 @@ int main(void)
     assert(cJSON_GetObjectItemCaseSensitive(diagnostic, "since_last_write_ms")->valuedouble == 3000);
     mqtt_debug_test_reset(false, 0);
     mqtt_fresh_tonies_reset_connection(&connections[0]);
-    puts("MQTT fresh delivery PASS: schedule 0/5/10/40/70, delayed ACK, saturation, monotonic failures/wrap, unchanged cache and targeted coalescing");
+    puts("MQTT fresh delivery PASS: unchanged retries/QoS, HTTP claims and dedupe, reconnect/restart, concurrent generations/discoveries, overlay identity/isolation and reload/allocation failures");
     return 0;
 }

@@ -72,6 +72,10 @@ typedef struct
     tonie_info_t *tonieInfo;
     void *customData;
     size_t customDataLen;
+    uint64_t *freshnessCloudUids;
+    size_t freshnessCloudUidCount;
+    struct mqtt_freshness_snapshot *freshnessSnapshot;
+    error_t freshnessResponseError;
     HttpConnection *connection;
     client_ctx_t *client_ctx;
 } cbr_ctx_t;
@@ -92,6 +96,8 @@ void cbrCloudResponsePassthrough(void *src_ctx, HttpClientContext *cloud_ctx);
 void cbrCloudHeaderPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const char *header, const char *value);
 void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const char *payload, size_t length, error_t error);
 void cbrCloudServerDiscoPassthrough(void *src_ctx, HttpClientContext *cloud_ctx);
+/** Complete a V3 response once; only a successful flush acknowledges delivery. */
+error_t finishFreshnessResponseV3(cbr_ctx_t *ctx);
 
 char *strupr(char input[]);
 

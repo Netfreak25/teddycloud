@@ -7277,7 +7277,9 @@ error_t handleDeleteOverlay(HttpConnection *connection, const char_t *uri, const
         TRACE_ERROR("No overlay detected %s\n", overlay);
         return ERROR_FAILURE;
     }
-    get_settings_cn(overlay)->internal.config_used = false;
+    settings_t *removed_settings = get_settings_cn(overlay);
+    removed_settings->internal.config_used = false;
+    mqtt_server_freshness_forget_overlay(removed_settings->internal.overlayNumber);
     settings_save();
     TRACE_INFO("Removed overlay %s\n", overlay);
 

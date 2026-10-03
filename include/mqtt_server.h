@@ -30,6 +30,22 @@ bool_t mqtt_server_publish_fresh_tonies(client_ctx_t *client_ctx);
 bool_t mqtt_server_publish_fresh_tonies_for_overlay(uint8_t overlay_id);
 bool_t mqtt_server_publish_fresh_tonie_for_overlay(uint8_t overlay_id,
                                                    uint64_t uid);
+/** Owned per-request cache/generation view; completion never confirms newer changes. */
+typedef struct mqtt_freshness_snapshot mqtt_freshness_snapshot_t;
+mqtt_freshness_snapshot_t *mqtt_server_freshness_begin(uint8_t overlay_id);
+const uint64_t *mqtt_server_freshness_cache(const mqtt_freshness_snapshot_t *snapshot,
+                                          size_t *count);
+error_t mqtt_server_freshness_prepare(mqtt_freshness_snapshot_t *snapshot,
+                                      const uint64_t *stale_uids, size_t count);
+void mqtt_server_freshness_finish(mqtt_freshness_snapshot_t *snapshot, bool_t sent);
+/** Enable lifecycle hooks after mutex initialization, before server threads. */
+void mqtt_server_freshness_init(void);
+/** Called when an overlay is removed/reassigned, never on MQTT disconnect. */
+void mqtt_server_freshness_forget_overlay(uint8_t overlay_id);
+void mqtt_server_freshness_reconcile_overlays(void);
+void mqtt_server_freshness_begin_reload(void);
+/** Caller already holds MUTEX_MQTT_SESSION around the content mutation. */
+bool_t mqtt_server_publish_fresh_tonie_for_overlay_locked(uint8_t overlay_id, uint64_t uid);
 void mqtt_server_mark_toniebox2_settings_changed(uint8_t overlay_id);
 void mqtt_server_mark_toniebox2_setting_changed(uint8_t overlay_id, const char *setting_name);
 bool_t mqtt_server_publish_toniebox2_settings_desired_for_overlay(uint8_t overlay_id);

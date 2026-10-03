@@ -1046,6 +1046,7 @@ void server_init(bool test)
     }
 
     mutex_manager_init();
+    mqtt_server_freshness_init();
     toniebox_state_restore();
     if (!sanityChecks())
     {

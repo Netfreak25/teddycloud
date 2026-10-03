@@ -65,8 +65,11 @@ typedef struct {
 
 typedef struct MqttFreshTonieEntry {
     uint64_t uid;
+    uint64_t generation;
     bool_t present;
     bool_t delivered;
+    bool_t invalidated;
+    size_t http_claims;
     struct MqttFreshTonieEntry *next;
 } MqttFreshTonieEntry;
 
@@ -87,11 +90,10 @@ typedef struct {
     tb2_mqtt_passthrough_session_t *passthrough;
     MqttSubscription subscriptions[MQTT_MAX_SUBSCRIPTIONS];
     size_t subscription_count;
-    MqttFreshTonieEntry *fresh_tonie_entries;
+    MqttFreshTonieEntry fresh_tonie_inflight_value;
     MqttFreshTonieEntry *fresh_tonie_inflight;
     bool_t fresh_tonie_queued;
     uint64_t fresh_tonie_queued_uid;
-    bool_t fresh_tonie_requeued;
     bool_t settings_delivery_queued;
     uint16_t fresh_tonie_packet_id;
     uint16_t next_packet_id;
@@ -127,6 +129,11 @@ typedef struct {
 } MqttAppControlPingState;
 
 typedef struct {
+    char identity[64];
+    uint64_t epoch;
+    MqttFreshTonieEntry *entries;
+    size_t snapshots;
+    uint64_t debug_owner;
     bool_t pending;
     uint32_t pending_since;
     uint32_t last_publish_at;
@@ -150,6 +157,17 @@ typedef enum {
     MQTT_TB2_SETTING_COUNT
 } MqttToniebox2SettingId;
 
+struct mqtt_freshness_snapshot {
+    uint8_t overlay_id;
+    char identity[64];
+    uint64_t epoch;
+    uint64_t *uids;
+    uint64_t *generations;
+    size_t count;
+    MqttFreshTonieEntry *outgoing;
+    bool_t prepared;
+};
+
 /** Immutable metadata owned until actual write completion or cancellation. */
 typedef struct {
     MqttClientConnection *conn;
@@ -172,6 +190,7 @@ typedef struct {
     MqttClientConnection *conn;
     tb2_mqtt_passthrough_session_t *session;
     uint64_t uid;
+    uint64_t generation;
     uint16_t packet_id;
     bool_t duplicate;
 } MqttFreshDelivery;
@@ -216,6 +235,10 @@ static MqttClientConnection connections[MQTT_MAX_CONNECTIONS];
 static MqttAppControlStlState app_control_stl_state[MAX_OVERLAYS];
 static MqttAppControlPingState app_control_ping_state[MAX_OVERLAYS];
 static MqttFreshToniesPublishState fresh_tonies_publish_state[MAX_OVERLAYS];
+// Never reused within this process, including overlay removal/reassignment.
+static uint64_t fresh_tonies_generation;
+static bool_t fresh_tonies_reload_pending;
+static bool_t fresh_tonies_ready;
 static uint64_t debug_accept_sequence;
 static void mqtt_uid_to_ruid(uint64_t uid, char ruid[17]);
 
@@ -292,6 +315,8 @@ static void mqtt_debug_fresh_event(MqttClientConnection *conn, const char *stage
     mqtt_uid_to_ruid(uid, ruid);
     cJSON_AddStringToObject(details, "ruid", ruid);
     cJSON_AddNumberToObject(details, "packet_id", packet_id);
+    if (conn->fresh_tonie_inflight != NULL)
+        cJSON_AddNumberToObject(details, "generation", (double)conn->fresh_tonie_inflight->generation);
     cJSON_AddBoolToObject(details, "duplicate", duplicate);
     cJSON_AddNumberToObject(details, "attempt", conn->fresh_tonie_attempts);
     uint64_t now = mqtt_debug_now_ms();
@@ -477,16 +502,9 @@ static bool_t mqtt_promote_connection_to_box(MqttClientConnection *conn, setting
 
 static void mqtt_fresh_tonies_reset_connection(MqttClientConnection *conn)
 {
-    while (conn->fresh_tonie_entries != NULL)
-    {
-        MqttFreshTonieEntry *removed = conn->fresh_tonie_entries;
-        conn->fresh_tonie_entries = removed->next;
-        osFreeMem(removed);
-    }
     conn->fresh_tonie_inflight = NULL;
     conn->fresh_tonie_queued = FALSE;
     conn->fresh_tonie_queued_uid = 0;
-    conn->fresh_tonie_requeued = FALSE;
     conn->fresh_tonie_packet_id = 0;
     conn->fresh_tonie_attempts = 0;
     conn->fresh_tonie_sent_at = 0;
@@ -518,12 +536,6 @@ static void mqtt_connection_close_locked(MqttClientConnection *conn, const char 
                    mqtt_connection_common_name(conn),
                    (unsigned)mqtt_connection_overlay_id(conn),
                    reason);
-    }
-
-    if (conn->client_ctx.settings != NULL &&
-        conn->client_ctx.settings->internal.freshnessCacheChanged)
-    {
-        mqtt_mark_fresh_tonies_pending(conn->client_ctx.settings, "reconnect");
     }
 
     if (conn->passthrough != NULL)
@@ -884,8 +896,7 @@ void mqtt_server_init() {
     }
     osMemset(app_control_stl_state, 0, sizeof(app_control_stl_state));
     osMemset(app_control_ping_state, 0, sizeof(app_control_ping_state));
-    osMemset(fresh_tonies_publish_state, 0,
-             sizeof(fresh_tonies_publish_state));
+    // Notification history belongs to the box, not the listener lifetime.
 }
 
 static const char *mqtt_json_bool(bool value)
@@ -4496,9 +4507,37 @@ static bool_t mqtt_fresh_tonies_topic(MqttClientConnection *conn, char *topic,
 
 static MqttFreshToniesPublishState *mqtt_fresh_tonies_publish_state(settings_t *settings)
 {
-    if (settings == NULL || settings->internal.overlayNumber >= MAX_OVERLAYS)
+    if (fresh_tonies_reload_pending || settings == NULL || settings->internal.overlayNumber >= MAX_OVERLAYS)
         return NULL;
-    return &fresh_tonies_publish_state[settings->internal.overlayNumber];
+    MqttFreshToniesPublishState *state = &fresh_tonies_publish_state[settings->internal.overlayNumber];
+    const char *identity = settings->internal.overlayUniqueId != NULL ? settings->internal.overlayUniqueId : "";
+    if ((!settings->internal.config_used && settings->internal.overlayNumber != 0) ||
+        osStrcmp(state->identity, identity) != 0)
+    {
+        while (state->entries != NULL)
+        {
+            MqttFreshTonieEntry *entry = state->entries;
+            state->entries = entry->next;
+            osFreeMem(entry);
+        }
+        osMemset(state, 0, sizeof(*state));
+        osStrncpy(state->identity, identity, sizeof(state->identity) - 1);
+    }
+    if (state->epoch == 0) state->epoch = ++fresh_tonies_generation;
+    return state;
+}
+
+static void mqtt_debug_fresh_generation(MqttFreshToniesPublishState *state, const char *stage,
+                                       uint64_t uid, uint64_t generation)
+{
+    if (state == NULL || !mqtt_debug_active(state->debug_owner)) return;
+    cJSON *details = cJSON_CreateObject();
+    if (details == NULL) return;
+    char ruid[17];
+    mqtt_uid_to_ruid(uid, ruid);
+    cJSON_AddStringToObject(details, "ruid", ruid);
+    cJSON_AddNumberToObject(details, "generation", (double)generation);
+    mqtt_debug_event(state->debug_owner, 0, 0, "server", stage, details);
 }
 
 static void mqtt_mark_fresh_tonies_pending(settings_t *settings, const char *reason)
@@ -4508,31 +4547,23 @@ static void mqtt_mark_fresh_tonies_pending(settings_t *settings, const char *rea
         return;
 
     uint32_t now = (uint32_t)time(NULL);
-    if (!state->pending)
-    {
-        state->pending = TRUE;
-        state->pending_since = now;
-        state->coalesced_count = 0;
-    }
+    if (state->pending)
+        return;
+    state->pending = TRUE;
+    state->pending_since = now;
+    state->coalesced_count = 0;
     state->coalesced_count++;
     osStrncpy(state->reason,
               reason != NULL && reason[0] != '\0' ? reason : "unknown",
               sizeof(state->reason) - 1);
     state->reason[sizeof(state->reason) - 1] = '\0';
-    // Observe the trigger separately; the aggregate reason can be overwritten later.
-    for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
+    if (mqtt_debug_active(state->debug_owner))
     {
-        MqttClientConnection *conn = &connections[i];
-        uint64_t owner = mqtt_connection_debug_owner(conn);
-        if (!conn->active || conn->client_ctx.settings != settings || !mqtt_debug_active(owner))
-            continue;
         cJSON *details = cJSON_CreateObject();
-        if (details == NULL) continue;
+        if (details == NULL) return;
         cJSON_AddStringToObject(details, "trigger", reason != NULL ? reason : "unknown");
         cJSON_AddNumberToObject(details, "coalesced", state->coalesced_count);
-        cJSON_AddBoolToObject(details, "inflight", conn->fresh_tonie_inflight != NULL);
-        cJSON_AddBoolToObject(details, "queued", conn->fresh_tonie_queued);
-        mqtt_debug_event(owner, 0, 0, "server", "freshness_trigger", details);
+        mqtt_debug_event(state->debug_owner, 0, 0, "server", "freshness_trigger", details);
     }
 }
 
@@ -4550,9 +4581,9 @@ static void mqtt_clear_fresh_tonies_pending(settings_t *settings)
 }
 
 static MqttFreshTonieEntry *mqtt_fresh_tonie_find(
-    MqttClientConnection *conn, uint64_t uid)
+    MqttFreshToniesPublishState *state, uint64_t uid)
 {
-    MqttFreshTonieEntry *entry = conn->fresh_tonie_entries;
+    MqttFreshTonieEntry *entry = state != NULL ? state->entries : NULL;
     while (entry != NULL)
     {
         if (entry->uid == uid)
@@ -4562,13 +4593,13 @@ static MqttFreshTonieEntry *mqtt_fresh_tonie_find(
     return NULL;
 }
 
-static bool_t mqtt_fresh_tonies_sync_connection(MqttClientConnection *conn,
-                                                settings_t *settings)
+/** Caller holds the lifetime/state mutex. Entries are never borrowed by transport. */
+static bool_t mqtt_fresh_tonies_sync(settings_t *settings)
 {
-    if (!mqtt_connection_matches_box_overlay(conn, settings))
+    MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
+    if (state == NULL)
         return FALSE;
-
-    MqttFreshTonieEntry *remaining = conn->fresh_tonie_entries;
+    MqttFreshTonieEntry *remaining = state->entries;
     MqttFreshTonieEntry *ordered = NULL;
     MqttFreshTonieEntry **tail = &ordered;
     size_t cache_len = 0;
@@ -4609,11 +4640,18 @@ static bool_t mqtt_fresh_tonies_sync_connection(MqttClientConnection *conn,
                 TRACE_ERROR("MQTT fresh-tonies queue allocation failed for %s\r\n",
                             settings->commonName);
                 *tail = remaining;
-                conn->fresh_tonie_entries = ordered;
+                state->entries = ordered;
                 return FALSE;
             }
             osMemset(entry, 0, sizeof(*entry));
             entry->uid = cache[index];
+        }
+        if (!entry->present)
+        {
+            entry->generation = ++fresh_tonies_generation;
+            entry->delivered = FALSE;
+            entry->invalidated = FALSE;
+            entry->http_claims = 0;
         }
         entry->present = TRUE;
         entry->next = NULL;
@@ -4626,8 +4664,7 @@ static bool_t mqtt_fresh_tonies_sync_connection(MqttClientConnection *conn,
         MqttFreshTonieEntry *entry = remaining;
         remaining = entry->next;
         entry->present = FALSE;
-        if (entry == conn->fresh_tonie_inflight ||
-            (conn->fresh_tonie_queued && entry->uid == conn->fresh_tonie_queued_uid))
+        if (state->snapshots != 0)
         {
             entry->next = NULL;
             *tail = entry;
@@ -4638,18 +4675,17 @@ static bool_t mqtt_fresh_tonies_sync_connection(MqttClientConnection *conn,
             osFreeMem(entry);
         }
     }
-    conn->fresh_tonie_entries = ordered;
+    state->entries = ordered;
     return TRUE;
 }
 
 static MqttFreshTonieEntry *mqtt_fresh_tonies_next(
-    MqttClientConnection *conn)
+    MqttFreshToniesPublishState *state)
 {
-    MqttFreshTonieEntry *entry = conn->fresh_tonie_entries;
+    MqttFreshTonieEntry *entry = state != NULL ? state->entries : NULL;
     while (entry != NULL)
     {
-        if (entry->present && !entry->delivered &&
-            entry != conn->fresh_tonie_inflight)
+        if (entry->present && !entry->delivered && entry->http_claims == 0)
         {
             return entry;
         }
@@ -4670,6 +4706,222 @@ static bool_t mqtt_fresh_tonies_cache_contains(settings_t *settings,
             return TRUE;
     }
     return FALSE;
+}
+
+void mqtt_server_freshness_init(void)
+{
+    // Called once locks exist, before server threads start; keep RAM history.
+    fresh_tonies_ready = TRUE;
+}
+
+void mqtt_server_freshness_forget_overlay(uint8_t overlay_id)
+{
+    if (!fresh_tonies_ready || overlay_id >= MAX_OVERLAYS) return;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    MqttFreshToniesPublishState *state = &fresh_tonies_publish_state[overlay_id];
+    while (state->entries != NULL)
+    {
+        MqttFreshTonieEntry *entry = state->entries;
+        state->entries = entry->next;
+        osFreeMem(entry);
+    }
+    osMemset(state, 0, sizeof(*state));
+    mutex_unlock(MUTEX_MQTT_SESSION);
+}
+
+void mqtt_server_freshness_reconcile_overlays(void)
+{
+    if (!fresh_tonies_ready) return;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    fresh_tonies_reload_pending = FALSE;
+    for (uint8_t i = 0; i < MAX_OVERLAYS; i++)
+        mqtt_fresh_tonies_publish_state(get_settings_id(i));
+    mutex_unlock(MUTEX_MQTT_SESSION);
+}
+
+void mqtt_server_freshness_begin_reload(void)
+{
+    if (!fresh_tonies_ready) return;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    fresh_tonies_reload_pending = TRUE;
+    mutex_unlock(MUTEX_MQTT_SESSION);
+}
+
+mqtt_freshness_snapshot_t *mqtt_server_freshness_begin(uint8_t overlay_id)
+{
+    mqtt_freshness_snapshot_t *snapshot = osAllocMem(sizeof(*snapshot));
+    if (snapshot == NULL) return NULL;
+    osMemset(snapshot, 0, sizeof(*snapshot));
+    mutex_lock(MUTEX_MQTT_SESSION);
+    settings_t *settings = overlay_id < MAX_OVERLAYS ? get_settings_id(overlay_id) : NULL;
+    if (settings == NULL || !mqtt_fresh_tonies_sync(settings)) goto failed;
+    MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
+    snapshot->overlay_id = overlay_id;
+    snapshot->epoch = state->epoch;
+    osStrcpy(snapshot->identity, state->identity);
+    for (MqttFreshTonieEntry *entry = state->entries; entry != NULL; entry = entry->next)
+        if (entry->present) snapshot->count++;
+    if (snapshot->count > 0)
+    {
+        snapshot->uids = osAllocMem(snapshot->count * sizeof(uint64_t));
+        snapshot->generations = osAllocMem(snapshot->count * sizeof(uint64_t));
+        if (snapshot->uids == NULL || snapshot->generations == NULL) goto failed;
+        size_t i = 0;
+        for (MqttFreshTonieEntry *entry = state->entries; entry != NULL; entry = entry->next)
+        {
+            if (!entry->present) continue;
+            snapshot->uids[i] = entry->uid;
+            snapshot->generations[i++] = entry->generation;
+        }
+    }
+    state->snapshots++;
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    return snapshot;
+failed:
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    osFreeMem(snapshot->uids);
+    osFreeMem(snapshot->generations);
+    osFreeMem(snapshot);
+    return NULL;
+}
+
+const uint64_t *mqtt_server_freshness_cache(const mqtt_freshness_snapshot_t *snapshot,
+                                          size_t *count)
+{
+    *count = snapshot != NULL ? snapshot->count : 0;
+    return snapshot != NULL ? snapshot->uids : NULL;
+}
+
+static uint64_t mqtt_freshness_snapshot_generation(const mqtt_freshness_snapshot_t *snapshot,
+                                                  uint64_t uid)
+{
+    for (size_t i = 0; i < snapshot->count; i++)
+        if (snapshot->uids[i] == uid) return snapshot->generations[i];
+    return 0;
+}
+
+static bool_t mqtt_freshness_uid_contains(const uint64_t *uids, size_t count, uint64_t uid)
+{
+    for (size_t i = 0; i < count; i++)
+        if (uids[i] == uid) return TRUE;
+    return FALSE;
+}
+
+error_t mqtt_server_freshness_prepare(mqtt_freshness_snapshot_t *snapshot,
+                                      const uint64_t *stale_uids, size_t count)
+{
+    if (snapshot == NULL || snapshot->prepared || (count > 0 && stale_uids == NULL))
+        return ERROR_INVALID_PARAMETER;
+    error_t error = ERROR_OUT_OF_MEMORY;
+    uint64_t *merged = NULL;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    settings_t *settings = get_settings_id(snapshot->overlay_id);
+    MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
+    if (state == NULL || snapshot->epoch != state->epoch ||
+        osStrcmp(snapshot->identity, state->identity) != 0)
+    {
+        error = ERROR_INVALID_PARAMETER;
+        goto done;
+    }
+    if (!mqtt_fresh_tonies_sync(settings)) goto done;
+    size_t capacity = count;
+    for (MqttFreshTonieEntry *entry = state->entries; entry != NULL; entry = entry->next)
+        if (entry->present) capacity++;
+    merged = capacity != 0 ? osAllocMem(capacity * sizeof(uint64_t)) : NULL;
+    if (capacity != 0 && merged == NULL) goto done;
+    size_t merged_count = 0;
+    MqttFreshTonieEntry **tail = &snapshot->outgoing;
+    for (size_t i = 0; i < count; i++)
+    {
+        if (mqtt_freshness_uid_contains(stale_uids, i, stale_uids[i])) continue;
+        MqttFreshTonieEntry *current = mqtt_fresh_tonie_find(state, stale_uids[i]);
+        uint64_t old_generation = mqtt_freshness_snapshot_generation(snapshot, stale_uids[i]);
+        MqttFreshTonieEntry *outgoing = osAllocMem(sizeof(*outgoing));
+        if (outgoing == NULL) goto done;
+        osMemset(outgoing, 0, sizeof(*outgoing));
+        outgoing->uid = stale_uids[i];
+        outgoing->generation = old_generation != 0 ? old_generation :
+            (current != NULL && current->present && !current->invalidated ? current->generation : 0);
+        // A new response discovery may establish a generation. A concurrent
+        // invalidation absent from the request must remain independently pending.
+        outgoing->present = old_generation == 0 && current == NULL;
+        *tail = outgoing;
+        tail = &outgoing->next;
+        // Do not resurrect an entry already completed while this HTTP call ran.
+        if ((current == NULL && old_generation == 0) || (current != NULL && current->present))
+            merged[merged_count++] = stale_uids[i];
+    }
+    for (MqttFreshTonieEntry *entry = state->entries; entry != NULL; entry = entry->next)
+    {
+        if (entry->present &&
+            mqtt_freshness_snapshot_generation(snapshot, entry->uid) != entry->generation &&
+            !mqtt_freshness_uid_contains(merged, merged_count, entry->uid))
+            merged[merged_count++] = entry->uid;
+    }
+    if (!settings_set_u64_array_id("internal.freshnessCache", merged, merged_count, snapshot->overlay_id))
+        goto done;
+    settings_set_bool_id("internal.freshnessCacheChanged", merged_count > 0, snapshot->overlay_id);
+    freshness_cache_sync_source_changed_uids(settings);
+    if (!mqtt_fresh_tonies_sync(settings)) goto done;
+    for (MqttFreshTonieEntry *outgoing = snapshot->outgoing; outgoing != NULL; outgoing = outgoing->next)
+    {
+        MqttFreshTonieEntry *entry = mqtt_fresh_tonie_find(state, outgoing->uid);
+        if (outgoing->present && entry != NULL) outgoing->generation = entry->generation;
+        outgoing->present = FALSE;
+        if (entry != NULL && entry->present && entry->generation == outgoing->generation)
+        {
+            entry->http_claims++;
+            outgoing->present = TRUE;
+        }
+    }
+    snapshot->prepared = TRUE;
+    error = NO_ERROR;
+done:
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    osFreeMem(merged);
+    return error;
+}
+
+void mqtt_server_freshness_finish(mqtt_freshness_snapshot_t *snapshot, bool_t sent)
+{
+    if (snapshot == NULL) return;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    MqttFreshToniesPublishState *state = &fresh_tonies_publish_state[snapshot->overlay_id];
+    bool_t same = snapshot->epoch == state->epoch && osStrcmp(snapshot->identity, state->identity) == 0;
+    while (snapshot->outgoing != NULL)
+    {
+        MqttFreshTonieEntry *outgoing = snapshot->outgoing;
+        snapshot->outgoing = outgoing->next;
+        MqttFreshTonieEntry *entry = same ? mqtt_fresh_tonie_find(state, outgoing->uid) : NULL;
+        if (snapshot->prepared && outgoing->present && entry != NULL &&
+            entry->generation == outgoing->generation)
+        {
+            if (entry->http_claims > 0) entry->http_claims--;
+            if (sent && !fresh_tonies_reload_pending)
+            {
+                entry->delivered = TRUE;
+                mqtt_debug_fresh_generation(state, "freshness_http_notified", entry->uid, entry->generation);
+            }
+        }
+        osFreeMem(outgoing);
+    }
+    if (same)
+    {
+        if (state->snapshots > 0) state->snapshots--;
+        if (!fresh_tonies_reload_pending)
+        {
+            settings_t *settings = get_settings_id(snapshot->overlay_id);
+            mqtt_fresh_tonies_sync(settings);
+            if (mqtt_fresh_tonies_next(state) == NULL)
+                mqtt_clear_fresh_tonies_pending(settings);
+            else
+                mqtt_mark_fresh_tonies_pending(settings, "http_unsent");
+        }
+    }
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    osFreeMem(snapshot->uids);
+    osFreeMem(snapshot->generations);
+    osFreeMem(snapshot);
 }
 
 static char *mqtt_build_fresh_tonie_payload(uint64_t uid)
@@ -4693,15 +4945,15 @@ static void mqtt_local_fresh_completed(void *context, error_t error)
     {
         conn->fresh_tonie_queued = FALSE;
         conn->fresh_tonie_queued_uid = 0;
-        MqttFreshTonieEntry *entry = !error && conn->active
-                                       ? mqtt_fresh_tonie_find(conn, delivery->uid) : NULL;
-        if (entry != NULL)
+        if (!error && conn->active)
         {
             conn->fresh_tonie_packet_id = delivery->packet_id;
             conn->fresh_tonie_sent_at_valid = mqtt_monotonic_ms(&conn->fresh_tonie_sent_at);
             if (!delivery->duplicate)
             {
-                conn->fresh_tonie_inflight = entry;
+                conn->fresh_tonie_inflight_value.uid = delivery->uid;
+                conn->fresh_tonie_inflight_value.generation = delivery->generation;
+                conn->fresh_tonie_inflight = &conn->fresh_tonie_inflight_value;
                 conn->debug_fresh_first_ms = mqtt_debug_now_ms();
                 conn->fresh_tonie_attempts = 1;
                 conn->fresh_tonie_slow_retry_logged = FALSE;
@@ -4746,8 +4998,19 @@ static bool_t mqtt_send_fresh_tonie(MqttClientConnection *conn,
     }
     delivery->conn = conn;
     delivery->uid = entry->uid;
+    delivery->generation = entry->generation;
     delivery->duplicate = duplicate;
     mutex_lock(MUTEX_MQTT_SESSION);
+    MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
+    MqttFreshTonieEntry *current = mqtt_fresh_tonie_find(state, entry->uid);
+    if (!duplicate && (current == NULL || !current->present || current->delivered ||
+                       current->http_claims != 0 || current->generation != entry->generation))
+    {
+        mutex_unlock(MUTEX_MQTT_SESSION);
+        osFreeMem(payload);
+        osFreeMem(delivery);
+        return TRUE;
+    }
     delivery->session = conn->passthrough;
     delivery->packet_id = duplicate ? conn->fresh_tonie_packet_id : 0;
     mqtt_delivery_result_t result = conn->fresh_tonie_queued ?
@@ -4759,8 +5022,6 @@ static bool_t mqtt_send_fresh_tonie(MqttClientConnection *conn,
     {
         conn->fresh_tonie_queued = TRUE;
         conn->fresh_tonie_queued_uid = delivery->uid;
-        if (!duplicate)
-            conn->fresh_tonie_requeued = FALSE;
     }
     mutex_unlock(MUTEX_MQTT_SESSION);
     osFreeMem(payload);
@@ -4771,7 +5032,8 @@ static bool_t mqtt_send_fresh_tonie(MqttClientConnection *conn,
     return mqtt_delivery_accepted(result);
 }
 
-static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn)
+static bool_t mqtt_fresh_tonies_select(MqttClientConnection *conn,
+                                      MqttFreshTonieEntry *selected, bool_t *duplicate)
 {
     if (conn == NULL || !conn->active || !conn->box_connection ||
         conn->client_ctx.settings == NULL)
@@ -4780,8 +5042,9 @@ static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn)
     }
 
     settings_t *settings = conn->client_ctx.settings;
-    if (!mqtt_fresh_tonies_sync_connection(conn, settings))
+    if (!mqtt_fresh_tonies_sync(settings))
         return TRUE;
+    mqtt_fresh_tonies_publish_state(settings)->debug_owner = mqtt_connection_debug_owner(conn);
     if (conn->fresh_tonie_queued)
         return TRUE;
 
@@ -4836,7 +5099,9 @@ static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn)
                        settings->commonName, ruid,
                        (unsigned)conn->fresh_tonie_packet_id, next_attempt);
         }
-        return mqtt_send_fresh_tonie(conn, conn->fresh_tonie_inflight, TRUE);
+        *selected = *conn->fresh_tonie_inflight;
+        *duplicate = TRUE;
+        return TRUE;
     }
 
     if (!settings->internal.freshnessCacheChanged)
@@ -4846,6 +5111,12 @@ static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn)
         mqtt_fresh_tonies_publish_state(settings);
     if (state == NULL)
         return TRUE;
+    MqttFreshTonieEntry *next = mqtt_fresh_tonies_next(state);
+    if (next == NULL)
+    {
+        mqtt_clear_fresh_tonies_pending(settings);
+        return TRUE;
+    }
     if (!state->pending)
         mqtt_mark_fresh_tonies_pending(settings, "background");
 
@@ -4864,13 +5135,6 @@ static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn)
         return TRUE;
     }
     state->waiting_for_subscription_logged = FALSE;
-
-    MqttFreshTonieEntry *next = mqtt_fresh_tonies_next(conn);
-    if (next == NULL)
-    {
-        mqtt_clear_fresh_tonies_pending(settings);
-        return TRUE;
-    }
 
     now = (uint32_t)time(NULL);
     if (now >= state->pending_since &&
@@ -4893,15 +5157,28 @@ static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn)
     TRACE_INFO("MQTT fresh-tonies send for %s ruid=%s reason=%s\r\n",
                settings->commonName, ruid,
                state->reason[0] != '\0' ? state->reason : "unknown");
-    return mqtt_send_fresh_tonie(conn, next, FALSE);
+    *selected = *next;
+    return TRUE;
+}
+
+static bool_t mqtt_fresh_tonies_pump(MqttClientConnection *conn)
+{
+    MqttFreshTonieEntry selected = {0};
+    bool_t duplicate = FALSE;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    bool_t result = mqtt_fresh_tonies_select(conn, &selected, &duplicate);
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    return result && (selected.generation == 0 || mqtt_send_fresh_tonie(conn, &selected, duplicate));
 }
 
 static bool_t mqtt_handle_fresh_tonies_puback(MqttClientConnection *conn,
                                               uint16_t packet_id)
 {
+    mutex_lock(MUTEX_MQTT_SESSION);
     if (conn == NULL || !conn->active || conn->fresh_tonie_inflight == NULL ||
         packet_id != conn->fresh_tonie_packet_id)
     {
+        mutex_unlock(MUTEX_MQTT_SESSION);
         return FALSE;
     }
 
@@ -4914,8 +5191,10 @@ static bool_t mqtt_handle_fresh_tonies_puback(MqttClientConnection *conn,
                settings != NULL ? settings->commonName : "-", ruid,
                (unsigned)packet_id, (unsigned)conn->fresh_tonie_attempts);
 
-    conn->fresh_tonie_inflight->delivered = !conn->fresh_tonie_requeued;
-    conn->fresh_tonie_requeued = FALSE;
+    MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
+    MqttFreshTonieEntry *entry = mqtt_fresh_tonie_find(state, conn->fresh_tonie_inflight->uid);
+    if (entry != NULL && entry->generation == conn->fresh_tonie_inflight->generation)
+        entry->delivered = TRUE;
     conn->fresh_tonie_inflight = NULL;
     conn->fresh_tonie_packet_id = 0;
     conn->fresh_tonie_attempts = 0;
@@ -4925,10 +5204,11 @@ static bool_t mqtt_handle_fresh_tonies_puback(MqttClientConnection *conn,
 
     if (settings != NULL)
     {
-        mqtt_fresh_tonies_sync_connection(conn, settings);
-        if (mqtt_fresh_tonies_next(conn) == NULL)
+        mqtt_fresh_tonies_sync(settings);
+        if (mqtt_fresh_tonies_next(state) == NULL)
             mqtt_clear_fresh_tonies_pending(settings);
     }
+    mutex_unlock(MUTEX_MQTT_SESSION);
     return TRUE;
 }
 
@@ -4941,74 +5221,63 @@ bool_t mqtt_server_publish_fresh_tonies(client_ctx_t *client_ctx)
         return FALSE;
     }
 
-    MqttClientConnection *conn =
-        (MqttClientConnection *)client_ctx->mqtt_connection;
-    if (!mqtt_fresh_tonies_sync_connection(conn, client_ctx->settings))
-        return FALSE;
-    mqtt_mark_fresh_tonies_pending(client_ctx->settings, "connection");
-    return TRUE;
+    return mqtt_server_publish_fresh_tonies_for_overlay(client_ctx->settings->internal.overlayNumber);
 }
 
 bool_t mqtt_server_publish_fresh_tonies_for_overlay(uint8_t overlay_id)
 {
+    mutex_lock(MUTEX_MQTT_SESSION);
     settings_t *settings = get_settings_id(overlay_id);
     if (settings == NULL || !settings->internal.config_used ||
         !settings->internal.freshnessCacheChanged)
     {
+        mutex_unlock(MUTEX_MQTT_SESSION);
         return FALSE;
     }
-
-    size_t cache_len = 0;
-    settings_get_u64_array_id("internal.freshnessCache",
-                              settings->internal.overlayNumber, &cache_len);
-    if (cache_len == 0)
+    bool_t synced = mqtt_fresh_tonies_sync(settings);
+    MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
+    if (synced && mqtt_fresh_tonies_next(state) != NULL)
     {
-        settings_set_bool_id("internal.freshnessCacheChanged", false,
-                             settings->internal.overlayNumber);
+        mqtt_mark_fresh_tonies_pending(settings, "overlay");
+    }
+    else if (synced)
+    {
         mqtt_clear_fresh_tonies_pending(settings);
-        return TRUE;
     }
-
-    mqtt_mark_fresh_tonies_pending(settings, "overlay");
-    for (size_t index = 0; index < MQTT_MAX_CONNECTIONS; index++)
-    {
-        MqttClientConnection *conn = &connections[index];
-        if (mqtt_connection_matches_box_overlay(conn, settings))
-            mqtt_fresh_tonies_sync_connection(conn, settings);
-    }
-
-    TRACE_INFO("MQTT fresh-tonies invalidation queued for %s entries=%" PRIuSIZE "\r\n",
-               settings->commonName, cache_len);
-    return TRUE;
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    return synced;
 }
 
 bool_t mqtt_server_publish_fresh_tonie_for_overlay(uint8_t overlay_id,
                                                    uint64_t uid)
 {
+    mutex_lock(MUTEX_MQTT_SESSION);
+    bool_t result = mqtt_server_publish_fresh_tonie_for_overlay_locked(overlay_id, uid);
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    return result;
+}
+
+bool_t mqtt_server_publish_fresh_tonie_for_overlay_locked(uint8_t overlay_id, uint64_t uid)
+{
     settings_t *settings = get_settings_id(overlay_id);
     if (settings == NULL || !settings->internal.config_used ||
+        fresh_tonies_reload_pending ||
         !settings->internal.freshnessCacheChanged ||
         !mqtt_fresh_tonies_cache_contains(settings, uid))
     {
         return FALSE;
     }
 
+    if (!mqtt_fresh_tonies_sync(settings)) return FALSE;
+    MqttFreshTonieEntry *entry = mqtt_fresh_tonie_find(mqtt_fresh_tonies_publish_state(settings), uid);
+    if (entry == NULL) return FALSE;
+    entry->generation = ++fresh_tonies_generation;
+    entry->delivered = FALSE;
+    entry->invalidated = TRUE;
+    entry->http_claims = 0;
+    mqtt_debug_fresh_generation(mqtt_fresh_tonies_publish_state(settings),
+                               "freshness_invalidated", uid, entry->generation);
     mqtt_mark_fresh_tonies_pending(settings, "tonie");
-    for (size_t index = 0; index < MQTT_MAX_CONNECTIONS; index++)
-    {
-        MqttClientConnection *conn = &connections[index];
-        if (!mqtt_connection_matches_box_overlay(conn, settings) ||
-            !mqtt_fresh_tonies_sync_connection(conn, settings))
-        {
-            continue;
-        }
-
-        MqttFreshTonieEntry *entry = mqtt_fresh_tonie_find(conn, uid);
-        if (conn->fresh_tonie_queued && uid == conn->fresh_tonie_queued_uid)
-            conn->fresh_tonie_requeued = TRUE;
-        if (entry != NULL && entry != conn->fresh_tonie_inflight)
-            entry->delivered = FALSE;
-    }
 
     char ruid[17];
     mqtt_uid_to_ruid(uid, ruid);
