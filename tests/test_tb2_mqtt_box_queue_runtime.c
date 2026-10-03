@@ -20,6 +20,14 @@ static error_t write_error;
 static tb2_mqtt_passthrough_session_t *completing;
 static const uint8_t publish[] = {0x30, 3, 0, 1, 'a'};
 static uint64_t expected_debug_message;
+static tb2_mqtt_passthrough_session_t *read_session;
+static TlsContext cloud_tls;
+static Socket box_socket, cloud_socket;
+static struct { uint8_t bytes[256]; size_t length; error_t result; } read_records[2][8];
+static size_t read_count[2], read_next[2];
+static unsigned read_calls[2], readiness_checks, processed_box, processed_cloud;
+static bool read_header, read_would_block;
+static unsigned replies_per_packet = 2;
 void mqtt_debug_test_reset(bool active, uint64_t now);
 void mqtt_debug_test_time(uint64_t now);
 unsigned mqtt_debug_test_count(const char *stage);
@@ -38,14 +46,71 @@ void osFreeMem(void *data) { free(data); }
 void osAcquireMutex(OsMutex *mutex) { assert(pthread_mutex_lock(mutex) == 0); }
 void osReleaseMutex(OsMutex *mutex) { assert(pthread_mutex_unlock(mutex) == 0); }
 bool_t tlsIsTxReady(TlsContext *tls) { (void)tls; return FALSE; }
+bool_t tlsIsRxReady(TlsContext *tls) { (void)tls; return FALSE; }
 TlsState tlsGetState(TlsContext *tls) { return tls->state; }
 error_t tlsConnect(TlsContext *tls) { (void)tls; return NO_ERROR; }
 error_t tlsWrite(TlsContext *tls, const void *data, size_t size, size_t *written, uint_t flags)
 {
     (void)tls; (void)data; (void)flags;
     sends++;
+    if (read_session && tls == read_session->box_tls) {
+        if (!read_session->box_io_ops || !read_session->box_io_bytes) {
+            *written = 0;
+            return ERROR_WOULD_BLOCK;
+        }
+        read_session->box_io_ops--;
+        if (!write_error) {
+            assert(size <= read_session->box_io_bytes);
+            read_session->box_io_bytes -= size;
+        }
+    }
     *written = write_error ? 0 : size;
     return write_error;
+}
+
+uint_t tcpWaitForEvents(Socket *socket, uint_t events, systime_t timeout)
+{
+    assert(events == SOCKET_EVENT_RX_READY && timeout == 0);
+    readiness_checks++;
+    if (!read_session) return 0;
+    unsigned side = socket == &cloud_socket;
+    return read_next[side] < read_count[side] || (!side && read_would_block) ? events : 0;
+}
+
+/* Controlled TLS boundary: Box records need header/body socket operations;
+ * the coupled Cloud read intentionally does not consume the Box budget. */
+error_t tlsRead(TlsContext *tls, void *data, size_t capacity, size_t *received, uint_t flags)
+{
+    assert(read_session && flags == 0);
+    assert(!read_session->box_write_head && !read_session->box_write_active);
+    unsigned side = tls == &cloud_tls;
+    read_calls[side]++;
+    *received = 0;
+    if (!side) {
+        if (read_would_block) {
+            assert(read_session->box_io_ops);
+            read_session->box_io_ops--;
+            return ERROR_WOULD_BLOCK;
+        }
+        if (!read_header) {
+            if (!read_session->box_io_ops) return ERROR_WOULD_BLOCK;
+            read_session->box_io_ops--;
+            read_header = true;
+        }
+        if (!read_session->box_io_ops) return ERROR_WOULD_BLOCK;
+        read_session->box_io_ops--;
+    }
+    assert(read_next[side] < read_count[side]);
+    size_t length = read_records[side][read_next[side]].length;
+    assert(length <= capacity);
+    if (!side) {
+        assert(length <= read_session->box_io_bytes);
+        read_session->box_io_bytes -= length;
+        read_header = false;
+    }
+    memcpy(data, read_records[side][read_next[side]].bytes, length);
+    *received = length;
+    return read_records[side][read_next[side]++].result;
 }
 
 static error_t tb2_mqtt_capture_packet_ex(tb2_mqtt_capture_t *capture,
@@ -65,11 +130,6 @@ static void tb2_mqtt_add_nocloud_stats(tb2_mqtt_passthrough_session_t *s,
 static tb2_mqtt_packet_id_entry_t *tb2_mqtt_packet_id_find_wire(
     tb2_mqtt_passthrough_session_t *s, uint16_t id) { return NULL; }
 bool_t tb2_mqtt_passthrough_is_enabled(void) { return TRUE; }
-static error_t tb2_mqtt_forward_ready(tb2_mqtt_passthrough_session_t *s, bool_t direction)
-{
-    /* Actual socket and TLS boundaries are covered by the vendor runtime test. */
-    return NO_ERROR;
-}
 
 static void complete(void *context, error_t error)
 {
@@ -97,8 +157,11 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *s,
     bool_t direction, const uint8_t *packet, size_t size, size_t header)
 {
     processed++;
+    if (direction) processed_box++;
+    else processed_cloud++;
     tb2_mqtt_local_publish_t replies[] = {item(s), item(s)};
-    assert(tb2_mqtt_passthrough_submit_local_batch(s, replies, 2).status == MQTT_DELIVERY_QUEUED);
+    if (replies_per_packet)
+        assert(tb2_mqtt_passthrough_submit_local_batch(s, replies, replies_per_packet).status == MQTT_DELIVERY_QUEUED);
     return NO_ERROR;
 }
 
@@ -115,11 +178,14 @@ static void init(tb2_mqtt_passthrough_session_t *s, TlsContext *tls, settings_t 
     s->capture_opened = TRUE;
     s->box_io_ops = 4;
     s->box_io_bytes = 16384;
+    s->packets_remaining = TB2_MQTT_PACKETS_PER_TICK;
     s->last_box_rx = now;
     tls->state = TLS_STATE_APPLICATION_DATA;
     pthread_mutex_init(&s->io_mutex, NULL);
     atomic_init(&s->box_write_error, NO_ERROR);
     atomic_init(&s->local_publish_error, NO_ERROR);
+    atomic_init(&s->upstream_failed, FALSE);
+    atomic_init(&s->capture_failed, FALSE);
 }
 
 static void finish(tb2_mqtt_passthrough_session_t *s)
@@ -129,10 +195,149 @@ static void finish(tb2_mqtt_passthrough_session_t *s)
     free(s->box_stream.data);
     free(s->upstream_stream.data);
     pthread_mutex_destroy(&s->io_mutex);
+    if (read_session == s) read_session = NULL;
+}
+
+static void prepare_drain(tb2_mqtt_passthrough_session_t *s, TlsContext *tls, settings_t *settings)
+{
+    init(s, tls, settings);
+    completing = read_session = s;
+    s->box_socket = &box_socket;
+    memset(&cloud_tls, 0, sizeof(cloud_tls));
+    cloud_tls.state = TLS_STATE_APPLICATION_DATA;
+    s->upstream.tlsContext = &cloud_tls;
+    s->upstream.socket = &cloud_socket;
+    memset(read_count, 0, sizeof(read_count));
+    memset(read_next, 0, sizeof(read_next));
+    memset(read_calls, 0, sizeof(read_calls));
+    read_header = read_would_block = false;
+    readiness_checks = processed_box = processed_cloud = 0;
+    write_error = NO_ERROR;
+    replies_per_packet = 0;
+}
+
+static void queue_record(unsigned side, const uint8_t *bytes, size_t length, error_t result)
+{
+    assert(side < 2 && read_count[side] < arraysize(read_records[side]));
+    assert(length <= sizeof(read_records[side][0].bytes));
+    memcpy(read_records[side][read_count[side]].bytes, bytes, length);
+    read_records[side][read_count[side]].length = length;
+    read_records[side][read_count[side]++].result = result;
+}
+
+static void test_bounded_ready_reads_and_write_priority(void)
+{
+    tb2_mqtt_passthrough_session_t s;
+    TlsContext tls;
+    settings_t settings;
+    prepare_drain(&s, &tls, &settings);
+    replies_per_packet = 1;
+    unsigned sent_before = sends;
+    queue_record(0, publish, 3, NO_ERROR);
+    queue_record(0, publish + 3, sizeof(publish) - 3, ERROR_WOULD_BLOCK);
+    assert(tb2_mqtt_passthrough_task(&s) == NO_ERROR);
+    assert(read_calls[0] == 2 && processed_box == 1 && s.box_io_ops == 0);
+    assert(s.box_stream.length == 0 && s.box_write_count == 1 && sends == sent_before);
+    assert(tb2_mqtt_passthrough_task(&s) == NO_ERROR);
+    assert(s.box_write_count == 0 && sends == sent_before + 1 && processed_box == 1);
+
+    read_would_block = true;
+    for (unsigned i = 1; i <= 3; i++) {
+        assert(tb2_mqtt_passthrough_task(&s) == NO_ERROR);
+        assert(read_calls[0] == 2 + i); /* One attempt, no idle spin. */
+    }
+    read_would_block = false;
+    unsigned checks_before = readiness_checks;
+    assert(tb2_mqtt_passthrough_task(&s) == NO_ERROR);
+    assert(read_calls[0] == 5 && readiness_checks == checks_before + 2);
+
+    tb2_mqtt_local_publish_t pending = item(&s);
+    assert(tb2_mqtt_passthrough_submit_local_batch(&s, &pending, 1).status == MQTT_DELIVERY_QUEUED);
+    queue_record(0, publish, sizeof(publish), NO_ERROR);
+    write_error = ERROR_WOULD_BLOCK;
+    assert(tb2_mqtt_passthrough_task(&s) == NO_ERROR);
+    assert(read_calls[0] == 5 && s.box_write_active && processed_box == 1);
+    write_error = NO_ERROR;
+    assert(tb2_mqtt_passthrough_task(&s) == NO_ERROR);
+    assert(read_calls[0] == 6 && processed_box == 2 && !s.box_write_count && s.box_io_ops == 0);
+    finish(&s);
+}
+
+static void test_shared_packet_budget_and_direction_fairness(void)
+{
+    tb2_mqtt_passthrough_session_t s;
+    TlsContext tls;
+    settings_t settings;
+    prepare_drain(&s, &tls, &settings);
+    uint8_t batch[16 * sizeof(publish)];
+    for (size_t i = 0; i < 16; i++) memcpy(batch + i * sizeof(publish), publish, sizeof(publish));
+    s.packets_remaining = 0;
+    assert(tb2_mqtt_process_stream(&s, FALSE, batch, sizeof(batch)) == NO_ERROR);
+    queue_record(0, batch, sizeof(batch) / 2, NO_ERROR);
+    queue_record(0, batch, sizeof(batch) / 2, NO_ERROR);
+    for (unsigned visit = 0; visit < 6; visit++) {
+        size_t cloud_before = s.upstream_stream.length;
+        size_t box_before = s.box_stream.length;
+        unsigned reads_before = read_calls[0];
+        assert(tb2_mqtt_passthrough_task(&s) == NO_ERROR);
+        assert(processed_box + processed_cloud == (visit + 1) * TB2_MQTT_PACKETS_PER_TICK);
+        assert(s.packets_remaining == 0);
+        assert(tb2_mqtt_process_stream(&s, TRUE, NULL, 0) == NO_ERROR);
+        assert(processed_box + processed_cloud == (visit + 1) * TB2_MQTT_PACKETS_PER_TICK);
+        if (visit % 2 == 0) {
+            assert(s.upstream_stream.length == cloud_before);
+            assert(read_calls[0] > reads_before || s.box_stream.length < box_before);
+        } else {
+            assert(s.upstream_stream.length == cloud_before - 4 * sizeof(publish));
+            assert(s.box_stream.length == box_before && read_calls[0] == reads_before);
+        }
+    }
+    assert(processed_box == 12 && processed_cloud == 12);
+    finish(&s);
+}
+
+static void test_coupled_cloud_read_bound_and_failure_origin(void)
+{
+    tb2_mqtt_passthrough_session_t s;
+    TlsContext tls;
+    settings_t settings;
+    prepare_drain(&s, &tls, &settings);
+    queue_record(1, publish, sizeof(publish), ERROR_TIMEOUT);
+    queue_record(1, publish, sizeof(publish), NO_ERROR);
+    assert(tb2_mqtt_passthrough_task(&s) == NO_ERROR);
+    assert(read_calls[1] == 1 && processed_cloud == 1 && !s.upstream_failed);
+    assert(tb2_mqtt_passthrough_task(&s) == NO_ERROR);
+    assert(read_calls[1] == 2 && processed_cloud == 2 && !s.upstream_failed);
+    finish(&s);
+
+    for (unsigned side = 0; side < 2; side++) {
+        for (unsigned failure = 0; failure < 2; failure++) {
+            prepare_drain(&s, &tls, &settings);
+            queue_record(side, publish, 0, failure ? ERROR_READ_FAILED : NO_ERROR);
+            error_t expected = failure ? ERROR_READ_FAILED : ERROR_END_OF_STREAM;
+            assert(tb2_mqtt_passthrough_task(&s) == expected);
+            assert(s.upstream_failed == (side == 1));
+            finish(&s);
+        }
+        prepare_drain(&s, &tls, &settings);
+        const uint8_t invalid_length[] = {0x30,0x80,0x80,0x80,0x80};
+        queue_record(side, invalid_length, sizeof(invalid_length), NO_ERROR);
+        assert(tb2_mqtt_passthrough_task(&s) == ERROR_INVALID_LENGTH);
+        assert(s.upstream_failed == (side == 1));
+        finish(&s);
+    }
+    prepare_drain(&s, &tls, &settings);
+    tb2_mqtt_local_publish_t pending = item(&s);
+    assert(tb2_mqtt_passthrough_submit_local_batch(&s, &pending, 1).status == MQTT_DELIVERY_QUEUED);
+    write_error = ERROR_WRITE_FAILED;
+    assert(tb2_mqtt_passthrough_task(&s) == ERROR_WRITE_FAILED);
+    assert(!s.upstream_failed && !read_calls[0] && !read_calls[1]);
+    finish(&s);
 }
 
 int main(void)
 {
+    assert(pthread_mutex_init(&mqtt_passthrough_status.mutex, NULL) == 0);
     tb2_mqtt_passthrough_session_t s, other;
     TlsContext tls, tls_other;
     settings_t settings, settings_other;
@@ -179,7 +384,14 @@ int main(void)
         2, NULL, NULL, FALSE, "connack", 0, 0, FALSE, 0, &write) == NO_ERROR);
     assert(tb2_mqtt_box_write_append(&s, write) == NO_ERROR);
     assert(!tb2_mqtt_passthrough_is_established(&s));
+    assert(!s.status_connected && mqtt_passthrough_status.connected_sessions == 0);
+    write_error = ERROR_WOULD_BLOCK;
+    assert(tb2_mqtt_box_write_pump(&s) == NO_ERROR);
+    assert(!s.status_connected && mqtt_passthrough_status.connected_sessions == 0);
+    write_error = NO_ERROR;
     assert(tb2_mqtt_box_write_pump(&s) == NO_ERROR && tb2_mqtt_passthrough_is_established(&s));
+    assert(s.status_connected && mqtt_passthrough_status.connected_sessions == 1);
+    assert(tb2_mqtt_box_write_pump(&s) == NO_ERROR && mqtt_passthrough_status.connected_sessions == 1);
     assert(tb2_mqtt_passthrough_submit_local_batch(&s, pair, 1).status == MQTT_DELIVERY_QUEUED);
     s.keepalive = 10;
     s.last_box_rx = now;
@@ -256,7 +468,12 @@ int main(void)
     assert(cJSON_GetObjectItem(mqtt_debug_test_last("tx_complete"), "retry_of") == NULL);
     finish(&s);
     mqtt_debug_test_reset(false, 0);
+    test_bounded_ready_reads_and_write_priority();
+    test_shared_packet_budget_and_direction_fairness();
+    test_coupled_cloud_read_bound_and_failure_origin();
     puts("TB2 Box queue: deferred completion, FIFO limits, atomic admission, independent boxes, observer reservation, CONNACK and keepalive passed");
     puts("TB2 diagnostics: queue/write separation, callback identity, partial parser and ACK/retry correlation passed");
+    puts("TB2 receive drain: shared budgets, partial returns, direction fairness, idle waits and coupled Cloud read limit passed");
+    assert(pthread_mutex_destroy(&mqtt_passthrough_status.mutex) == 0);
     return 0;
 }

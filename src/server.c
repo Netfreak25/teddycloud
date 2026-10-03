@@ -31,6 +31,7 @@
 #include "server_helpers.h"       // for httpServerUriNotFoundCallback, cus...
 #include "settings.h"             // for settings_t, settings_get_string
 #include "mqtt_server.h"          // for mqtt_server_init, mqtt_server_task
+#include "mqtt_time.h"
 #include "stdbool.h"              // for true, bool, false
 #include "tls.h"                  // for _TlsContext, tlsLoadCertificate
 #include "tls_adapter.h"          // for tls_context_key_log_init, tlsCache
@@ -73,11 +74,28 @@
 #include "toniesJson.h"           // for tonieboxes_update, tonies_deinit
 
 #define APP_HTTP_MAX_CONNECTIONS 32
+#define SERVER_MAINTENANCE_INTERVAL_MS 250U
 HttpConnection httpConnections[APP_HTTP_MAX_CONNECTIONS];
 HttpConnection httpsWebConnections[APP_HTTP_MAX_CONNECTIONS];
 HttpConnection httpsApiConnections[APP_HTTP_MAX_CONNECTIONS];
 
 size_t openRequestsLast = 0;
+
+/** Keep non-MQTT maintenance at its existing cadence, independent of RX load. */
+static bool_t server_maintenance_due(uint32_t *last, bool_t *valid)
+{
+    uint32_t now;
+    if (!mqtt_monotonic_ms(&now))
+    {
+        *valid = FALSE;
+        return TRUE; // Do not stop maintenance if the platform clock fails.
+    }
+    if (*valid && (uint32_t)(now - *last) < SERVER_MAINTENANCE_INTERVAL_MS)
+        return FALSE;
+    *last = now;
+    *valid = TRUE;
+    return TRUE;
+}
 
 enum eRequestMethod
 {
@@ -1167,10 +1185,14 @@ void server_init(bool test)
     systime_t last = osGetSystemTime();
     size_t openWebConnectionsLast = 0;
     size_t openAPIConnectionsLast = 0;
+    uint32_t maintenance_last = 0;
+    bool_t maintenance_valid = FALSE;
     while (!settings_get_bool("internal.exit"))
     {
-        osDelayTask(250);
+        osDelayTask(mqtt_server_poll_interval());
         mqtt_server_task();
+        if (!server_maintenance_due(&maintenance_last, &maintenance_valid))
+            continue;
         settings_loop();
         systime_t now = osGetSystemTime();
         if ((now - last) / 1000 > 5)

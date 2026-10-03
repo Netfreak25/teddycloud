@@ -73,7 +73,8 @@ class Tb2MqttPassthroughContractTests(unittest.TestCase):
         )
         for symbol in (
             "tb2_mqtt_stream_append",
-            "while (stream->length > 0 && processed < TB2_MQTT_BOX_IO_OPS_PER_TICK)",
+            "while (stream->length > 0 && session->packets_remaining > 0)",
+            "session->packets_remaining--",
             "tb2_mqtt_packet_size",
             "ERROR_WOULD_BLOCK",
             "packet_size > stream->length",

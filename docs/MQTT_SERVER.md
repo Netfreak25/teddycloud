@@ -200,6 +200,13 @@ The separate **ICI Upstream** navbar tag polls
 `disabled`, `ready`, `connecting`, `connected` and `error`; only a connected
 upstream is green. The API contains no credential values, certificate
 paths, payloads or box identifiers.
+The status describes the actual TONIES connection, not merely the number of
+accepted local box sockets. An ordinary box disconnect or a box-side transport
+failure alone leaves an enabled service `ready` when no session remains. The
+actual local close reason remains available in the recording and server log.
+A genuine TONIES or capture failure remains an error even if this coupled
+transport also closes the box session. This uses the existing aggregate status
+fields, not a new per-box runtime API.
 
 Each session writes `session.json` and a full Base64 `traffic.jsonl` capture.
 
@@ -224,9 +231,13 @@ nonblocking socket callbacks. The upstream transport retains its existing
 
 The MQTT loop alone operates established box TLS. HTTP threads submit owned
 packets to a FIFO bounded to 32 entries and 1 MiB including copied metadata;
-there is one active TLS write. Each loop pass permits at most four socket
-operations or 16 KiB per box. Hitting this fairness budget is not a socket
-failure. There are no additional threads, persistent queues or offline replay.
+there is one active TLS write. Each loop pass permits at most four box socket
+operations, 16 KiB of box socket data and four complete MQTT packets. The packet
+budget is shared across both directions and all parser calls in that pass.
+Available TLS fragments are drained within those limits instead of waiting for
+an idle scheduling interval per fragment. Hitting a fairness budget is not a
+socket failure. There are no additional threads, persistent queues or offline
+replay; upstream I/O retains its existing synchronous transport boundaries.
 
 `ERROR_TIMEOUT` and `ERROR_WOULD_BLOCK` preserve a usable context and resume
 the unchanged plaintext remainder on later loop passes. Credited bytes are
@@ -262,6 +273,13 @@ not a general MQTT threading redesign or independent upstream session support.
 
 Diagnostics distinguish send backpressure, resumed delivery, the no-progress
 deadline, MQTT keepalive expiry and fatal errors without additional payloads.
+For fatal box socket operations, diagnostics preserve the immediately captured
+native `errno` or Winsock error alongside the TeddyCloud/TLS error. An unavailable
+native error is not inferred from a later operation or a stale global value.
+Box logs such as `STATE_SHUT_DOWN` and `Idle timer expired` are observations,
+not MQTT disconnect commands: they never close the connection early or suppress
+a required acknowledgement. A subsequent real transport failure remains a
+separate event; the shutdown log alone does not establish its cause.
 Capture first records `box_write_pending` with `forwarded=false`,
 then records the original action only after the complete box write succeeds, or
 `box_write_failed` otherwise. It preserves original and rewritten packet bytes.
@@ -325,7 +343,9 @@ connections without restarting TeddyCloud. See `TB2_SERVER_CERTIFICATES.md`.
 `src/server.c` owns the lifecycle:
 
 - `mqtt_server_init()` is called after the HTTP/HTTPS server contexts start.
-- `mqtt_server_task()` runs once per main loop iteration after a 250 ms delay.
+- MQTT is serviced at a 10 ms interval while an established packet-aware TB2
+  session exists; without one the loop retains its 250 ms idle interval.
+  Non-MQTT maintenance keeps its existing cadence.
 - `mqtt_server_deinit()` runs during server shutdown.
 
 `mqtt_server_init()` exits immediately when `mqtt_server.enabled` is false. When
@@ -334,6 +354,11 @@ TeddyCloud base directory, loads the PEM certificate/key into memory, opens a
 TCP socket, binds to `IP_ADDR_ANY:mqtt_server.port` and listens with a backlog
 of 5. Readiness is polled without waiting; accepted sockets use the finite
 I/O timeout described above.
+The shorter active interval and bounded per-box work improve draining without a
+new scheduler thread or queue. Keepalive, retry and send-stall deadlines remain
+unchanged. The synchronous TONIES path and coupled failure handling are not
+replaced by an independent worker or offline-autonomous box session. This change
+does not repair a closed TCP/TLS connection; hardware acceptance remains separate.
 
 The implementation currently has these fixed limits:
 
@@ -1063,6 +1088,11 @@ not automatically blamed for the close. Normal repeated WOULD_BLOCK observations
 are aggregated. Slow stages (100 ms or more) and sustained stalls are throttled
 to at most one summary per second per measured category. HASS timing measures
 the local event/enqueue call, not delivery to the external broker.
+For burst analysis, compare the box's `elapsedSinceBoot`/`timeOnBox` with TC's
+receive time and follow each message's TLS chunks through parser completion.
+Old log messages draining after startup must not be mistaken for current box
+failures. Native socket errors and TLS errors describe distinct boundaries;
+shutdown log messages provide context but do not replace transport evidence.
 
 Before reliable box assignment, only a bounded RAM prelude of transport metadata
 is available. Peer IP, MQTT client ID or a failed TLS handshake do not constitute

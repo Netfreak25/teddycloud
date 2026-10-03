@@ -32,6 +32,8 @@ uint_t tcpWaitForEvents(Socket *socket, uint_t eventMask, systime_t timeout);
 
 #define MQTT_MAX_PACKET_SIZE 4096
 #define MQTT_MAX_CONNECTIONS 32
+#define MQTT_ACTIVE_POLL_INTERVAL_MS 10U
+#define MQTT_IDLE_POLL_INTERVAL_MS 250U
 #define MQTT_MAX_SUBSCRIPTIONS 32
 #define MQTT_SETTINGS_DESIRED_PAYLOAD_SIZE 2048
 #define MQTT_SETTINGS_DESIRED_MAX_ATTEMPTS 3
@@ -1666,6 +1668,24 @@ bool_t mqtt_server_has_active_box_connection(uint8_t overlay_id)
     }
 
     return FALSE;
+}
+
+uint32_t mqtt_server_poll_interval(void)
+{
+    uint32_t interval = MQTT_IDLE_POLL_INTERVAL_MS;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
+    {
+        MqttClientConnection *conn = &connections[i];
+        if (conn->active && conn->established && conn->passthrough != NULL &&
+            tb2_mqtt_passthrough_is_established(conn->passthrough))
+        {
+            interval = MQTT_ACTIVE_POLL_INTERVAL_MS;
+            break;
+        }
+    }
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    return interval;
 }
 
 static void mqtt_touch_box_connection(MqttClientConnection *conn)
@@ -3610,9 +3630,13 @@ void mqtt_server_task()
     if (serverSocket == NULL)
         return;
 
-    // 1. Process active connections
-    for (size_t i = 0; i < MQTT_MAX_CONNECTIONS; i++)
+    // Visit each slot once; a busy early slot must not always go first.
+    static size_t first_slot = 0;
+    const size_t start_slot = first_slot;
+    first_slot = (first_slot + 1) % MQTT_MAX_CONNECTIONS;
+    for (size_t offset = 0; offset < MQTT_MAX_CONNECTIONS; offset++)
     {
+        const size_t i = (start_slot + offset) % MQTT_MAX_CONNECTIONS;
         MqttClientConnection *conn = &connections[i];
         if (conn->active)
         {

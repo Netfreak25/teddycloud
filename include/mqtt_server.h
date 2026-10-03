@@ -19,6 +19,8 @@ void mqtt_server_debug_hass_duration(client_ctx_t *client_ctx, uint64_t started_
 void mqtt_server_init();
 error_t mqtt_server_reload_certificate();
 void mqtt_server_task();
+/** Main-loop cadence: active packet-aware TB2 sessions need prompt TLS draining. */
+uint32_t mqtt_server_poll_interval(void);
 void mqtt_server_deinit();
 bool_t mqtt_server_has_active_box_connection(uint8_t overlay_id);
 bool_t mqtt_server_has_playback_control(uint8_t overlay_id);

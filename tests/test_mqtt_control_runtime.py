@@ -24,7 +24,7 @@ def main():
         "mqtt_control_delivery_create", "mqtt_submit_control_locked",
         "mqtt_server_publish_app_control_for_overlay", "mqtt_build_publish_packet",
         "mqtt_server_publish_ping_for_overlay", "mqtt_server_publish_shutdown_for_overlay",
-        "mqtt_local_settings_completed",
+        "mqtt_local_settings_completed", "mqtt_server_poll_interval",
     )
     functions = []
     for name in names:
@@ -35,8 +35,16 @@ def main():
     start = source.index("typedef struct {\n    char topic[256];")
     end = source.index("} MqttClientConnection;", start) + len("} MqttClientConnection;")
     declarations = "\n".join(re.findall(
-        r"^#define MQTT_MAX_(?:PACKET_SIZE|CONNECTIONS|SUBSCRIPTIONS) .+$", source, re.M))
+        r"^#define MQTT_(?:MAX_(?:PACKET_SIZE|CONNECTIONS|SUBSCRIPTIONS)|(?:ACTIVE|IDLE)_POLL_INTERVAL_MS) .+$", source, re.M))
     declarations += "\n" + source[start:end]
+    server = (root / "src/server.c").read_text(encoding="utf-8")
+    declarations += "\n" + re.search(r"^#define SERVER_MAINTENANCE_INTERVAL_MS .+$", server, re.M).group()
+    functions.append(re.search(r"^static bool_t server_maintenance_due\([^;]*?\n\{[\s\S]*?\n\}", server, re.M).group())
+    assert server.index("mqtt_server_task();") < server.index("if (!server_maintenance_due(") < server.index("settings_loop();")
+    assert "osDelayTask(mqtt_server_poll_interval());" in server
+    task = source[source.index("void mqtt_server_task()"):source.index("void mqtt_server_deinit()")]
+    assert "first_slot = (first_slot + 1) % MQTT_MAX_CONNECTIONS;" in task
+    assert "const size_t i = (start_slot + offset) % MQTT_MAX_CONNECTIONS;" in task
     declarations += "\n" + re.search(
         r"typedef struct \{\n    MqttClientConnection \*conn;\n"
         r"    tb2_mqtt_passthrough_session_t \*session;\n    char command\[16\];[\s\S]*?\n\} MqttControlDelivery;",

@@ -32,6 +32,13 @@ static void *deferred_context[2];
 static size_t deferred_count;
 static uint64_t settings_revisions[MQTT_TB2_SETTING_COUNT];
 static unsigned settings_writes;
+static bool relay_established = true, monotonic_valid = true;
+static uint32_t monotonic_now;
+
+bool_t tb2_mqtt_passthrough_is_established(const tb2_mqtt_passthrough_session_t *session)
+{ assert(session); return relay_established; }
+static bool_t mqtt_monotonic_ms(uint32_t *value)
+{ *value = monotonic_now; return monotonic_valid; }
 
 static void mqtt_copy_u64_settings_array(settings_t *settings, const char *key, uint64_t *out)
 { assert(settings == &boxes[1] && strstr(key, "Revisions")); memcpy(out, settings_revisions, sizeof(settings_revisions)); }
@@ -99,6 +106,36 @@ mqtt_delivery_result_t tb2_mqtt_passthrough_submit_local_batch(
     return mqtt_delivery_result(MQTT_DELIVERY_QUEUED, NO_ERROR);
 }
 /* SERVER_FUNCTIONS */
+static void test_poll_and_maintenance_cadence(void)
+{
+    assert(mqtt_server_poll_interval() == 250);
+    MqttClientConnection *conn = &connections[MQTT_MAX_CONNECTIONS - 1];
+    conn->active = true; conn->passthrough = (void *)1;
+    assert(mqtt_server_poll_interval() == 250);
+    conn->established = true;
+    assert(mqtt_server_poll_interval() == 10);
+    relay_established = false;
+    assert(mqtt_server_poll_interval() == 250);
+    relay_established = true;
+    conn->active = false;
+    assert(mqtt_server_poll_interval() == 250);
+    uint32_t last = 0;
+    bool_t valid = FALSE;
+    monotonic_now = 1000;
+    assert(server_maintenance_due(&last, &valid));
+    for (monotonic_now = 1010; monotonic_now < 1250; monotonic_now += 10)
+        assert(!server_maintenance_due(&last, &valid));
+    assert(server_maintenance_due(&last, &valid));
+    last = UINT32_MAX - 100; monotonic_now = 148;
+    assert(!server_maintenance_due(&last, &valid));
+    monotonic_now++;
+    assert(server_maintenance_due(&last, &valid));
+    monotonic_valid = false;
+    assert(server_maintenance_due(&last, &valid) && !valid);
+    monotonic_valid = true;
+    memset(connections, 0, sizeof(connections));
+}
+
 static void complete_all(error_t error)
 {
     size_t count = deferred_count;
@@ -107,6 +144,7 @@ static void complete_all(error_t error)
 }
 int main(void)
 {
+    test_poll_and_maintenance_cadence();
     boxes[1].commonName = "AABBCCDDEEFF";
     boxes[1].internal.config_used = true;
     boxes[1].internal.overlayNumber = 1;

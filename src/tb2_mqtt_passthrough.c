@@ -55,6 +55,7 @@
 #define TB2_MQTT_TUNNEL_IO_TIMEOUT_MS 500
 #define TB2_MQTT_BOX_IO_OPS_PER_TICK 4U
 #define TB2_MQTT_BOX_IO_BYTES_PER_TICK 16384U
+#define TB2_MQTT_PACKETS_PER_TICK 4U
 #define TB2_MQTT_BOX_WRITE_STALL_MS 120000U
 #define TB2_MQTT_INFLIGHT_MAX 32U
 #define TB2_MQTT_BUFFER_LIMIT (1024U * 1024U)
@@ -138,6 +139,7 @@ typedef struct
     OsMutex mutex;
     uint32_t session_counter;
     uint32_t active_sessions;
+    uint32_t connected_sessions;
     char state[16];
     char error_code[32];
     uint64_t bytes_box_to_upstream;
@@ -231,12 +233,17 @@ struct tb2_mqtt_passthrough_session
     OsMutex io_mutex;
     atomic_int box_write_error;
     atomic_int local_publish_error;
+    atomic_bool upstream_failed;
+    atomic_bool capture_failed;
+    bool_t status_connected;
     tb2_mqtt_box_write_t *box_write_head;
     tb2_mqtt_box_write_t *box_write_tail;
     size_t box_write_count;
     size_t box_write_bytes;
     size_t box_io_bytes;
     unsigned box_io_ops;
+    unsigned packets_remaining;
+    bool_t box_rx_first;
     uint32_t box_last_progress;
     bool_t box_progress_clock;
     bool_t box_write_stalled;
@@ -1194,16 +1201,24 @@ static void tb2_mqtt_rotate_completed_captures(settings_t *settings)
 static void tb2_mqtt_status_start(void)
 {
     osAcquireMutex(&mqtt_passthrough_status.mutex);
+    if (mqtt_passthrough_status.active_sessions == 0)
+        mqtt_passthrough_status.error_code[0] = '\0';
     mqtt_passthrough_status.active_sessions++;
     mqtt_passthrough_status.last_attempt = time(NULL);
-    osStrcpy(mqtt_passthrough_status.state, "connecting");
-    mqtt_passthrough_status.error_code[0] = '\0';
+    osStrcpy(mqtt_passthrough_status.state,
+             mqtt_passthrough_status.connected_sessions ? "connected" : "connecting");
     osReleaseMutex(&mqtt_passthrough_status.mutex);
 }
 
-static void tb2_mqtt_status_connected(void)
+static void tb2_mqtt_status_connected(tb2_mqtt_passthrough_session_t *session)
 {
     osAcquireMutex(&mqtt_passthrough_status.mutex);
+    if (!session->status_connected)
+    {
+        session->status_connected = TRUE;
+        mqtt_passthrough_status.connected_sessions++;
+        mqtt_passthrough_status.last_success = time(NULL);
+    }
     osStrcpy(mqtt_passthrough_status.state, "connected");
     osReleaseMutex(&mqtt_passthrough_status.mutex);
 }
@@ -1222,35 +1237,36 @@ static void tb2_mqtt_status_add_bytes(bool_t box_to_upstream, size_t length)
     osReleaseMutex(&mqtt_passthrough_status.mutex);
 }
 
-static void tb2_mqtt_status_finish(bool_t success, const char *error_code)
+/** A coupled session ends for either peer. Preserve real upstream/capture
+ * failures, but never turn a local Box close into a TONIES error. */
+static void tb2_mqtt_status_finish(tb2_mqtt_passthrough_session_t *session,
+                                  const char *error_code)
 {
     osAcquireMutex(&mqtt_passthrough_status.mutex);
+    if (session->status_connected && mqtt_passthrough_status.connected_sessions)
+        mqtt_passthrough_status.connected_sessions--;
     if (mqtt_passthrough_status.active_sessions > 0)
     {
         mqtt_passthrough_status.active_sessions--;
     }
-    if (!osStrcmp(error_code, "disabled"))
+    bool_t relay_failed = atomic_load(&session->upstream_failed) ||
+        atomic_load(&session->capture_failed);
+    if (relay_failed)
     {
-        mqtt_passthrough_status.error_code[0] = '\0';
-        osStrcpy(mqtt_passthrough_status.state,
-                 mqtt_passthrough_status.active_sessions > 0 ? "connected" : "ready");
-    }
-    else if (success)
-    {
-        mqtt_passthrough_status.last_success = time(NULL);
-        mqtt_passthrough_status.error_code[0] = '\0';
-        osStrcpy(mqtt_passthrough_status.state,
-                 mqtt_passthrough_status.active_sessions > 0 ? "connected" : "ready");
-    }
-    else
-    {
-        osStrncpy(mqtt_passthrough_status.error_code, error_code,
+        const char *reason = atomic_load(&session->upstream_failed) ?
+            (!osStrcmp(error_code, "connect_failed") ? "connect_failed" : "upstream_stream_failed") :
+            (!osStrcmp(error_code, "capture_finalize_failed") ? error_code : "capture_write_failed");
+        osStrncpy(mqtt_passthrough_status.error_code, reason,
                   sizeof(mqtt_passthrough_status.error_code) - 1);
-        if (mqtt_passthrough_status.active_sessions == 0)
-        {
-            osStrcpy(mqtt_passthrough_status.state, "error");
-        }
     }
+    else if (mqtt_passthrough_status.active_sessions == 0)
+    {
+        mqtt_passthrough_status.error_code[0] = '\0';
+    }
+    osStrcpy(mqtt_passthrough_status.state,
+        mqtt_passthrough_status.connected_sessions ? "connected" :
+        mqtt_passthrough_status.error_code[0] ? "error" :
+        mqtt_passthrough_status.active_sessions ? "connecting" : "ready");
     osReleaseMutex(&mqtt_passthrough_status.mutex);
 }
 
@@ -1258,7 +1274,8 @@ static void tb2_mqtt_status_attempt_failed(const char *error_code)
 {
     osAcquireMutex(&mqtt_passthrough_status.mutex);
     mqtt_passthrough_status.last_attempt = time(NULL);
-    osStrcpy(mqtt_passthrough_status.state, "error");
+    osStrcpy(mqtt_passthrough_status.state,
+             mqtt_passthrough_status.connected_sessions ? "connected" : "error");
     osStrncpy(mqtt_passthrough_status.error_code, error_code,
               sizeof(mqtt_passthrough_status.error_code) - 1);
     osReleaseMutex(&mqtt_passthrough_status.mutex);
@@ -1278,11 +1295,13 @@ static error_t tb2_mqtt_tls_write_all(TlsContext *destination, const uint8_t *da
             error, length - offset, written, debug_started);
         if (error)
         {
+            session->upstream_failed = TRUE;
             tb2_mqtt_trace_error("tls_write", error);
             return error;
         }
         if (written == 0)
         {
+            session->upstream_failed = TRUE;
             tb2_mqtt_trace_error("tls_write_zero", ERROR_WRITE_FAILED);
             return ERROR_WRITE_FAILED;
         }
@@ -1294,6 +1313,38 @@ static error_t tb2_mqtt_tls_write_all(TlsContext *destination, const uint8_t *da
 error_t tb2_mqtt_passthrough_box_write_error(const tb2_mqtt_passthrough_session_t *session)
 {
     return session != NULL ? atomic_load(&session->box_write_error) : NO_ERROR;
+}
+
+/** Called with the native error captured immediately after send/recv. Diagnostic
+ * allocation or logging must never replace errno/WSAGetLastError evidence. */
+static void tb2_mqtt_socket_failure(tb2_mqtt_passthrough_session_t *session,
+    bool_t sending, int result, int native_error, size_t requested)
+{
+    const char *operation = sending ? "send" : "recv";
+    const char *stage = sending ? "socket_tx_failed" :
+        result == 0 ? "socket_rx_closed" : "socket_rx_failed";
+#ifdef _WIN32
+    const char *domain = "winsock";
+#else
+    const char *domain = "errno";
+#endif
+    if (mqtt_debug_active(session->owner))
+    {
+        cJSON *detail = cJSON_CreateObject();
+        cJSON_AddStringToObject(detail, "operation", operation);
+        cJSON_AddStringToObject(detail, "native_error_domain", domain);
+        cJSON_AddNumberToObject(detail, "native_error", native_error);
+        cJSON_AddNumberToObject(detail, "socket_result", result);
+        cJSON_AddNumberToObject(detail, "requested_bytes", (double)requested);
+        cJSON_AddNumberToObject(detail, "tls_state", tlsGetState(session->box_tls));
+        mqtt_debug_event(session->owner, session->debug_epoch,
+            sending && session->box_write_head ? session->box_write_head->packet.debug_message : 0,
+            "box_transport", stage, detail);
+    }
+    TRACE_INFO("TB2 MQTT %s box=%s session=%" PRIu64
+        " operation=%s native_domain=%s native_error=%d socket_result=%d requested=%zu tls_state=%u\r\n",
+        stage, session->box_settings->commonName, session->owner, operation, domain,
+        native_error, result, requested, (unsigned)tlsGetState(session->box_tls));
 }
 
 /* Session-local nonblocking adapters share a bounded per-mainloop I/O budget.
@@ -1342,6 +1393,8 @@ static error_t tb2_mqtt_box_send(TlsSocketHandle handle, const void *data,
             " tls_state=%u reason=socket_backpressure\r\n", session->box_settings->commonName,
             session->owner, (unsigned)tlsGetState(session->box_tls));
     }
+    if (!blocked && !interrupted)
+        tb2_mqtt_socket_failure(session, TRUE, (int)n, code, length);
     return blocked || interrupted ? ERROR_WOULD_BLOCK : ERROR_WRITE_FAILED;
 }
 
@@ -1373,6 +1426,7 @@ static error_t tb2_mqtt_box_receive(TlsSocketHandle handle, void *data,
         return NO_ERROR;
     }
     if (retry) session->debug_socket_rx_waits++;
+    else tb2_mqtt_socket_failure(session, FALSE, (int)n, code, length);
     return n == 0 ? ERROR_END_OF_STREAM : retry ? ERROR_WOULD_BLOCK : ERROR_READ_FAILED;
 }
 
@@ -1676,7 +1730,10 @@ static error_t tb2_mqtt_box_write_pump(tb2_mqtt_passthrough_session_t *session)
         tb2_mqtt_status_add_message(FALSE, FALSE);
         tb2_mqtt_add_nocloud_stats(session, FALSE, p->rewritten, p->removed);
         if (p->packet_type == 2 && p->wire_length == 4 && p->wire[3] == 0)
+        {
             session->connack_sent = TRUE;
+            tb2_mqtt_status_connected(session);
+        }
         session->box_write_head = write->next;
         if (session->box_write_head == NULL) session->box_write_tail = NULL;
         session->box_write_count--;
@@ -1691,7 +1748,11 @@ static error_t tb2_mqtt_box_write_pump(tb2_mqtt_passthrough_session_t *session)
         session->debug_callback_epoch = previous_debug_epoch;
         tb2_mqtt_box_write_free(write);
         osAcquireMutex(&session->io_mutex);
-        if (capture_error) error = tb2_mqtt_box_terminal(session, capture_error, "capture_write_failed");
+        if (capture_error)
+        {
+            session->capture_failed = TRUE;
+            error = tb2_mqtt_box_terminal(session, capture_error, "capture_write_failed");
+        }
         if (!session->box_io_ops || !session->box_io_bytes) break;
     }
     if (error == ERROR_WOULD_BLOCK || error == ERROR_TIMEOUT)
@@ -1754,6 +1815,7 @@ static error_t tb2_mqtt_record_packet_ex_locked(tb2_mqtt_passthrough_session_t *
                                                removed_count);
     if (error)
     {
+        session->capture_failed = TRUE;
         tb2_mqtt_trace_error("capture_write", error);
         return ERROR_WRITE_FAILED;
     }
@@ -2517,6 +2579,10 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
 {
     uint8_t type = packet[0] >> 4;
     tb2_mqtt_debug_ack(session, box_to_upstream, packet, packet_size, fixed_header_size);
+    /* A denied TONIES CONNECT is not a later local establishment timeout. */
+    if (!box_to_upstream && type == 2 && packet_size == fixed_header_size + 2 &&
+        packet[fixed_header_size + 1] != 0)
+        session->upstream_failed = TRUE;
     if (box_to_upstream)
     {
         if (!mqtt_monotonic_ms(&session->last_box_rx)) return ERROR_FAILURE;
@@ -2975,8 +3041,8 @@ static error_t tb2_mqtt_process_stream(tb2_mqtt_passthrough_session_t *session,
     if (error)
         return error;
 
-    unsigned processed = 0;
-    while (stream->length > 0 && processed < TB2_MQTT_BOX_IO_OPS_PER_TICK)
+    /* Shared by every parser invocation and both directions in this visit. */
+    while (stream->length > 0 && session->packets_remaining > 0)
     {
         if (debugging && !stream->debug_message)
             stream->debug_message = mqtt_debug_next_message(session->owner);
@@ -3002,7 +3068,10 @@ static error_t tb2_mqtt_process_stream(tb2_mqtt_passthrough_session_t *session,
             return NO_ERROR;
         }
         if (error)
+        {
+            if (!box_to_upstream) session->upstream_failed = TRUE;
             return error;
+        }
         if (!box_to_upstream && packet_size > TB2_MQTT_CLOUD_PACKET_BUDGET)
             return ERROR_OUT_OF_RESOURCES;
         osAcquireMutex(&session->io_mutex);
@@ -3047,7 +3116,7 @@ static error_t tb2_mqtt_process_stream(tb2_mqtt_passthrough_session_t *session,
         osReleaseMutex(&session->io_mutex);
         if (error)
             return error;
-        processed++;
+        session->packets_remaining--;
         stream->length -= packet_size;
         stream->debug_wait_ms = 0;
         stream->debug_message = 0;
@@ -3067,8 +3136,9 @@ static error_t tb2_mqtt_process_stream(tb2_mqtt_passthrough_session_t *session,
 }
 
 static error_t tb2_mqtt_forward_ready(tb2_mqtt_passthrough_session_t *session,
-                                      bool_t box_to_upstream)
+                                      bool_t box_to_upstream, bool_t *progressed)
 {
+    *progressed = FALSE;
     uint64_t debug_lock_started = mqtt_debug_now_ms();
     osAcquireMutex(&session->io_mutex);
     tb2_mqtt_debug_slow(session, "rx_io_mutex_wait", debug_lock_started);
@@ -3136,18 +3206,30 @@ static error_t tb2_mqtt_forward_ready(tb2_mqtt_passthrough_session_t *session,
     if (debug_begin || received || (error && error != ERROR_WOULD_BLOCK && error != ERROR_TIMEOUT))
         tb2_mqtt_debug_io(session, 0, debug_origin, "tls_read", error, sizeof(buffer), received, debug_started);
     osReleaseMutex(&session->io_mutex);
+    /* Attribute only an actual Cloud read failure here, never a Box write,
+     * capture or packet-processing error returned by another helper. */
+    if (!box_to_upstream && error != ERROR_WOULD_BLOCK && error != ERROR_TIMEOUT &&
+        (error || received == 0)) session->upstream_failed = TRUE;
+    /* Budget exhaustion may accompany valid plaintext; never discard it. */
+    if (received > 0)
+    {
+        *progressed = TRUE;
+        error_t processed = tb2_mqtt_process_stream(session, box_to_upstream, buffer, received);
+        if (processed) return processed;
+    }
     if (error == ERROR_WOULD_BLOCK || error == ERROR_TIMEOUT)
         return NO_ERROR;
     if (error)
     {
-        TRACE_ERROR("TB2 MQTT upstream stage=tls_read direction=%s failed error=%s code=%d\r\n",
+        TRACE_ERROR("TB2 MQTT %s stage=tls_read direction=%s failed error=%s code=%d\r\n",
+                    box_to_upstream ? "box_transport" : "upstream",
                     box_to_upstream ? "box_to_upstream" : "upstream_to_box",
                     error2text(error), (int)error);
         return error;
     }
     if (received == 0)
         return ERROR_END_OF_STREAM;
-    return tb2_mqtt_process_stream(session, box_to_upstream, buffer, received);
+    return NO_ERROR;
 }
 
 error_t tb2_mqtt_passthrough_init(void)
@@ -3200,7 +3282,6 @@ error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
     if (box_settings == NULL)
     {
         tb2_mqtt_trace_error("map_box_identity", ERROR_FAILURE);
-        tb2_mqtt_status_attempt_failed("identity_unavailable");
         return ERROR_FAILURE;
     }
     settings_t *identity_settings = tb2_mqtt_select_identity_settings(box_settings);
@@ -3222,12 +3303,13 @@ error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
     tb2_mqtt_passthrough_session_t *created = osAllocMem(sizeof(*created));
     if (created == NULL)
     {
-        tb2_mqtt_status_attempt_failed("out_of_memory");
         return ERROR_OUT_OF_MEMORY;
     }
     osMemset(created, 0, sizeof(*created));
     atomic_init(&created->box_write_error, NO_ERROR);
     atomic_init(&created->local_publish_error, NO_ERROR);
+    atomic_init(&created->upstream_failed, FALSE);
+    atomic_init(&created->capture_failed, FALSE);
     if (!osCreateMutex(&created->io_mutex))
     {
         osFreeMem(created);
@@ -3269,6 +3351,7 @@ error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
     }
     if (error)
     {
+        created->upstream_failed = TRUE;
         tb2_mqtt_trace_error("passthrough_connect", error);
         tb2_mqtt_passthrough_close(created, "connect_failed", FALSE);
         return error;
@@ -3291,7 +3374,6 @@ error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,
         tb2_mqtt_passthrough_close(created, "box_callbacks_failed", FALSE);
         return error;
     }
-    tb2_mqtt_status_connected();
     TRACE_DEBUG("TB2 MQTT upstream stage=passthrough_start connected=true session=%s\r\n",
                 created->capture.session_id);
     *session = created;
@@ -3307,7 +3389,48 @@ error_t tb2_mqtt_passthrough_forward_initial(tb2_mqtt_passthrough_session_t *ses
     {
         return ERROR_INVALID_PARAMETER;
     }
+    session->packets_remaining = TB2_MQTT_PACKETS_PER_TICK;
     return tb2_mqtt_process_stream(session, TRUE, data, length);
+}
+
+/** Drain ready Box input inside the existing transport budget. The coupled
+ * Cloud transport keeps at most one TLS read per visit; its callbacks are not
+ * covered by the nonblocking Box socket budget. */
+static error_t tb2_mqtt_box_drain(tb2_mqtt_passthrough_session_t *session)
+{
+    bool_t cloud_polled = FALSE;
+    while (session->box_io_ops && session->box_io_bytes)
+    {
+        uint64_t started = mqtt_debug_now_ms();
+        error_t error = tb2_mqtt_box_write_pump(session);
+        tb2_mqtt_debug_slow(session, "box_tx_pump", started);
+        if (error) return error;
+        osAcquireMutex(&session->io_mutex);
+        bool_t blocked = session->box_write_head != NULL || session->box_write_active;
+        osReleaseMutex(&session->io_mutex);
+        if (blocked || !session->packets_remaining ||
+            !session->box_io_ops || !session->box_io_bytes) break;
+
+        bool_t progressed = FALSE;
+        bool_t box_first = session->box_rx_first;
+        /* Box-first must include a ready read, not only buffered plaintext. */
+        for (unsigned direction = 0; direction < 2 && !progressed; direction++)
+        {
+            unsigned before = session->packets_remaining;
+            error = tb2_mqtt_process_stream(session, box_first, NULL, 0);
+            if (error) return error;
+            progressed = session->packets_remaining != before;
+            if (!progressed && (box_first || !cloud_polled))
+            {
+                if (!box_first) cloud_polled = TRUE;
+                error = tb2_mqtt_forward_ready(session, box_first, &progressed);
+                if (error) return error;
+            }
+            box_first = !box_first;
+        }
+        if (!progressed) break;
+    }
+    return tb2_mqtt_passthrough_box_write_error(session);
 }
 
 static error_t tb2_mqtt_passthrough_task_inner(tb2_mqtt_passthrough_session_t *session)
@@ -3317,18 +3440,12 @@ static error_t tb2_mqtt_passthrough_task_inner(tb2_mqtt_passthrough_session_t *s
     osAcquireMutex(&session->io_mutex);
     session->box_io_ops = TB2_MQTT_BOX_IO_OPS_PER_TICK;
     session->box_io_bytes = TB2_MQTT_BOX_IO_BYTES_PER_TICK;
+    session->packets_remaining = TB2_MQTT_PACKETS_PER_TICK;
+    session->box_rx_first = !session->box_rx_first;
     osReleaseMutex(&session->io_mutex);
     uint64_t debug_phase_started = mqtt_debug_now_ms();
-    error_t error = tb2_mqtt_box_write_pump(session);
-    tb2_mqtt_debug_slow(session, "box_tx_pump", debug_phase_started);
-    debug_phase_started = mqtt_debug_now_ms();
-    if (!error) error = tb2_mqtt_process_stream(session, TRUE, NULL, 0);
-    if (!error) error = tb2_mqtt_forward_ready(session, TRUE);
+    error_t error = tb2_mqtt_box_drain(session);
     tb2_mqtt_debug_slow(session, "box_rx_phase", debug_phase_started);
-    debug_phase_started = mqtt_debug_now_ms();
-    if (!error) error = tb2_mqtt_process_stream(session, FALSE, NULL, 0);
-    if (!error) error = tb2_mqtt_forward_ready(session, FALSE);
-    tb2_mqtt_debug_slow(session, "cloud_rx_phase", debug_phase_started);
     uint32_t now;
     if (!error && !mqtt_monotonic_ms(&now)) return ERROR_FAILURE;
     if (!error && session->keepalive &&
@@ -3547,7 +3664,10 @@ mqtt_delivery_result_t tb2_mqtt_passthrough_submit_local_batch(
                     p->original_length, p->wire, p->wire_length, p->packet_type, p->topic,
                     FALSE, p->filter_id, TRUE, TRUE, "box_write_pending", p->original_id,
                     p->wire_id, 0))
+            {
+                session->capture_failed = TRUE;
                 atomic_store(&session->local_publish_error, ERROR_WRITE_FAILED);
+            }
         }
         osReleaseMutex(&session->io_mutex);
         return mqtt_delivery_result(MQTT_DELIVERY_QUEUED, NO_ERROR);
@@ -3585,6 +3705,7 @@ error_t tb2_mqtt_passthrough_write_local_publish(
 void tb2_mqtt_passthrough_close(tb2_mqtt_passthrough_session_t *session,
                                 const char *result_code, bool_t success)
 {
+    (void)success; /* Detailed local outcome remains in capture and close log. */
     if (session == NULL)
     {
         return;
@@ -3640,11 +3761,11 @@ void tb2_mqtt_passthrough_close(tb2_mqtt_passthrough_session_t *session,
         error_t error = tb2_mqtt_capture_finish(&session->capture, get_settings(), result_code);
         if (error)
         {
-            success = FALSE;
+            session->capture_failed = TRUE;
             result_code = "capture_finalize_failed";
         }
         tb2_mqtt_rotate_completed_captures(get_settings());
-        tb2_mqtt_status_finish(success, result_code);
+        tb2_mqtt_status_finish(session, result_code);
         TRACE_INFO("TB2 MQTT passthrough session=%s status=%s up=%llu down=%llu\r\n",
                    session->capture.session_id, result_code,
                    (unsigned long long)session->capture.bytes_box_to_upstream,
@@ -3678,6 +3799,10 @@ error_t tb2_mqtt_passthrough_write_status(HttpConnection *connection)
     if (!settings->mqtt_client_upstream.enabled)
     {
         state = "disabled";
+    }
+    else if (mqtt_passthrough_status.connected_sessions > 0)
+    {
+        state = "connected";
     }
     else if (mqtt_passthrough_status.active_sessions == 0 &&
              mqtt_passthrough_status.error_code[0] == '\0')
@@ -3720,7 +3845,8 @@ error_t tb2_mqtt_passthrough_write_status(HttpConnection *connection)
         (double)mqtt_passthrough_status.nocloud_items_removed_upstream_to_box);
     cJSON_AddNumberToObject(json, "last_attempt", (double)mqtt_passthrough_status.last_attempt);
     cJSON_AddNumberToObject(json, "last_success", (double)mqtt_passthrough_status.last_success);
-    cJSON_AddStringToObject(json, "error_code", mqtt_passthrough_status.error_code);
+    cJSON_AddStringToObject(json, "error_code", !settings->mqtt_client_upstream.enabled ||
+        mqtt_passthrough_status.connected_sessions ? "" : mqtt_passthrough_status.error_code);
     osReleaseMutex(&mqtt_passthrough_status.mutex);
 
     char *body = cJSON_PrintUnformatted(json);
