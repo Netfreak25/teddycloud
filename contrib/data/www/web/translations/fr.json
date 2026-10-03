@@ -1055,6 +1055,11 @@
             "active": "Instantané actif",
             "truncated": "Incomplet / rétention appliquée",
             "download": "Télécharger le ZIP de diagnostic",
+            "delete": "Supprimer l’enregistrement",
+            "deleteTitle": "Supprimer définitivement cet enregistrement ?",
+            "deleteHint": "Tous les fichiers de cet enregistrement seront supprimés définitivement.",
+            "deleteActiveHint": "Tous les fichiers existants de cet enregistrement actif seront supprimés définitivement. La connexion MQTT reste établie. Un nouvel enregistrement commence si le diagnostic est activé.",
+            "deleteFailed": "Impossible de supprimer l’enregistrement. {{error}}",
             "part": "Préparation de la partie {{part}} sur {{total}}",
             "downloadFailed": "Échec du téléchargement après {{completed}} partie(s). La liste a été actualisée ; les parties déjà téléchargées ne constituent pas un export complet. {{error}}"
         },

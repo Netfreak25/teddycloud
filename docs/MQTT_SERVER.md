@@ -972,6 +972,23 @@ into numbered parts. Refresh and retry if retention removed a selected file.
 An active JSONL file is downloaded only through a complete-line prefix listed
 by the server. Metadata changing since the listing can require a refresh.
 
+Each recording also has **Aufzeichnung loeschen** with an irreversible-deletion
+confirmation. Both completed and active recordings can be deleted. Deleting an
+active recording removes only its diagnostic files and pending diagnostic
+events; it does not disconnect MQTT or change the recording setting. If enabled,
+the next connection loop starts a new recording with a new ID. Download before
+deleting if the old evidence is still needed. Already opened file downloads can
+finish; downloads requesting a deleted file afterwards must refresh the list.
+
+`POST /api/diagnostics/mqtt/delete?overlay=<box>&session=<recording>` uses the same
+TB2 overlay and recording ownership validation as export. The collector in
+`src/mqtt_debug.c` serializes deletion with its existing writer lock and removes
+only known files from that recording, never a recursive arbitrary path. It
+preserves other boxes' queued events and reports partial filesystem failures.
+`src/handler_api.c`, its header and `src/server.c` expose the scoped POST; the
+existing WebUI diagnostic component confirms deletion and refreshes the list.
+No new storage limits or MQTT transport behavior are introduced by deletion.
+
 Storage is separate:
 
 ```text

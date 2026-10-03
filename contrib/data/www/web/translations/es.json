@@ -1055,6 +1055,11 @@
             "active": "Instantánea activa",
             "truncated": "Incompleto / retención aplicada",
             "download": "Descargar ZIP de diagnóstico",
+            "delete": "Eliminar grabación",
+            "deleteTitle": "¿Eliminar esta grabación permanentemente?",
+            "deleteHint": "Todos los archivos de esta grabación se eliminarán de forma irreversible.",
+            "deleteActiveHint": "Todos los archivos existentes de esta grabación activa se eliminarán de forma irreversible. La conexión MQTT se mantiene. Si el diagnóstico está activado, comenzará una nueva grabación.",
+            "deleteFailed": "No se pudo eliminar la grabación. {{error}}",
             "part": "Preparando parte {{part}} de {{total}}",
             "downloadFailed": "La descarga falló después de {{completed}} parte(s). La lista se ha actualizado; las partes ya descargadas no forman una exportación completa. {{error}}"
         },

@@ -162,6 +162,7 @@ request_type_t request_paths[] = {
     {REQ_GET, "/api/fileIndex", SERTY_WEB, &handleApiFileIndex},
     {REQ_GET, "/api/stats", SERTY_WEB, &handleApiStats},
     {REQ_GET, "/api/diagnostics/certificates", SERTY_WEB, &handleApiCertificateDiagnostics},
+    {REQ_POST, "/api/diagnostics/mqtt/delete", SERTY_WEB, &handleApiMqttDiagnosticDelete},
     {REQ_GET, "/api/diagnostics/mqtt/file", SERTY_WEB, &handleApiMqttDiagnosticFile},
     {REQ_GET, "/api/diagnostics/mqtt", SERTY_WEB, &handleApiMqttDiagnostics},
     {REQ_GET, "/api/tb2-https-upstream/status", SERTY_WEB, &handleApiTb2HttpsUpstreamStatus},

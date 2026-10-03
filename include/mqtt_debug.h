@@ -29,6 +29,8 @@ void mqtt_debug_unassigned(const char *stage, cJSON *details);
 
 /* Caller owns JSON. Export never exposes legacy raw capture paths. */
 cJSON *mqtt_debug_status(settings_t *settings);
+/* Remove one recording, including pending diagnostic events; never closes MQTT. */
+error_t mqtt_debug_delete(settings_t *settings, const char *session);
 error_t mqtt_debug_file_open(settings_t *settings, const char *session,
     const char *name, mqtt_debug_file_t **file, uint64_t *length);
 error_t mqtt_debug_file_read(mqtt_debug_file_t *file, void *buffer,

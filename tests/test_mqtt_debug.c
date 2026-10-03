@@ -359,6 +359,69 @@ static void test_listener_reload_and_mid_session(const char *previous_session)
     osAcquireMutex(&debug.mutex); assert(debug.stopped && !debug.count); osReleaseMutex(&debug.mutex);
 }
 
+static void test_recording_deletion(const char *historical)
+{
+    mqtt_debug_init();
+    assert(mqtt_debug_delete(&settings_fixture[1], historical) == NO_ERROR);
+    assert(mqtt_debug_delete(&settings_fixture[1], historical) == ERROR_NOT_FOUND);
+    assert(mqtt_debug_delete(&settings_fixture[1], "../outside") == ERROR_NOT_FOUND);
+
+    settings_fixture[2].mqtt_server.debug_enabled = true;
+    mqtt_debug_sync(300, &settings_fixture[1], true);
+    mqtt_debug_sync(400, &settings_fixture[2], true);
+    flush_all();
+    char first[64], second[64], path[DEBUG_PATH];
+    osAcquireMutex(&debug.mutex);
+    strcpy(first, debug_find(300)->id); strcpy(second, debug_find(400)->id);
+    osReleaseMutex(&debug.mutex);
+    assert(mqtt_debug_delete(&settings_fixture[2], first) == ERROR_NOT_FOUND);
+    assert(mqtt_debug_delete(&settings_fixture[0], first) == ERROR_NOT_FOUND);
+    /* Unknown files are not removed, and preflight failure preserves recording. */
+    assert(debug_path(path, "AABBCCDDEEFF", first, "keep.txt"));
+    FILE *unknown = debug_file(path, true, true); assert(unknown); assert(!fclose(unknown));
+    assert(mqtt_debug_delete(&settings_fixture[1], first) == ERROR_FAILURE);
+    assert(mqtt_debug_active(300) && !access(path, F_OK));
+    assert(!unlink(path));
+
+    mqtt_debug_file_t *pinned = NULL; uint64_t length = 0;
+    assert(mqtt_debug_file_open(&settings_fixture[1], first, "events-000001.jsonl", &pinned, &length) == NO_ERROR);
+    /* Interleaved queued events straddle the ring end. The writer may finish
+     * some before deletion takes disk, but other-box order must always survive. */
+    osAcquireMutex(&debug.disk);
+    flush_locked();
+    osAcquireMutex(&debug.mutex); assert(!debug.count); debug.head = DEBUG_EVENTS - 2; osReleaseMutex(&debug.mutex);
+    mqtt_debug_event(300, 0, 0, "local", "discard_one", cJSON_CreateObject());
+    mqtt_debug_event(400, 0, 0, "local", "keep_one", cJSON_CreateObject());
+    mqtt_debug_event(300, 0, 0, "local", "discard_two", cJSON_CreateObject());
+    mqtt_debug_event(400, 0, 0, "local", "keep_two", cJSON_CreateObject());
+    osReleaseMutex(&debug.disk);
+    assert(mqtt_debug_delete(&settings_fixture[1], first) == NO_ERROR);
+    assert(debug_path(path, "AABBCCDDEEFF", first, NULL));
+    assert(access(path, F_OK) != 0 && errno == ENOENT);
+    char *text = calloc(1, (size_t)length + 1); assert(text);
+    size_t received = 0;
+    assert(mqtt_debug_file_read(pinned, text, (size_t)length, &received) == NO_ERROR && received == length);
+    assert(strstr(text, "mid_session_start")); free(text); mqtt_debug_file_close(pinned);
+
+    mqtt_debug_sync(300, &settings_fixture[1], true);
+    assert(mqtt_debug_active(300) && mqtt_debug_active(400));
+    char replacement[64];
+    osAcquireMutex(&debug.mutex); strcpy(replacement, debug_find(300)->id); osReleaseMutex(&debug.mutex);
+    assert(strcmp(first, replacement));
+    mqtt_debug_event(300, 0, 0, "local", "after_delete", cJSON_CreateObject());
+    flush_all();
+    text = read_export(&settings_fixture[1], replacement, "events-000001.jsonl", NULL);
+    assert(strstr(text, "after_delete") && !strstr(text, "discard_one") && !strstr(text, "discard_two")); free(text);
+    text = read_export(&settings_fixture[2], second, "events-000001.jsonl", NULL);
+    char *one = strstr(text, "keep_one"), *two = strstr(text, "keep_two");
+    assert(one && two && one < two); free(text);
+    cJSON *status = mqtt_debug_status(&settings_fixture[1]); assert(status);
+    text = cJSON_PrintUnformatted(status); assert(text && !strstr(text, first)); free(text); cJSON_Delete(status);
+    mqtt_debug_close(300, "fixture_completed"); mqtt_debug_close(400, "fixture_completed"); flush_all();
+    assert(mqtt_debug_delete(&settings_fixture[1], replacement) == NO_ERROR);
+    mqtt_debug_deinit();
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -381,6 +444,7 @@ int main(int argc, char **argv)
     test_status_and_unassigned();
     test_failure_pause_and_shutdown(session);
     test_listener_reload_and_mid_session(session);
-    puts("MQTT debug PASS: TB2 default-on and opt-out, redaction, queue gaps, rotation/retention, pinned export, status, failure latch, UTC milliseconds and listener reload");
+    test_recording_deletion(session);
+    puts("MQTT debug PASS: TB2 default-on and opt-out, redaction, queue gaps, rotation/retention, pinned export, status, failure latch, UTC milliseconds, listener reload and active/historical deletion");
     return 0;
 }

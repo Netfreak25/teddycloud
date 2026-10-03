@@ -116,6 +116,11 @@
             "active": "Snapshot chu'",
             "truncated": "naQbe' / retention",
             "download": "Diagnostic ZIP yItlhap",
+            "delete": "QonwI' ta yIteq",
+            "deleteTitle": "QonwI' ta vam yIteqchu'?",
+            "deleteHint": "QonwI' ta vam Hoch teywI' teqchu'lu'. cheghlaHbe'.",
+            "deleteActiveHint": "QonlI'bogh ta Hoch teywI' teqchu'lu'. cheghlaHbe'. MQTT connection taH. Diagnostic chu'chugh, ta chu' qonchoH.",
+            "deleteFailed": "QonwI' ta teqlaHbe'. {{error}}",
             "part": "Part {{part}} / {{total}} chenmoHlI'",
             "downloadFailed": "{{completed}} part(s) ghIq download Qagh. TeywI' tetlh chu'lu'; parts Datlhapta'bogh export naQ bIHbe'. {{error}}"
         },

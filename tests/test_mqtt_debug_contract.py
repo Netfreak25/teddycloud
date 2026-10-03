@@ -62,6 +62,16 @@ class MqttDebugContractTests(unittest.TestCase):
             SETTINGS,
         )
 
+    def test_diagnostic_delete_is_box_scoped_and_reports_failure(self):
+        delete = function(API, "error_t handleApiMqttDiagnosticDelete")
+        self.assertIn("api_mqtt_debug_box(queryString)", delete)
+        self.assertIn('queryGet(queryString, "session", session, sizeof(session))', delete)
+        self.assertIn("mqtt_debug_delete(settings, session)", delete)
+        self.assertIn('500, "recording_delete_failed"', delete)
+        self.assertIn("connection->response.noCache = TRUE", delete)
+        self.assertNotIn("mqtt_server_", delete)
+        self.assertIn('{REQ_POST, "/api/diagnostics/mqtt/delete", SERTY_WEB, &handleApiMqttDiagnosticDelete}', SERVER)
+
     def test_download_resolves_box_and_snapshot_before_sending_headers(self):
         status = function(API, "error_t handleApiMqttDiagnostics")
         download = function(API, "error_t handleApiMqttDiagnosticFile")

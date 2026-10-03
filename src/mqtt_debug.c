@@ -1175,6 +1175,121 @@ static cJSON *debug_export_metadata(const char *box, const char *session)
     return json;
 }
 
+typedef struct {
+    debug_directory_t *directory;
+    bool remove, failed;
+} debug_delete_t;
+
+/* Only recorder-owned files, never arbitrary entries or recursive paths. */
+static bool debug_delete_entry(const char *name, void *context)
+{
+    debug_delete_t *operation = context;
+    if (!debug_filename(name) && strcmp(name, "session.json.tmp") && strcmp(name, "summary.txt.tmp")) {
+        operation->failed = true;
+        return false;
+    }
+    if (!operation->remove || !strcmp(name, "session.json")) return true;
+#ifdef _WIN32
+    char path[DEBUG_PATH];
+    bool ok = snprintf(path, sizeof(path), "%s/%s", operation->directory->path, name) < (int)sizeof(path) &&
+        DeleteFileA(path) != 0;
+#else
+    bool ok = unlinkat(operation->directory->fd, name, 0) == 0;
+#endif
+    operation->failed = !ok;
+    return ok;
+}
+
+/* HTTP-only operation. The disk lock excludes writer dequeue/maintenance;
+ * producers hold only the state lock and never wait for filesystem work.
+ * An enabled live connection starts a fresh recording on its next sync. */
+error_t mqtt_debug_delete(settings_t *settings, const char *session)
+{
+    char box[13], path[DEBUG_PATH], parent_path[DEBUG_PATH];
+    if (!debug.ready || !settings || settings->toniebox.boxGeneration != GENERATION_TB2 ||
+        !debug_box(settings, box) || !debug_session_name(session) ||
+        !debug_path(path, box, session, NULL) ||
+        snprintf(parent_path, sizeof(parent_path), "%s/%s", debug.root, box) >= (int)sizeof(parent_path))
+        return ERROR_NOT_FOUND;
+
+    error_t error = ERROR_NOT_FOUND;
+    osAcquireMutex(&debug.disk);
+    cJSON *metadata = debug_export_metadata(box, session);
+    if (!metadata) goto done;
+    debug_directory_t parent, directory;
+    if (!debug_directory_open(&parent, parent_path, false)) goto done;
+    if (!debug_directory_open(&directory, path, false)) {
+        debug_directory_close(&parent);
+        goto done;
+    }
+    error = ERROR_FAILURE;
+    debug_delete_t operation = {.directory = &directory};
+    if (!debug_list_directory(&directory, debug_delete_entry, &operation) || operation.failed)
+        goto close_directories;
+
+    FILE *stream = NULL;
+    osAcquireMutex(&debug.mutex);
+    for (size_t i = 0; i < DEBUG_SLOTS; i++) {
+        debug_session_t *recording = &debug.sessions[i];
+        if (!recording->used || strcmp(recording->box, box) || strcmp(recording->id, session)) continue;
+        size_t kept = 0, count = debug.count;
+        for (size_t j = 0; j < count; j++) {
+            debug_event_t event = debug.events[(debug.head + j) % DEBUG_EVENTS];
+            if (event.session == recording) {
+                debug.bytes -= event.length + 1;
+                free(event.line);
+            } else debug.events[(debug.head + kept++) % DEBUG_EVENTS] = event;
+        }
+        for (size_t j = kept; j < count; j++)
+            memset(&debug.events[(debug.head + j) % DEBUG_EVENTS], 0, sizeof(debug.events[0]));
+        debug.count = kept;
+        stream = recording->stream;
+        memset(recording, 0, sizeof(*recording));
+        break;
+    }
+    osReleaseMutex(&debug.mutex);
+    /* A recycled slot can already belong to a new recording. From here on,
+     * access only the detached stream and the pinned old directory. */
+    if (stream) fclose(stream); /* Buffered bytes are intentionally discarded below. */
+    debug_usage_scanned = 0;
+    operation.remove = true;
+    if (!debug_list_directory(&directory, debug_delete_entry, &operation) || operation.failed)
+        goto close_directories;
+    /* Keep ownership metadata until all other files are gone, allowing retry
+     * after a partial filesystem failure. Open downloads keep their own handles. */
+#ifdef _WIN32
+    char metadata_path[DEBUG_PATH];
+    if (!debug_path(metadata_path, box, session, "session.json") || !DeleteFileA(metadata_path))
+        goto close_directories;
+    debug_directory_close(&directory);
+    bool removed = RemoveDirectoryA(path) != 0;
+#else
+    if (unlinkat(directory.fd, "session.json", 0)) goto close_directories;
+    debug_directory_close(&directory);
+    bool removed = unlinkat(parent.fd, session, AT_REMOVEDIR) == 0;
+#endif
+    debug_directory_close(&parent);
+    error = removed ? NO_ERROR : ERROR_FAILURE;
+    if (!removed) {
+        /* Preserve retry visibility if an open download or filesystem error
+         * prevents removing the now-empty directory. Never revive its writer. */
+        cJSON_DeleteItemFromObjectCaseSensitive(metadata, "active");
+        cJSON_AddBoolToObject(metadata, "active", false);
+        char *text = cJSON_PrintUnformatted(metadata);
+        char restore_path[DEBUG_PATH];
+        if (text && debug_path(restore_path, box, session, "session.json")) debug_atomic(restore_path, text);
+        free(text);
+    }
+    goto done;
+close_directories:
+    debug_directory_close(&directory);
+    debug_directory_close(&parent);
+done:
+    cJSON_Delete(metadata);
+    osReleaseMutex(&debug.disk);
+    return error;
+}
+
 error_t mqtt_debug_file_open(settings_t *settings, const char *session,
     const char *name, mqtt_debug_file_t **output, uint64_t *length)
 {

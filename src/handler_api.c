@@ -235,6 +235,26 @@ error_t handleApiMqttDiagnostics(HttpConnection *connection, const char_t *uri,
     return httpWriteResponse(connection, body, osStrlen(body), TRUE);
 }
 
+error_t handleApiMqttDiagnosticDelete(HttpConnection *connection, const char_t *uri,
+                                      const char_t *queryString, client_ctx_t *client_ctx)
+{
+    (void)uri;
+    (void)client_ctx;
+    settings_t *settings = api_mqtt_debug_box(queryString);
+    char session[80] = {0};
+    if (settings == NULL || !queryGet(queryString, "session", session, sizeof(session)))
+        return api_write_certificate_doctor_error(connection, 404, "unknown_recording", "Recording not found for this box");
+    error_t error = mqtt_debug_delete(settings, session);
+    if (error == ERROR_NOT_FOUND)
+        return api_write_certificate_doctor_error(connection, 404, "unknown_recording", "Recording not found for this box");
+    if (error)
+        return api_write_certificate_doctor_error(connection, 500, "recording_delete_failed", "Recording could not be completely deleted; refresh and retry");
+    const char *body = "{\"ok\":true}";
+    httpPrepareHeader(connection, "application/json; charset=utf-8", osStrlen(body));
+    connection->response.noCache = TRUE;
+    return httpWriteResponseString(connection, (char_t *)body, false);
+}
+
 error_t handleApiMqttDiagnosticFile(HttpConnection *connection, const char_t *uri,
                                     const char_t *queryString, client_ctx_t *client_ctx)
 {

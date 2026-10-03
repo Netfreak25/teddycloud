@@ -1055,6 +1055,11 @@
             "active": "Aktive Momentaufnahme",
             "truncated": "Unvollständig / Aufbewahrungsgrenze",
             "download": "Diagnose-ZIP herunterladen",
+            "delete": "Aufzeichnung löschen",
+            "deleteTitle": "Diese Aufzeichnung endgültig löschen?",
+            "deleteHint": "Alle Dateien dieser Aufzeichnung werden unwiderruflich gelöscht.",
+            "deleteActiveHint": "Alle bisherigen Dateien dieser aktiven Aufzeichnung werden unwiderruflich gelöscht. Die MQTT-Verbindung bleibt bestehen. Bei aktivierter Diagnose beginnt eine neue Aufzeichnung.",
+            "deleteFailed": "Aufzeichnung konnte nicht gelöscht werden. {{error}}",
             "part": "Teil {{part}} von {{total}} wird erstellt",
             "downloadFailed": "Download nach {{completed}} Teil(en) fehlgeschlagen. Die Dateiliste wurde aktualisiert; bereits heruntergeladene Teile sind kein vollständiger Export. {{error}}"
         },

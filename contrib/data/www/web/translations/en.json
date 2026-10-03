@@ -1055,6 +1055,11 @@
             "active": "Active snapshot",
             "truncated": "Incomplete / retention applied",
             "download": "Download diagnostic ZIP",
+            "delete": "Delete recording",
+            "deleteTitle": "Permanently delete this recording?",
+            "deleteHint": "All files in this recording will be permanently deleted.",
+            "deleteActiveHint": "All existing files in this active recording will be permanently deleted. The MQTT connection stays connected. A new recording starts if diagnostics are enabled.",
+            "deleteFailed": "Could not delete the recording. {{error}}",
             "part": "Preparing part {{part}} of {{total}}",
             "downloadFailed": "Download failed after {{completed}} part(s). The file list has been refreshed; previously downloaded parts are not a complete export. {{error}}"
         },
