@@ -2207,6 +2207,16 @@
         "openNewVersionInGithub": "Neueste Version auf GitHub öffnen"
     },
     "tonieboxes": {
+        "sorting": {
+            "handle": "{{name}} verschieben",
+            "hint": "Halte die Namensleiste gedrückt und ziehe sie, um die Reihenfolge der Boxen zu ändern.",
+            "instructions": "Drücke die Leertaste, um eine Box zu verschieben, nutze die Pfeiltasten und drücke anschließend erneut die Leertaste. Escape bricht ab.",
+            "pickedUp": "{{name}} aufgenommen, Position {{position}} von {{count}}.",
+            "moved": "{{name}}, Position {{position}} von {{count}}.",
+            "dropped": "{{name}} auf Position {{position}} von {{count}} verschoben.",
+            "cancelled": "Verschieben abgebrochen. Die Reihenfolge ist unverändert.",
+            "storageWarning": "Die Reihenfolge konnte in diesem Browser nicht gespeichert werden und gilt nur, solange diese Seite geöffnet bleibt."
+        },
         "accessApiDisabled": "Zugriff auf TeddyCloud APIs deaktiviert.",
         "accessApiEnabled": "Zugriff auf TeddyCloud APIs aktiviert.",
         "availableBoxModal": {

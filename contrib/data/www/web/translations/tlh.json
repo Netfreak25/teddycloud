@@ -327,6 +327,16 @@
         }
     },
     "tonieboxes": {
+        "sorting": {
+            "handle": "{{name}} yIvIHmoH",
+            "hint": "Boxmey patlh choHmeH, pong tlhegh yI'uch 'ej yIluH.",
+            "instructions": "Box vIHmoHmeH, Space yI'uy, arrow keys tIlo', ghIq Space yI'uyqa'. qIlmeH Escape yI'uy.",
+            "pickedUp": "{{name}} wIvlu'; Daq {{position}} / {{count}}.",
+            "moved": "{{name}}, Daq {{position}} / {{count}}.",
+            "dropped": "{{name}} vIHmoHlu'; Daq {{position}} / {{count}}.",
+            "cancelled": "qIllu'. choHbe'pu' patlh.",
+            "storageWarning": "browservamDaq patlh polbe'lu'. poStaHvIS navvam neH patlhvam lo'lu'."
+        },
         "availableBoxModal": {
             "cancel": "qIl",
             "status": "Dotlh"

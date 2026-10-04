@@ -2207,6 +2207,16 @@
         "openNewVersionInGithub": "Abrir la última versión en GitHub"
     },
     "tonieboxes": {
+        "sorting": {
+            "handle": "Mover {{name}}",
+            "hint": "Mantén pulsada la barra del nombre y arrástrala para cambiar el orden de las cajas.",
+            "instructions": "Para mover una caja, pulsa Espacio, utiliza las teclas de flecha y vuelve a pulsar Espacio. Escape cancela el movimiento.",
+            "pickedUp": "{{name}} seleccionada, posición {{position}} de {{count}}.",
+            "moved": "{{name}}, posición {{position}} de {{count}}.",
+            "dropped": "{{name}} movida a la posición {{position}} de {{count}}.",
+            "cancelled": "Movimiento cancelado. El orden no ha cambiado.",
+            "storageWarning": "No se ha podido guardar el orden en este navegador y solo se mantendrá mientras esta página permanezca abierta."
+        },
         "accessApiDisabled": "Acceso a las API de TeddyCloud deshabilitado.",
         "accessApiEnabled": "Acceso a las API de TeddyCloud habilitado.",
         "availableBoxModal": {
