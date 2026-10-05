@@ -251,7 +251,8 @@ static error_t v3_native_route_reserve(uint8_t overlay_id, const char *ruid,
     return NO_ERROR;
 }
 
-static bool_t v3_native_routes_equal(const v3_native_route_t *a, const v3_native_route_t *b)
+/** Auth is an opaque, refreshable request value, not an object identity. */
+static bool_t v3_native_routes_same_content(const v3_native_route_t *a, const v3_native_route_t *b)
 {
     if (a->version != b->version || a->chapter_count != b->chapter_count ||
         osStrcmp(a->content_type, b->content_type))
@@ -263,7 +264,7 @@ static bool_t v3_native_routes_equal(const v3_native_route_t *a, const v3_native
         const v3_native_object_t *left = &a->chapters[i];
         const v3_native_object_t *right = &b->chapters[i];
         if (left->file_size != right->file_size || osStrcmp(left->name, right->name) ||
-            osStrcmp(left->auth, right->auth) || osStrcmp(left->type, right->type) ||
+            osStrcmp(left->type, right->type) ||
             osStrcmp(left->filename, right->filename))
         {
             return FALSE;
@@ -274,7 +275,8 @@ static bool_t v3_native_routes_equal(const v3_native_route_t *a, const v3_native
 
 /** Publish only a fully validated manifest. Identical repeats keep writers. */
 static error_t v3_native_route_publish(v3_native_cache_route_handle_t *handle,
-                                       v3_native_route_t *loaded)
+                                       v3_native_route_t *loaded,
+                                       bool_t refresh_auth)
 {
     v3_native_route_t *reserved = v3_native_route_find(*handle);
     if (reserved == NULL || reserved->invalidated || !loaded->valid ||
@@ -295,7 +297,7 @@ static error_t v3_native_route_publish(v3_native_cache_route_handle_t *handle,
         if (route != reserved && route->valid && !route->invalidated && route->version == loaded->version &&
             !osStrcmp(route->ruid, loaded->ruid))
         {
-            if (route->invalidated || !v3_native_routes_equal(route, loaded))
+            if (route->invalidated || !v3_native_routes_same_content(route, loaded))
             {
                 return ERROR_INVALID_FILE;
             }
@@ -314,6 +316,15 @@ static error_t v3_native_route_publish(v3_native_cache_route_handle_t *handle,
     }
     else
     {
+        /* Keep handles, pins and each object's writer ownership intact. Local
+         * snapshots can refresh backing, but never roll back live auth values. */
+        if (refresh_auth)
+        {
+            for (size_t i = 0; i < target->chapter_count; i++)
+            {
+                osStrcpy(target->chapters[i].auth, loaded->chapters[i].auth);
+            }
+        }
         if (!target->capture_enabled && loaded->capture_enabled)
         {
             /* An observed route can become cacheable after configuration or
@@ -1267,7 +1278,7 @@ error_t v3_native_cache_open_active_manifest(
     }
     if (error == NO_ERROR)
     {
-        error = v3_native_route_publish(handle, &snapshot);
+        error = v3_native_route_publish(handle, &snapshot, FALSE);
     }
     if (error == NO_ERROR)
     {
@@ -2038,7 +2049,7 @@ static error_t v3_native_snapshot_refresh_library_routes(
         {
             continue;
         }
-        if (!v3_native_routes_equal(route, snapshot))
+        if (!v3_native_routes_same_content(route, snapshot))
         {
             return ERROR_INVALID_FILE;
         }
@@ -2083,7 +2094,9 @@ static error_t v3_native_cache_link_library_source(
     uint8_t overlay_id,
     const char *ruid,
     uint32_t version,
-    const char *library_source)
+    const char *library_source,
+    const uint8_t *expected_manifest,
+    size_t expected_manifest_length)
 {
     mutex_lock(MUTEX_V3_NATIVE_LIBRARY);
     mutex_lock(MUTEX_V3_NATIVE_CACHE);
@@ -2093,6 +2106,29 @@ static error_t v3_native_cache_link_library_source(
     if (error == NO_ERROR && active_version != version)
     {
         error = ERROR_INVALID_FILE;
+    }
+    if (error == NO_ERROR && expected_manifest != NULL)
+    {
+        /* Import releases LIBRARY before linking. A newer raw Tonieplay
+         * manifest (even at the same version) must keep its own archive link. */
+        char *directory = v3_native_generation_dir(cache_root, "versions",
+                                                     overlay_id, ruid, version);
+        char *path = directory != NULL
+                         ? v3_native_format("%s%cmanifest.json", directory, PATH_SEPARATOR)
+                         : NULL;
+        uint8_t *current = NULL;
+        size_t length = 0;
+        error = path != NULL ? v3_native_read_file(path, &current, &length)
+                             : ERROR_OUT_OF_MEMORY;
+        if (error == NO_ERROR &&
+            (length != expected_manifest_length ||
+             osMemcmp(current, expected_manifest, length)))
+        {
+            error = ERROR_ABORTED;
+        }
+        osFreeMem(current);
+        osFreeMem(path);
+        osFreeMem(directory);
     }
     if (error == NO_ERROR)
     {
@@ -2392,7 +2428,7 @@ cleanup:
         {
             error = v3_native_cache_link_library_source(
                 cache_root, library_root, overlay_id, canonical_ruid, version,
-                source);
+                source, NULL, 0);
             if (error == NO_ERROR && library_source != NULL)
             {
                 *library_source = source;
@@ -3449,6 +3485,20 @@ error_t v3_native_cache_import_active_tonieplay_library(
         cache_root, library_root, overlay_id, ruid, 0);
 }
 
+/** Read from the snapshot's single complete backing, never a per-file mixture.
+ * Caller retains LIBRARY while hashing and copying the immutable objects. */
+static char *v3_native_snapshot_object_path(const v3_native_route_t *snapshot,
+                                             size_t index)
+{
+    if (snapshot->library_source != NULL)
+    {
+        return strdup(snapshot->library_paths[index]);
+    }
+    return v3_native_format("%s%cchapters%c%s", snapshot->generation_dir,
+                              PATH_SEPARATOR, PATH_SEPARATOR,
+                              snapshot->chapters[index].name);
+}
+
 error_t v3_native_cache_import_active_tonieplay_library_version(
     const char *cache_root,
     const char *library_root,
@@ -3495,34 +3545,49 @@ error_t v3_native_cache_import_active_tonieplay_library_version(
     bool_t already_linked = v3_native_library_paths_complete(&snapshot);
     if (already_linked)
     {
-        mutex_lock(MUTEX_V3_NATIVE_CACHE);
-        error = v3_native_snapshot_refresh_library_routes(&snapshot);
-        if (error == NO_ERROR)
+        v3_tonieplay_library_collection_t existing = {0};
+        error = v3_tonieplay_library_collection_load(
+            library_root, snapshot.library_source, FALSE, &existing);
+        bool_t same_manifest = error == NO_ERROR &&
+                               existing.manifest_length == manifest_length &&
+                               !osMemcmp(existing.manifest, manifest, manifest_length);
+        if (error == NO_ERROR && !same_manifest)
         {
-            v3_native_compact_cache_files(&snapshot);
+            /* Changed raw auth changes the Tonieplay hash. Reuse the entire
+             * old backing only after full verification; never edit its archive. */
+            v3_tonieplay_library_collection_free(&existing);
+            error = v3_tonieplay_library_collection_load(
+                library_root, snapshot.library_source, TRUE, &existing);
         }
-        mutex_unlock(MUTEX_V3_NATIVE_CACHE);
-        v3_native_route_clear(&snapshot);
-        osFreeMem(manifest);
-        mutex_unlock(MUTEX_V3_NATIVE_LIBRARY);
-        return error;
+        v3_tonieplay_library_collection_free(&existing);
+        if (error != NO_ERROR || same_manifest)
+        {
+            if (error == NO_ERROR)
+            {
+                mutex_lock(MUTEX_V3_NATIVE_CACHE);
+                error = v3_native_snapshot_refresh_library_routes(&snapshot);
+                if (error == NO_ERROR)
+                {
+                    v3_native_compact_cache_files(&snapshot);
+                }
+                mutex_unlock(MUTEX_V3_NATIVE_CACHE);
+            }
+            v3_native_route_clear(&snapshot);
+            osFreeMem(manifest);
+            mutex_unlock(MUTEX_V3_NATIVE_LIBRARY);
+            return error;
+        }
     }
 
     char manifest_content_type[V3_NATIVE_CACHE_OBJECT_TYPE_SIZE] = {0};
     osStrcpy(manifest_content_type, snapshot.content_type);
     v3_native_object_t *parsed = snapshot.chapters;
     size_t object_count = snapshot.chapter_count;
-    char *source_dir = snapshot.generation_dir;
-    snapshot.chapters = NULL;
-    snapshot.generation_dir = NULL;
-    v3_native_route_clear(&snapshot);
     v3_tonieplay_library_object_t *objects =
         osAllocMem(object_count * sizeof(*objects));
-    if (source_dir == NULL || objects == NULL)
+    if (objects == NULL)
     {
-        osFreeMem(objects);
-        osFreeMem(source_dir);
-        osFreeMem(parsed);
+        v3_native_route_clear(&snapshot);
         osFreeMem(manifest);
         mutex_unlock(MUTEX_V3_NATIVE_LIBRARY);
         return ERROR_OUT_OF_MEMORY;
@@ -3530,9 +3595,7 @@ error_t v3_native_cache_import_active_tonieplay_library_version(
     osMemset(objects, 0, object_count * sizeof(*objects));
     for (size_t i = 0; error == NO_ERROR && i < object_count; i++)
     {
-        char *source_path = v3_native_format("%s%cchapters%c%s", source_dir,
-                                             PATH_SEPARATOR, PATH_SEPARATOR,
-                                             parsed[i].name);
+        char *source_path = v3_native_snapshot_object_path(&snapshot, i);
         uint8_t digest[SHA256_DIGEST_SIZE];
         uint32_t size = 0;
         error = source_path == NULL
@@ -3656,9 +3719,7 @@ error_t v3_native_cache_import_active_tonieplay_library_version(
         const char *filename = relative != NULL
                                    ? strrchr(relative, '/')
                                    : NULL;
-        char *source_path = v3_native_format("%s%cchapters%c%s", source_dir,
-                                             PATH_SEPARATOR, PATH_SEPARATOR,
-                                             objects[i].name);
+        char *source_path = v3_native_snapshot_object_path(&snapshot, i);
         char *target_path = filename != NULL
                                 ? v3_native_format("%s%c%s", stage_objects,
                                                    PATH_SEPARATOR,
@@ -3743,9 +3804,7 @@ tonieplay_cleanup:
     osFreeMem(final_parent);
     mutex_unlock(MUTEX_V3_NATIVE_LIBRARY);
     osFreeMem(objects);
-    osFreeMem(source_dir);
-    osFreeMem(parsed);
-    osFreeMem(manifest);
+    v3_native_route_clear(&snapshot);
     if (error == NO_ERROR)
     {
         char *source = v3_native_format(
@@ -3754,9 +3813,10 @@ tonieplay_cleanup:
                     ? ERROR_OUT_OF_MEMORY
                     : v3_native_cache_link_library_source(
                           cache_root, library_root, overlay_id,
-                          canonical_ruid, version, source);
+                          canonical_ruid, version, source, manifest, manifest_length);
         osFreeMem(source);
     }
+    osFreeMem(manifest);
     return error;
 }
 
@@ -4213,13 +4273,15 @@ void v3_native_cache_meta_capture_append(v3_native_cache_meta_capture_t *capture
     capture->length += length;
 }
 
-/** Check persisted object identity before reusing any complete staging files. */
-static error_t v3_native_manifest_matches_file(const char *path,
-                                               const v3_native_route_t *route)
+/** Replace only manifest bytes; preserve descriptors, backing and object files.
+ * Caller holds LIBRARY -> CACHE. Identical responses cause no disk write. */
+static error_t v3_native_store_manifest(const char *path,
+                                        const v3_native_route_t *route,
+                                        const uint8_t *manifest, size_t manifest_length)
 {
     if (!fsFileExists(path))
     {
-        return NO_ERROR;
+        return v3_native_write_atomic(path, manifest, manifest_length);
     }
     uint8_t *data = NULL;
     size_t length = 0;
@@ -4231,13 +4293,16 @@ static error_t v3_native_manifest_matches_file(const char *path,
                                           previous.content_type, &previous.chapters,
                                           &previous.chapter_count);
     }
-    if (error == NO_ERROR && !v3_native_routes_equal(&previous, route))
+    if (error == NO_ERROR && !v3_native_routes_same_content(&previous, route))
     {
         error = ERROR_INVALID_FILE;
     }
+    bool_t unchanged = error == NO_ERROR && length == manifest_length &&
+                       !osMemcmp(data, manifest, length);
     osFreeMem(data);
     v3_native_route_clear(&previous);
-    return error;
+    return error != NO_ERROR || unchanged ? error
+        : v3_native_write_atomic(path, manifest, manifest_length);
 }
 
 /* Called with LIBRARY -> CACHE held, never across a network transfer. */
@@ -4254,7 +4319,8 @@ static error_t v3_native_meta_prepare_storage(v3_native_cache_meta_capture_t *ca
     if (fsDirExists(version_dir))
     {
         char *path = v3_native_format("%s%cmanifest.json", version_dir, PATH_SEPARATOR);
-        error_t error = path != NULL ? v3_native_manifest_matches_file(path, loaded)
+        error_t error = path != NULL ? v3_native_store_manifest(path, loaded,
+                                                                  capture->data, capture->length)
                                       : ERROR_OUT_OF_MEMORY;
         osFreeMem(path);
         if (error != NO_ERROR)
@@ -4285,14 +4351,10 @@ static error_t v3_native_meta_prepare_storage(v3_native_cache_meta_capture_t *ca
                      ? v3_native_format("%s%cmanifest.json", loaded->generation_dir, PATH_SEPARATOR)
                      : NULL;
     error_t error = directory == NULL || path == NULL ? ERROR_OUT_OF_MEMORY
-                                                       : v3_native_manifest_matches_file(path, loaded);
+                                                       : v3_native_ensure_dir(directory);
     if (error == NO_ERROR)
     {
-        error = v3_native_ensure_dir(directory);
-    }
-    if (error == NO_ERROR)
-    {
-        error = v3_native_write_atomic(path, capture->data, capture->length);
+        error = v3_native_store_manifest(path, loaded, capture->data, capture->length);
     }
     if (error == NO_ERROR)
     {
@@ -4322,6 +4384,7 @@ error_t v3_native_cache_meta_capture_finish(v3_native_cache_meta_capture_t *capt
     {
         return error;
     }
+    capture->version = loaded.version;
     loaded.valid = TRUE;
     loaded.overlay_id = capture->overlay_id;
     osStrcpy(loaded.ruid, capture->ruid);
@@ -4334,26 +4397,36 @@ error_t v3_native_cache_meta_capture_finish(v3_native_cache_meta_capture_t *capt
     {
         error = ERROR_ABORTED;
     }
-    bool_t identical = FALSE;
-    bool_t needs_storage = capture->store;
+    v3_native_route_t *existing = NULL;
     for (size_t i = 0; error == NO_ERROR && i < V3_NATIVE_CACHE_ROUTES_PER_OVERLAY; i++)
     {
         v3_native_route_t *route = &routes[capture->overlay_id][i];
         if (route->valid && !route->invalidated && route->version == loaded.version &&
             !osStrcmp(route->ruid, loaded.ruid))
         {
-            identical = v3_native_routes_equal(route, &loaded);
-            needs_storage = capture->store && !route->capture_enabled;
-            if (!identical)
+            existing = route;
+            if (!v3_native_routes_same_content(route, &loaded))
             {
                 error = ERROR_INVALID_FILE;
             }
         }
     }
     error_t storage_error = NO_ERROR;
-    if (error == NO_ERROR && needs_storage)
+    if (error == NO_ERROR && capture->store)
     {
-        storage_error = v3_native_meta_prepare_storage(capture, &loaded);
+        if (existing != NULL && existing->capture_enabled)
+        {
+            char *path = v3_native_format("%s%cmanifest.json", existing->generation_dir,
+                                           PATH_SEPARATOR);
+            storage_error = path != NULL
+                ? v3_native_store_manifest(path, &loaded, capture->data, capture->length)
+                : ERROR_OUT_OF_MEMORY;
+            osFreeMem(path);
+        }
+        else
+        {
+            storage_error = v3_native_meta_prepare_storage(capture, &loaded);
+        }
         /* Contradictory persisted identity must not reuse its data. Other
          * storage failures retain a valid observe-only forwarding route. */
         if (storage_error == ERROR_INVALID_FILE)
@@ -4363,15 +4436,20 @@ error_t v3_native_cache_meta_capture_finish(v3_native_cache_meta_capture_t *capt
     }
     if (error == NO_ERROR)
     {
-        capture->version = loaded.version;
-        error = v3_native_route_publish(&capture->route_handle, &loaded);
+        error = v3_native_route_publish(&capture->route_handle, &loaded, TRUE);
     }
     if (error == NO_ERROR && storage_error == NO_ERROR && capture->store)
     {
         v3_native_route_t *route = v3_native_route_find(capture->route_handle);
         if (route->active)
         {
-            error = v3_native_write_active_marker(capture->cache_root, route);
+            uint32_t active_version = 0;
+            if (v3_native_read_active_marker(capture->cache_root, route->overlay_id,
+                                               route->ruid, &active_version, NULL) != NO_ERROR ||
+                active_version != route->version)
+            {
+                error = v3_native_write_active_marker(capture->cache_root, route);
+            }
         }
         else if (route->capture_enabled && v3_native_cache_files_complete(route))
         {
@@ -4382,6 +4460,13 @@ error_t v3_native_cache_meta_capture_finish(v3_native_cache_meta_capture_t *capt
     mutex_unlock(MUTEX_V3_NATIVE_LIBRARY);
     v3_native_route_clear(&loaded);
     capture->error = error != NO_ERROR ? error : storage_error;
+    if (capture->error != NO_ERROR)
+    {
+        TRACE_WARNING("TB2 V3 manifest completion overlay=%u rUID=%s version=%" PRIu32 " reason=%s error=%d\r\n",
+                      (unsigned)capture->overlay_id, capture->ruid, capture->version,
+                      error != NO_ERROR ? "identity-or-route-rejected" : "manifest-storage-failed",
+                      capture->error);
+    }
     return capture->error;
 }
 

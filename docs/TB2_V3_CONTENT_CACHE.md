@@ -87,6 +87,42 @@ decodes once, and keeps literal `+` bytes intact. The upstream query remains
 unchanged. Manually generated queries percent-encode the original manifest token
 without interpreting or logging its contents.
 
+### Refreshable object authentication
+
+An object's opaque `auth` value is request metadata, not its content identity.
+For the same overlay/RUID/version, the ordered names, sizes, types, filenames
+and manifest `contentType` must still agree. Changes to those fields are rejected;
+a changed auth value alone is accepted without interpreting any suffix such as
+`.lastc-*`. The current whole token remains the exact disambiguator when two
+collections advertise the same object name.
+
+A successfully accepted upstream manifest updates the live route's auth values
+under the cache lock. It keeps the route instance, reservations, current object
+writers and completed objects. Previously created manual download plans retain
+their own token snapshot; subsequent plans see the new tokens. An older,
+out-of-order response cannot overwrite the newer accepted manifest. Status and
+library snapshots, including reopening a stored manifest, do not roll back live
+authentication values.
+
+The exact new manifest bytes replace `manifest.json` atomically in either staging
+or the published version. An auth-only refresh does not rewrite its descriptor,
+active marker or library link. A write failure preserves the previous manifest
+and is reported separately from an identity/route rejection; permitted live
+forwarding retains the fresh auth values. The next matching manifest retries
+storage. None of this changes source authority, NoCloud or Freshness decisions.
+
+Audio library hashes do not contain auth, so the existing audio collection is
+reused. Tonieplay hashes include the raw manifest: different bytes require a new
+immutable archive. If the cache objects were already compacted, the importer
+verifies the entire old library collection, then uses that complete backing to
+stage the new manifest and objects. It never edits the old archive or combines
+partial backings. The already-linked fast path requires byte-identical manifests.
+Before linking a newly published Tonieplay archive, the importer rechecks both
+the active version and the exact current manifest; a concurrent refresh leaves
+the old descriptor unchanged and the completed archive available for reuse.
+
+### Source authority
+
 The current content source remains authoritative before serving or forwarding
 an original chapter. A configured source blocks retained original routes even
 when their files are complete. NoCloud still permits a complete local original
@@ -578,6 +614,10 @@ The marker is cleared only when the local MQTT observer receives playback state 
   inspection cannot overwrite another Tonie's route or selected version.
 - Reject ambiguous name/auth mappings, retain one capture owner per object and
   prevent obsolete or invalidated completions from publishing an active marker.
+- Refresh opaque auth independently of object identity and atomically replace
+  only raw manifest bytes. Preserve active captures and immutable manual plans;
+  Tonieplay re-import uses verified existing backing and a raw-manifest link
+  guard rather than mutating content-addressed archives.
 - Bind automatic and manual library completion to the completed manifest's exact
   version. If a newer active generation wins before import takes its snapshot,
   the old completion is rejected instead of importing the newer content under
@@ -590,6 +630,9 @@ The marker is cleared only when the local MQTT observer receives playback state 
   interleaved routes, exact ownership, capacity and invalidation at runtime.
 - Exercise the production handler's auth and source-policy helpers directly;
   token decoding and NoCloud behavior are not inferred from source-text markers.
+- Cover auth-only refreshes in persisted staging, active audio and compacted
+  Tonieplay; also test write retries, out-of-order manifests, long exact tokens,
+  retained writers, true identity conflicts and the import/link race.
 
 ### `src/contentJson.c`
 

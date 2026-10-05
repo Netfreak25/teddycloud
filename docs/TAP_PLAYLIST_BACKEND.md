@@ -209,6 +209,14 @@ allocation. Already known system/language collections remain independent.
   publish, while complete on-disk originals remain reusable; deleting the cache
   would unnecessarily destroy valid user content.
 
+`src/v3_native_cache.c` also keeps opaque upstream auth refreshes separate from
+that content identity. Refreshing an original manifest preserves its running
+writers and pinned plans; it does not bypass source revocation or NoCloud.
+Tonieplay re-import verifies a complete backing and links only the exact current
+raw manifest. Keeping this in the native cache avoids changing TAP generation,
+TAF conversion or their Freshness semantics. The production runtime fixture in
+`tests/test_tb2_v3_routes_runtime.c` covers these refresh and race conditions.
+
 ## Freshness and versioning
 
 Freshness checks use the TAP `audio_id` as the effective server version for stable playlists. A box cache is current only when its cached version matches the TAP `audio_id` and the server-side final `.taf` is current.

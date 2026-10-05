@@ -10,6 +10,7 @@
 #include "handler.h"
 #include "mutex_manager.h"
 #include "v3_native_cache.h"
+#include "cJSON.h"
 
 #undef TRACE_ERROR
 #undef TRACE_WARNING
@@ -29,6 +30,7 @@ static tonie_info_t policy_content;
 static bool_t policy_missing;
 static unsigned policy_reads, policy_frees;
 static unsigned transport_responses, imports;
+static void (*library_release_hook)(void);
 
 void *osAllocMem(size_t size) { return malloc(size); }
 void osFreeMem(void *pointer) { free(pointer); }
@@ -88,24 +90,33 @@ void mutex_unlock(mutex_id_t id)
 {
     assert(id < MUTEX_LAST && held[id] == 1);
     held[id]--;
+    if (id == MUTEX_V3_NATIVE_LIBRARY && library_release_hook != NULL)
+    {
+        void (*hook)(void) = library_release_hook;
+        library_release_hook = NULL;
+        hook();
+    }
 }
 
 static void meta_body_auth(v3_native_cache_meta_capture_t *capture, uint32_t version,
                            const char *name, const char *second_name, const char *auth)
 {
-    char manifest[1024];
+    size_t capacity = strlen(auth) + strlen(name) + 1024U;
+    char *manifest = malloc(capacity);
+    assert(manifest != NULL);
     char second[512] = {0};
     if (second_name != NULL)
         snprintf(second, sizeof(second),
                  ",{\"name\":\"%s\",\"auth\":\"opaque-token\","
                  "\"type\":\"audio\",\"fileSize\":4}", second_name);
-    int size = snprintf(manifest, sizeof(manifest),
+    int size = snprintf(manifest, capacity,
                         "{\"version\":%u,\"content\":[{\"name\":\"%s\","
                         "\"auth\":\"%s\",\"type\":\"audio\",\"fileSize\":4}%s]}",
                         version, name, auth, second);
-    assert(size > 0 && (size_t)size < sizeof(manifest));
+    assert(size > 0 && (size_t)size < capacity);
     v3_native_cache_meta_capture_response(capture, 200);
     v3_native_cache_meta_capture_append(capture, manifest, (size_t)size);
+    free(manifest);
 }
 
 static void meta_body(v3_native_cache_meta_capture_t *capture, uint32_t version,
@@ -885,6 +896,370 @@ static void test_assigned_and_system_object_auth_disambiguation(void)
     free(game_source);
 }
 
+static void test_auth_refresh_reuses_persisted_staging(void)
+{
+    manifest(CONTENT_RUID, 7, "original.opus", NULL, TRUE);
+    v3_native_cache_invalidate_routes(TEST_OVERLAY, CONTENT_RUID);
+    v3_native_cache_meta_capture_t meta;
+    v3_native_cache_meta_capture_init(&meta, TEST_CACHE, TEST_LIBRARY,
+                                       TEST_OVERLAY, CONTENT_RUID);
+    const char *new_auth = "opaque-token.lastc-23-1791216979";
+    meta_body_auth(&meta, 7, "original.opus", NULL, new_auth);
+    assert(v3_native_cache_meta_capture_finish(&meta) == NO_ERROR);
+    v3_native_cache_download_plan_t plan;
+    assert(v3_native_cache_download_plan_from_meta(&meta, &plan) == NO_ERROR);
+    assert(!strcmp(plan.objects[0].auth, new_auth));
+    v3_native_cache_meta_capture_abort(&meta);
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(prepare("original.opus", &capture, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    finish_object(&capture);
+    v3_native_cache_download_plan_free(&plan);
+    uint8_t *raw = NULL;
+    size_t length = 0;
+    uint32_t version = 0;
+    assert(v3_native_cache_read_active_manifest(TEST_CACHE, TEST_LIBRARY,
+                                                 TEST_OVERLAY, CONTENT_RUID,
+                                                 &raw, &length, &version) == NO_ERROR);
+    assert(strstr((char *)raw, new_auth) != NULL);
+    free(raw);
+}
+
+static char *read_test_file(const char *path)
+{
+    uint32_t size = 0;
+    assert(fsGetFileSize(path, &size) == NO_ERROR);
+    char *data = calloc(size + 1U, 1);
+    FILE *file = fopen(path, "rb");
+    assert(data != NULL && file != NULL);
+    assert(fread(data, 1, size, file) == size && fclose(file) == 0);
+    return data;
+}
+
+static error_t refresh_audio_auth(const char *auth, const char *second_name, bool store)
+{
+    v3_native_cache_meta_capture_t meta;
+    if (store)
+        v3_native_cache_meta_capture_init(&meta, TEST_CACHE, TEST_LIBRARY,
+                                           TEST_OVERLAY, CONTENT_RUID);
+    else
+        v3_native_cache_meta_observe_init(&meta, TEST_OVERLAY, CONTENT_RUID);
+    meta_body_auth(&meta, 7, "original.opus", second_name, auth);
+    error_t error = v3_native_cache_meta_capture_finish(&meta);
+    v3_native_cache_meta_capture_abort(&meta);
+    return error;
+}
+
+static void test_auth_refresh_keeps_capture_and_manual_plan(void)
+{
+    manifest(CONTENT_RUID, 7, "original.opus", "second.opus", TRUE);
+    v3_native_cache_download_plan_t old_plan, new_plan;
+    assert(v3_native_cache_download_plan_get(TEST_OVERLAY, CONTENT_RUID, &old_plan) == NO_ERROR);
+    v3_native_cache_chapter_capture_t first, second, duplicate;
+    char *path = NULL;
+    assert(prepare("original.opus", &first, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    finish_object(&first);
+    assert(prepare("second.opus", &second, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    v3_native_cache_chapter_append(&second, "Og", 2);
+    assert(refresh_audio_auth("refreshed-auth", "second.opus", TRUE) == NO_ERROR);
+    assert(v3_native_cache_download_plan_get(TEST_OVERLAY, CONTENT_RUID, &new_plan) == NO_ERROR);
+    assert(old_plan.route_handle.serial == new_plan.route_handle.serial);
+    assert(!strcmp(old_plan.objects[0].auth, "opaque-token"));
+    assert(!strcmp(new_plan.objects[0].auth, "refreshed-auth"));
+    assert(v3_native_cache_chapter_prepare_plan(TEST_CACHE, TEST_LIBRARY, &old_plan,
+                                                 "original.opus", &first, &path) == V3_NATIVE_CHAPTER_STAGED);
+    v3_native_cache_chapter_abort(&first);
+    assert(prepare("second.opus", &duplicate, &path) == V3_NATIVE_CHAPTER_FORWARD);
+    v3_native_cache_chapter_abort(&duplicate);
+    assert(fsFileExists(second.temp_path));
+    v3_native_cache_chapter_append(&second, "gS", 2);
+    assert(v3_native_cache_chapter_finish(&second) == NO_ERROR);
+    v3_native_cache_chapter_abort(&second);
+    assert(v3_native_cache_active_info(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+                                        CONTENT_RUID, NULL, NULL, NULL));
+    v3_native_cache_download_plan_free(&old_plan);
+    v3_native_cache_download_plan_free(&new_plan);
+}
+
+static void test_auth_refresh_preserves_order_and_exact_resolution(void)
+{
+    manifest(CONTENT_RUID, 7, "original.opus", NULL, FALSE);
+    manifest(SYSTEM_RUID, 7, "original.opus", NULL, FALSE);
+    v3_native_cache_meta_capture_t delayed;
+    v3_native_cache_meta_observe_init(&delayed, TEST_OVERLAY, CONTENT_RUID);
+    meta_body_auth(&delayed, 7, "original.opus", NULL, "late-old-auth");
+    char auth[V3_NATIVE_CACHE_OBJECT_AUTH_SIZE];
+    memset(auth, 'x', sizeof(auth) - 1U);
+    auth[sizeof(auth) - 1U] = '\0';
+    assert(refresh_audio_auth(auth, NULL, FALSE) == NO_ERROR);
+    assert(v3_native_cache_meta_capture_finish(&delayed) == ERROR_ABORTED);
+    v3_native_cache_meta_capture_abort(&delayed);
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(v3_native_cache_chapter_prepare(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+                                            "original.opus", auth, &capture, &path) == V3_NATIVE_CHAPTER_FORWARD);
+    assert(!strcmp(capture.ruid, CONTENT_RUID));
+    v3_native_cache_chapter_abort(&capture);
+    assert(v3_native_cache_chapter_prepare(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+                                            "original.opus", "opaque-token", &capture, &path) == V3_NATIVE_CHAPTER_FORWARD);
+    assert(!strcmp(capture.ruid, SYSTEM_RUID));
+    v3_native_cache_chapter_abort(&capture);
+    assert(v3_native_cache_chapter_prepare(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+                                            "original.opus", "late-old-auth", &capture, &path) == V3_NATIVE_CHAPTER_REJECT);
+    assert(!fsDirExists(TEST_CACHE));
+}
+
+static void test_auth_refresh_still_rejects_content_changes(void)
+{
+    manifest(CONTENT_RUID, 7, "original.opus", "second.opus", TRUE);
+    const char *path = TEST_CACHE "/v3-native/staging/5/" CONTENT_RUID "/7/manifest.json";
+    char *original = read_test_file(path);
+    enum {CHANGE_NAME, CHANGE_SIZE, CHANGE_TYPE, CHANGE_FILENAME,
+          CHANGE_CONTENT_TYPE, CHANGE_COUNT, CHANGE_ORDER, CHANGE_COUNT_TOTAL};
+    for (unsigned change = 0; change < CHANGE_COUNT_TOTAL; change++)
+    {
+        cJSON *root = cJSON_Parse(original);
+        assert(root != NULL);
+        cJSON *content = cJSON_GetObjectItem(root, "content");
+        cJSON *first = cJSON_GetArrayItem(content, 0);
+        assert(cJSON_ReplaceItemInObject(first, "auth", cJSON_CreateString("fresh-auth")));
+        switch (change)
+        {
+        case CHANGE_NAME:
+            assert(cJSON_ReplaceItemInObject(first, "name", cJSON_CreateString("other.opus")));
+            break;
+        case CHANGE_SIZE:
+            assert(cJSON_ReplaceItemInObject(first, "fileSize", cJSON_CreateNumber(5)));
+            break;
+        case CHANGE_TYPE:
+            assert(cJSON_ReplaceItemInObject(first, "type", cJSON_CreateString("data")));
+            break;
+        case CHANGE_FILENAME:
+            assert(cJSON_AddStringToObject(first, "filename", "changed.opus"));
+            break;
+        case CHANGE_CONTENT_TYPE:
+            assert(cJSON_AddStringToObject(root, "contentType", "tonieplay"));
+            break;
+        case CHANGE_COUNT:
+            cJSON_DeleteItemFromArray(content, 1);
+            break;
+        case CHANGE_ORDER:
+            assert(cJSON_AddItemToArray(content, cJSON_DetachItemFromArray(content, 0)));
+            break;
+        }
+        char *raw = cJSON_PrintUnformatted(root);
+        assert(raw != NULL);
+        v3_native_cache_meta_capture_t meta;
+        v3_native_cache_meta_capture_init(&meta, TEST_CACHE, TEST_LIBRARY,
+                                           TEST_OVERLAY, CONTENT_RUID);
+        v3_native_cache_meta_capture_response(&meta, 200);
+        v3_native_cache_meta_capture_append(&meta, raw, strlen(raw));
+        assert(v3_native_cache_meta_capture_finish(&meta) == ERROR_INVALID_FILE);
+        v3_native_cache_meta_capture_abort(&meta);
+        char *unchanged = read_test_file(path);
+        assert(!strcmp(original, unchanged));
+        free(unchanged);
+        cJSON_free(raw);
+        cJSON_Delete(root);
+    }
+    v3_native_cache_download_plan_t plan;
+    assert(v3_native_cache_download_plan_get(TEST_OVERLAY, CONTENT_RUID, &plan) == NO_ERROR);
+    assert(!strcmp(plan.objects[0].auth, "opaque-token"));
+    v3_native_cache_download_plan_free(&plan);
+    free(original);
+}
+
+static void test_auth_refresh_retries_storage_without_changing_library(void)
+{
+    complete_generation(CONTENT_RUID, 7, "original.opus");
+    char *source = NULL;
+    assert(v3_native_cache_import_active_library(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+                                                  CONTENT_RUID, &source) == NO_ERROR);
+    const char *manifest_path = TEST_CACHE "/v3-native/versions/5/" CONTENT_RUID "/7/manifest.json";
+    const char *descriptor_path = TEST_CACHE "/v3-native/versions/5/" CONTENT_RUID "/7/descriptor.json";
+    const char *marker_path = TEST_CACHE "/v3-native/active/5/" CONTENT_RUID ".json";
+    const char *blocked_part = TEST_CACHE "/v3-native/versions/5/" CONTENT_RUID "/7/manifest.json.part";
+    char *before = read_test_file(manifest_path);
+    char *descriptor = read_test_file(descriptor_path);
+    char *marker = read_test_file(marker_path);
+    assert(fsCreateDir(blocked_part) == NO_ERROR);
+    /* POSIX remove() can remove an empty directory: keep it nonempty so the
+     * production atomic writer cannot delete its deliberately blocked path. */
+    const char *blocker_path = TEST_CACHE "/v3-native/versions/5/" CONTENT_RUID "/7/manifest.json.part/blocker";
+    FILE *blocker = fopen(blocker_path, "wb");
+    assert(blocker != NULL);
+    assert(fclose(blocker) == 0);
+    assert(refresh_audio_auth("new-auth.lastc-23-1791216979", NULL, TRUE) != NO_ERROR);
+    char *after = read_test_file(manifest_path);
+    assert(!strcmp(before, after));
+    free(after);
+    /* Read-only status and actual local delivery must not replace live auth
+     * with the older manifest left on disk by the failed atomic write. */
+    assert(v3_native_cache_active_info(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+                                        CONTENT_RUID, NULL, NULL, NULL));
+    v3_native_cache_route_handle_t handle;
+    uint8_t *data = NULL;
+    size_t length = 0;
+    uint32_t version = 0;
+    assert(v3_native_cache_open_active_manifest(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+                                                 CONTENT_RUID, &data, &length, &version, &handle) == NO_ERROR);
+    free(data);
+    v3_native_cache_route_release(&handle);
+    v3_native_cache_download_plan_t plan;
+    assert(v3_native_cache_download_plan_get(TEST_OVERLAY, CONTENT_RUID, &plan) == NO_ERROR);
+    assert(!strcmp(plan.objects[0].auth, "new-auth.lastc-23-1791216979"));
+    v3_native_cache_download_plan_free(&plan);
+    assert(fsDeleteFile(blocker_path) == NO_ERROR);
+    assert(fsRemoveDir(blocked_part) == NO_ERROR);
+    assert(refresh_audio_auth("new-auth.lastc-23-1791216979", NULL, TRUE) == NO_ERROR);
+    after = read_test_file(manifest_path);
+    assert(strstr(after, "new-auth.lastc-23-1791216979") != NULL);
+    free(after);
+    after = read_test_file(descriptor_path);
+    assert(!strcmp(descriptor, after));
+    free(after);
+    after = read_test_file(marker_path);
+    assert(!strcmp(marker, after));
+    free(after);
+    char *reimported = NULL;
+    assert(v3_native_cache_import_active_library(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+                                                  CONTENT_RUID, &reimported) == NO_ERROR);
+    assert(!strcmp(source, reimported));
+    v3_native_cache_invalidate_routes(TEST_OVERLAY, CONTENT_RUID);
+    assert(v3_native_cache_open_active_manifest(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+                                                 CONTENT_RUID, &data, &length, &version, &handle) == NO_ERROR);
+    assert(strstr((char *)data, "new-auth.lastc-23-1791216979") != NULL);
+    free(data);
+    v3_native_cache_route_release(&handle);
+    free(before);
+    free(descriptor);
+    free(marker);
+    free(source);
+    free(reimported);
+}
+
+static error_t refresh_game_manifest(const uint8_t *manifest_data, size_t length,
+                                      const char *auth)
+{
+    cJSON *manifest_json = cJSON_ParseWithLength((const char *)manifest_data, length);
+    assert(manifest_json != NULL);
+    cJSON *object = cJSON_GetArrayItem(cJSON_GetObjectItem(manifest_json, "content"), 0);
+    assert(cJSON_ReplaceItemInObject(object, "auth", cJSON_CreateString(auth)));
+    char *raw = cJSON_PrintUnformatted(manifest_json);
+    assert(raw != NULL);
+    v3_native_cache_meta_capture_t meta;
+    v3_native_cache_meta_capture_init(&meta, TEST_CACHE, TEST_LIBRARY,
+                                       TEST_OVERLAY, "DC467027500304E0");
+    v3_native_cache_meta_capture_response(&meta, 200);
+    v3_native_cache_meta_capture_append(&meta, raw, strlen(raw));
+    error_t error = v3_native_cache_meta_capture_finish(&meta);
+    v3_native_cache_meta_capture_abort(&meta);
+    cJSON_Delete(manifest_json);
+    cJSON_free(raw);
+    return error;
+}
+
+static void test_tonieplay_auth_refresh_imports_from_immutable_library(void)
+{
+    test_import_requires_requested_active_version();
+    const char *game_ruid = "DC467027500304E0";
+    char *original_source = NULL;
+    assert(v3_native_cache_active_library_source(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+                                                 game_ruid, 9, &original_source) == NO_ERROR);
+    v3_tonieplay_library_collection_t original, reloaded, refreshed;
+    assert(v3_tonieplay_library_collection_load(TEST_LIBRARY, original_source, TRUE, &original) == NO_ERROR);
+    assert(!fsFileExists(TEST_CACHE "/v3-native/versions/5/DC467027500304E0/9/chapters/game.json"));
+    assert(refresh_game_manifest(original.manifest, original.manifest_length, "new-game-auth") == NO_ERROR);
+    assert(v3_native_cache_import_active_tonieplay_library_version(TEST_CACHE, TEST_LIBRARY,
+                                                                    TEST_OVERLAY, game_ruid, 9) == NO_ERROR);
+    char *new_source = NULL;
+    assert(v3_native_cache_active_library_source(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+                                                 game_ruid, 9, &new_source) == NO_ERROR);
+    assert(strcmp(new_source, original_source));
+    assert(v3_tonieplay_library_collection_load(TEST_LIBRARY, original_source, TRUE, &reloaded) == NO_ERROR);
+    assert(original.manifest_length == reloaded.manifest_length &&
+           !memcmp(original.manifest, reloaded.manifest, original.manifest_length));
+    assert(v3_tonieplay_library_collection_load(TEST_LIBRARY, new_source, TRUE, &refreshed) == NO_ERROR);
+    assert(strstr((char *)refreshed.manifest, "new-game-auth") != NULL);
+    assert(!strcmp(original.objects[0].sha256, refreshed.objects[0].sha256));
+    v3_tonieplay_library_collection_free(&original);
+    v3_tonieplay_library_collection_free(&reloaded);
+    v3_tonieplay_library_collection_free(&refreshed);
+    free(original_source);
+    free(new_source);
+}
+
+static const uint8_t *racing_game_manifest;
+static size_t racing_game_manifest_length;
+
+static void refresh_game_before_library_link(void)
+{
+    assert(refresh_game_manifest(racing_game_manifest, racing_game_manifest_length,
+                                    "third-game-auth") == NO_ERROR);
+}
+
+static void test_tonieplay_auth_refresh_checks_manifest_before_linking(void)
+{
+    test_import_requires_requested_active_version();
+    const char *game_ruid = "DC467027500304E0";
+    const char *descriptor_path = TEST_CACHE "/v3-native/versions/5/DC467027500304E0/9/descriptor.json";
+    char *original_source = NULL;
+    assert(v3_native_cache_active_library_source(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+                                                 game_ruid, 9, &original_source) == NO_ERROR);
+    v3_tonieplay_library_collection_t original, latest;
+    assert(v3_tonieplay_library_collection_load(TEST_LIBRARY, original_source, TRUE, &original) == NO_ERROR);
+    char *descriptor = read_test_file(descriptor_path);
+    assert(refresh_game_manifest(original.manifest, original.manifest_length, "second-game-auth") == NO_ERROR);
+    racing_game_manifest = original.manifest;
+    racing_game_manifest_length = original.manifest_length;
+    /* Deterministic interleaving after archive publication, before linking. */
+    library_release_hook = refresh_game_before_library_link;
+    assert(v3_native_cache_import_active_tonieplay_library_version(TEST_CACHE, TEST_LIBRARY,
+                                                                    TEST_OVERLAY, game_ruid, 9) == ERROR_ABORTED);
+    assert(library_release_hook == NULL);
+    char *unchanged = read_test_file(descriptor_path);
+    assert(!strcmp(descriptor, unchanged));
+    free(unchanged);
+    assert(v3_native_cache_import_active_tonieplay_library_version(TEST_CACHE, TEST_LIBRARY,
+                                                                    TEST_OVERLAY, game_ruid, 9) == NO_ERROR);
+    char *latest_source = NULL;
+    assert(v3_native_cache_active_library_source(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+                                                 game_ruid, 9, &latest_source) == NO_ERROR);
+    assert(strcmp(latest_source, original_source));
+    assert(v3_tonieplay_library_collection_load(TEST_LIBRARY, latest_source, TRUE, &latest) == NO_ERROR);
+    assert(strstr((char *)latest.manifest, "third-game-auth") != NULL);
+    v3_tonieplay_library_collection_free(&original);
+    v3_tonieplay_library_collection_free(&latest);
+    free(original_source);
+    free(latest_source);
+    free(descriptor);
+}
+
+static void test_tonieplay_auth_refresh_rejects_damaged_library_backing(void)
+{
+    test_import_requires_requested_active_version();
+    const char *game_ruid = "DC467027500304E0";
+    const char *descriptor_path = TEST_CACHE "/v3-native/versions/5/DC467027500304E0/9/descriptor.json";
+    char *source = NULL;
+    assert(v3_native_cache_active_library_source(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+                                                 game_ruid, 9, &source) == NO_ERROR);
+    v3_tonieplay_library_collection_t original;
+    assert(v3_tonieplay_library_collection_load(TEST_LIBRARY, source, TRUE, &original) == NO_ERROR);
+    char *descriptor = read_test_file(descriptor_path);
+    assert(refresh_game_manifest(original.manifest, original.manifest_length, "new-game-auth") == NO_ERROR);
+    FILE *object = fopen(original.objects[0].path, "wb");
+    assert(object != NULL);
+    assert(fwrite("bad!", 1, 4, object) == 4 && fclose(object) == 0);
+    assert(v3_native_cache_import_active_tonieplay_library_version(TEST_CACHE, TEST_LIBRARY,
+                                                                    TEST_OVERLAY, game_ruid, 9) == ERROR_INVALID_FILE);
+    char *unchanged = read_test_file(descriptor_path);
+    assert(!strcmp(descriptor, unchanged));
+    free(unchanged);
+    free(descriptor);
+    v3_tonieplay_library_collection_free(&original);
+    free(source);
+}
+
 int main(int argc, char **argv)
 {
     struct { const char *name; void (*run)(void); } cases[] = {
@@ -921,6 +1296,14 @@ int main(int argc, char **argv)
         {"import-version", test_import_requires_requested_active_version},
         {"repair-incomplete", test_evicted_incomplete_generation_can_be_repaired},
         {"assigned-system-auth", test_assigned_and_system_object_auth_disambiguation},
+        {"auth-refresh-staging", test_auth_refresh_reuses_persisted_staging},
+        {"auth-refresh-capture", test_auth_refresh_keeps_capture_and_manual_plan},
+        {"auth-refresh-order", test_auth_refresh_preserves_order_and_exact_resolution},
+        {"auth-refresh-identity", test_auth_refresh_still_rejects_content_changes},
+        {"auth-refresh-storage", test_auth_refresh_retries_storage_without_changing_library},
+        {"auth-refresh-tonieplay", test_tonieplay_auth_refresh_imports_from_immutable_library},
+        {"auth-refresh-library-race", test_tonieplay_auth_refresh_checks_manifest_before_linking},
+        {"auth-refresh-library-corrupt", test_tonieplay_auth_refresh_rejects_damaged_library_backing},
     };
     assert(argc == 2);
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
