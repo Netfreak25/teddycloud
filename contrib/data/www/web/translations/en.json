@@ -2207,16 +2207,6 @@
         "openNewVersionInGithub": "Open the latest version on GitHub"
     },
     "tonieboxes": {
-        "sorting": {
-            "handle": "Move {{name}}",
-            "hint": "Hold and drag the name bar to reorder boxes.",
-            "instructions": "To move a box, press Space, use the arrow keys, then press Space again. Escape cancels.",
-            "pickedUp": "{{name}} picked up, position {{position}} of {{count}}.",
-            "moved": "{{name}}, position {{position}} of {{count}}.",
-            "dropped": "{{name}} moved to position {{position}} of {{count}}.",
-            "cancelled": "Move cancelled. The order is unchanged.",
-            "storageWarning": "The order could not be saved in this browser and will only apply while this page remains open."
-        },
         "accessApiDisabled": "Access to TeddyCloud APIs disabled.",
         "accessApiEnabled": "Access to TeddyCloud APIs enabled.",
         "availableBoxModal": {

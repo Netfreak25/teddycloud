@@ -2207,16 +2207,6 @@
         "openNewVersionInGithub": "Ouvrir la dernière version sur GitHub"
     },
     "tonieboxes": {
-        "sorting": {
-            "handle": "Déplacer {{name}}",
-            "hint": "Maintenez la barre du nom et faites-la glisser pour réorganiser les boîtes.",
-            "instructions": "Pour déplacer une boîte, appuyez sur Espace, utilisez les touches fléchées, puis appuyez de nouveau sur Espace. Échap annule le déplacement.",
-            "pickedUp": "{{name}} sélectionnée, position {{position}} sur {{count}}.",
-            "moved": "{{name}}, position {{position}} sur {{count}}.",
-            "dropped": "{{name}} déplacée à la position {{position}} sur {{count}}.",
-            "cancelled": "Déplacement annulé. L'ordre reste inchangé.",
-            "storageWarning": "L'ordre n'a pas pu être enregistré dans ce navigateur et ne sera conservé que tant que cette page restera ouverte."
-        },
         "accessApiDisabled": "Accès aux API de TeddyCloud désactivé.",
         "accessApiEnabled": "Accès aux API de TeddyCloud activé.",
         "availableBoxModal": {
