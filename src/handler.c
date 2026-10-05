@@ -1266,8 +1266,30 @@ error_t moveTAF2Lib(tonie_info_t *tonieInfo, settings_t *settings, bool_t rootDi
                     free(tonieInfo->json.source);
                     tonieInfo->json.source = strdup(libraryShortPath);
 
-                    save_content_json(tonieInfo->jsonPath, &tonieInfo->json);
-                    TRACE_INFO(">> Successfully set to library %s\r\n", libraryShortPath);
+                    error = save_content_json(tonieInfo->jsonPath, &tonieInfo->json);
+                    if (error == NO_ERROR)
+                    {
+                        /* Content storage uses <first 8 hex>/<last 8 hex>.
+                         * Library source assignment revokes old original
+                         * routes, but does not discard their cached files. */
+                        const char *relative = tonieInfo->contentPath + lenContent;
+                        if (relative[0] == PATH_SEPARATOR)
+                        {
+                            relative++;
+                        }
+                        if (osStrlen(relative) == 17 && relative[8] == PATH_SEPARATOR)
+                        {
+                            char ruid[17];
+                            osSnprintf(ruid, sizeof(ruid), "%.8s%.8s", relative, relative + 9);
+                            v3_native_content_source_changed(settings, ruid);
+                        }
+                        TRACE_INFO(">> Successfully set to library %s\r\n", libraryShortPath);
+                    }
+                    else
+                    {
+                        TRACE_ERROR(">> Could not save library source %s: %s\r\n",
+                                    libraryShortPath, error2text(error));
+                    }
                 }
                 else
                 {

@@ -62,13 +62,21 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
         for marker in (
             "v3_native_cache_meta_capture_init",
             "v3_native_cache_meta_capture_finish",
-            "v3_native_cache_download_plan_get",
-            "v3_native_cache_chapter_prepare",
+            "v3_native_cache_download_plan_from_meta",
+            "v3_native_cache_chapter_prepare_plan",
             "v3_native_cache_chapter_append",
             "v3_native_cache_chapter_finish",
             "v3_native_cache_active_version",
         ):
             self.assertIn(marker, self.cloud)
+        plan = self.manual.index("v3_native_cache_download_plan_from_meta(&meta.cache, &plan)")
+        release = self.manual.index("v3_native_cache_meta_capture_abort(&meta.cache)", plan)
+        prepare = self.manual.index("v3_native_cache_chapter_prepare_plan", release)
+        self.assertLess(plan, release)
+        self.assertLess(release, prepare)
+        self.assertNotIn("v3_native_cache_download_plan_get(", self.manual)
+        self.assertNotIn("v3_native_cache_chapter_prepare(", self.manual)
+        self.assertIn("v3_native_cache_download_plan_free(&plan)", self.manual)
         for forbidden in ("fsOpenFile", "fsWriteFile", "fsRenameFile"):
             self.assertNotIn(forbidden, self.manual)
 
@@ -148,18 +156,21 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
         self.assertIn("v3_native_object_string_fits(auth", parser)
         self.assertNotIn("isalnum(value)", parser)
 
-    def test_incomplete_download_restores_previous_active_route(self):
+    def test_incomplete_download_validates_previous_cache_without_reselecting_route(self):
         restore_start = self.cloud.index(
             "static void v3_manual_download_restore_active_route("
         )
         restore_end = self.cloud.index("error_t handleCloudContentDownloadV3(")
         restore = self.cloud[restore_start:restore_end]
         self.assertIn("v3_native_cache_read_active_manifest", restore)
+        self.assertNotIn("v3_native_cache_open_active_manifest", restore)
+        self.assertNotIn("v3_native_cache_meta_capture_init", restore)
         self.assertGreaterEqual(self.manual.count("TRUE);"), 4)
 
     def test_errors_are_stage_specific_for_api_and_logs(self):
         for stage in (
             'return "auth";',
+            'return "capacity";',
             'return "manifest";',
             'return "chapter";',
             'return "activation";',

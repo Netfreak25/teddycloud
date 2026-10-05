@@ -38,6 +38,8 @@ error_t handleCloudReset(HttpConnection *connection, const char_t *uri, const ch
 error_t handleContent(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
 void freshness_mark_content_mapping_changed(settings_t *target_settings, const char *ruid,
                                             bool_t source_changed);
+/** Invalidate only runtime original routes sharing this content.json root. */
+void v3_native_content_source_changed(settings_t *target_settings, const char *ruid);
 void freshness_cache_sync_source_changed_uids(settings_t *settings);
 bool_t freshness_confirm_v3_content_version(settings_t *settings, const char *ruid,
                                             uint64_t content_version);

@@ -189,6 +189,26 @@ version check.
 
 This synchronous snapshot is specific to the V3 local-content path. It does not replace the existing progressive TAP streaming behavior used by the older content path. The canonical storage, hash-name, legacy-gate, range and `.part` semantics are documented in [TB2_V3_CONTENT_CACHE.md](TB2_V3_CONTENT_CACHE.md).
 
+### Original-route authority after a source change
+
+Assigning TAP, TAF or another library source revokes earlier native-original
+download routes for the same RUID and content directory. It does not delete the
+original cache or change TAP generation, shuffle selection or Freshness version
+allocation. Already known system/language collections remain independent.
+
+- `include/handler_cloud.h` declares the shared runtime invalidation hook so
+  direct source writers need not duplicate overlay/content-directory matching.
+- `src/handler.c` calls that hook after a successful TAF-library source save;
+  this path does not pass through the usual mapping-change notification.
+- `src/handler_cloud.c` invokes the same hook on mapping changes and checks the
+  current source/NoCloud policy before serving or forwarding original objects
+  and before accepting their completion. This prevents an old transfer from
+  overriding a newly assigned TAP without changing the existing Freshness rules.
+- `include/v3_native_cache.h` and `src/v3_native_cache.c` provide runtime-only
+  invalidation of pinned generation handles. Invalidated completions cannot
+  publish, while complete on-disk originals remain reusable; deleting the cache
+  would unnecessarily destroy valid user content.
+
 ## Freshness and versioning
 
 Freshness checks use the TAP `audio_id` as the effective server version for stable playlists. A box cache is current only when its cached version matches the TAP `audio_id` and the server-side final `.taf` is current.

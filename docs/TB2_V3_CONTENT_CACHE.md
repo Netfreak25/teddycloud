@@ -23,7 +23,7 @@ v3-native/
   staging/<overlay>/<CANONICAL-RUID>/<version>/
     manifest.json
     descriptor.json
-    chapters/<original-name>.part
+    chapters/<original-name>.<runtime-instance>.part
   versions/<overlay>/<CANONICAL-RUID>/<version>/
     manifest.json
     descriptor.json
@@ -47,6 +47,55 @@ marked stale by the existing Freshness implementation is forwarded to TONIES
 and captured. The Freshness algorithm itself is not replaced or extended by
 the native cache. Local `teddycloud_` chapter names never enter this store and
 never fall through to TONIES.
+
+### Independent runtime routes and ownership
+
+The runtime registry retains separate overlay/RUID/version routes. A subsequent
+system or language-pack manifest therefore does not replace an unrelated
+Tonie's chapter mapping, including when native caching is disabled and the
+manifest is observed only for forwarding. No system RUID is hardcoded into the
+registry. It accepts only validated manifests and exact advertised object names;
+an unknown name never becomes an unrestricted TONIES fallback.
+
+`V3_NATIVE_CACHE_ROUTES_PER_OVERLAY` bounds runtime storage to eight slots per
+overlay. This is not a per-box library: all boxes still share the same
+content-addressed library and content hashes. Content-meta reserves
+a slot before contacting TONIES. A full registry returns HTTP `503` before any
+upstream request or successful manifest response. Reservations, manual plans and
+chapter operations pin serial-numbered handles; slot reuse cannot redirect an
+in-flight operation. Only eligible unpinned entries may be reclaimed. A newer
+selected generation of the same RUID prevents an older late completion from
+replacing its active marker. Failed refreshes retain the previous usable route.
+
+Cache and library inspection use detached validated snapshots. `cacheState`,
+metadata completion and library-source queries do not activate a playback route
+or change its selected version. Serving an active original manifest explicitly
+opens and pins its exact snapshot before sending it. Repeated manifests preserve
+the ownership of any chapter capture already writing the same generation.
+Unpinned obsolete versions can be evicted; failed storage is retried on the next
+valid manifest instead of leaving an observed route permanently uncacheable.
+Matching incomplete persisted generations may refill their missing objects,
+but cannot become active until every object is complete. Temporary filenames
+include the runtime instance so an invalidated writer cannot remove a later
+writer's `.part` file.
+
+Original chapter names can occur in more than one retained manifest. An exact
+opaque `auth` value can disambiguate them; an ambiguous or mismatched mapping is
+rejected locally, never selected by slot order. The handler parses only the exact
+`auth` query key, rejects duplicates, truncation and malformed percent escapes,
+decodes once, and keeps literal `+` bytes intact. The upstream query remains
+unchanged. Manually generated queries percent-encode the original manifest token
+without interpreting or logging its contents.
+
+The current content source remains authoritative before serving or forwarding
+an original chapter. A configured source blocks retained original routes even
+when their files are complete. NoCloud still permits a complete local original
+cache, but blocks its upstream fallback unless the existing cloud override
+allows it. Source changes revoke runtime routes and outstanding reservations for
+the affected content roots without deleting complete original backing caches.
+Meta/chapter completion rechecks the current source and policy; a delayed response
+cannot publish through a revoked handle. The Freshness algorithm and its exact
+MQTT playback-version confirmation are unchanged.
 
 ## Native TB2 library import
 
@@ -89,6 +138,9 @@ the descriptor update leaves the cache copy authoritative; a crash after the
 update causes the next route load to validate the library and finish the same
 best-effort compaction. One generation always uses one complete backing store:
 it never combines individual cache and library files.
+Compaction waits for all pinned operations of that generation to finish, including
+responses that have resolved a cache pathname but have not opened it yet. The
+last release completes deferred cleanup under the library/cache lock order.
 
 The box still receives the byte-identical original manifest and requests the
 original TONIES object names. Those names are mapped by manifest position to
@@ -100,8 +152,9 @@ A new generation starts without a link. An invalid or missing library entry
 falls back to a complete retained cache copy; if neither backing is complete,
 the generation is a cache miss. Existing collections are not scanned in the
 background: an older generation gains and compacts its link on its next
-successful normal import, explicit V3 download, or load of an already linked
-descriptor. Disabling a library-import setting prevents future imports but
+successful normal import, explicit V3 download, or explicit activation of an
+already linked descriptor. Read-only inspection does not compact files.
+Disabling a library-import setting prevents future imports but
 does not invalidate already compacted generations.
 
 Deleting a native library collection first invalidates every linked cache
@@ -129,9 +182,16 @@ of its configured generation; `auto` selects this path only for a TB2 overlay.
 Manual TB2 downloads deliberately reuse the normal cache pipeline:
 
 - `v3_native_cache_meta_capture` validates and stages the original manifest;
-- `v3_native_cache_chapter_prepare` validates each advertised chapter and
+- `v3_native_cache_download_plan_from_meta` pins that exact manifest handle;
+- `v3_native_cache_chapter_prepare_plan` validates each advertised chapter and
   writes it into the same staged generation as live MITM traffic;
 - the route becomes active only after all advertised chapters are complete.
+
+The plan never resolves objects through the overlay's most recently loaded
+manifest. Concurrent system metadata, other manual downloads and library/status
+reads cannot redirect it to another RUID or version. Every operation releases its
+pin after use, including already complete local or staged objects. Exhausted
+route capacity is reported as stage `capacity` with HTTP `503`.
 
 For an explicit V3 download, successful cache activation is followed by model
 completion and, when `toniebox2.cacheToLibraryV3` is enabled, the same atomic
@@ -159,8 +219,9 @@ fields as compatibility aliases. It additionally distinguishes
 `source` after import, and gives an optional `assignmentReason` when a safe
 assignment was skipped. Complete staged objects survive reconnects;
 an incomplete `.part` is replaced by the next complete HTTP `200` transfer.
-Only one capture may write a given object at a time. Cache failures are logged
-but never interrupt the live TONIES response.
+Only one capture may write a given object at a time. After successful route
+reservation, cache-write failures are logged without interrupting the live TONIES
+body. Failure to reserve a route is rejected before the request starts.
 
 With native library caching disabled, a complete manual download is reported
 as cache-only and is not offered repeatedly as an incomplete download. It does
@@ -241,8 +302,11 @@ assigned to any valid content RUID of a TB2 overlay. Full manifest, size and
 SHA-256 validation happens before assignment. The local V3 response preserves
 all manifest values and rewrites only the top-level version to the effective
 local Freshness version. Exact object names are resolved from the assigned
-collection; any other name receives a local `404`, and NoCloud never falls back
-to TONIES. Freshness is confirmed only by MQTT playback of that exact version.
+collection. Independent validated native routes, such as a system language pack,
+may coexist on the overlay; each uses its own current source and cloud policy.
+An unknown name still receives a local `404`, and the assigned collection never
+falls back to TONIES. Freshness is confirmed only by MQTT playback of that exact
+version.
 
 The captured protocol does not prove that TONIES games are RUID-portable. The
 cross-RUID assignment is an explicit TeddyCloud capability whose real device
@@ -494,6 +558,38 @@ The marker is cleared only when the local MQTT observer receives playback state 
 - Loads or creates generation descriptors for content-meta.
 - Parses hashed and legacy chapter names, applies the transition gate and keeps local misses local.
 - Returns `416` for resumed legacy requests and delegates hashed objects to the existing unchanged immutable-file streamer.
+- Reserves native routes before upstream metadata, explicitly pins cached
+  manifests and manual plans, and releases every chapter result. This keeps
+  HTTP and manual-download ownership explicit instead of relying on whichever
+  manifest a status or library request most recently loaded.
+- Applies current source/NoCloud authority before native output and checks it
+  again at completion; source changes revoke affected runtime routes while
+  retaining complete backing caches. Existing Freshness decisions remain the
+  sole owner of replacement versions and playback confirmation.
+- Parses exact opaque chapter authentication without form decoding or silent
+  truncation, and permits independent system routes beside assigned Tonieplay.
+
+### `include/v3_native_cache.h` and `src/v3_native_cache.c`
+
+- Define bounded per-overlay routes and serial-numbered pinned handles for
+  reservations, exact manual plans and chapter captures. Pins are preferred to
+  slot indexes because slot reuse must not change an in-flight object's owner.
+- Separate detached cache/library snapshots from explicit playback activation;
+  inspection cannot overwrite another Tonie's route or selected version.
+- Reject ambiguous name/auth mappings, retain one capture owner per object and
+  prevent obsolete or invalidated completions from publishing an active marker.
+- Bind automatic and manual library completion to the completed manifest's exact
+  version. If a newer active generation wins before import takes its snapshot,
+  the old completion is rejected instead of importing the newer content under
+  the old download result. Existing library entries and source assignments stay
+  untouched by this rejection.
+
+### `tests/test_tb2_v3_routes_runtime.c` and `tests/test_tb2_v3_routes_runtime.py`
+
+- Compile the production native cache against a temporary POSIX store and check
+  interleaved routes, exact ownership, capacity and invalidation at runtime.
+- Exercise the production handler's auth and source-policy helpers directly;
+  token decoding and NoCloud behavior are not inferred from source-text markers.
 
 ### `src/contentJson.c`
 

@@ -95,8 +95,8 @@ class Tb2TonieplayCacheContractTests(unittest.TestCase):
     def test_staging_is_complete_only_for_every_object(self) -> None:
         prepare = self.section(
             self.cache,
+            "static v3_native_cache_chapter_action_t v3_native_chapter_prepare_route(",
             "v3_native_cache_chapter_action_t v3_native_cache_chapter_prepare(",
-            "void v3_native_cache_object_content_type(",
         )
         self.assertIn("V3_NATIVE_CHAPTER_STAGED", prepare)
         self.assertIn("route->chapters[index].capturing", prepare)
@@ -112,8 +112,8 @@ class Tb2TonieplayCacheContractTests(unittest.TestCase):
     def test_legacy_schema_accepts_audio_only(self) -> None:
         loader = self.section(
             self.cache,
-            "error_t v3_native_cache_read_active_manifest(",
-            "bool_t v3_native_cache_active_version(",
+            "static error_t v3_native_snapshot_load_locked(",
+            "static error_t v3_native_snapshot_load(",
         )
         self.assertIn("V3_NATIVE_CACHE_SCHEMA_LEGACY_AUDIO", loader)
         self.assertIn("!v3_native_objects_all_audio(chapters, chapter_count)", loader)
@@ -166,10 +166,27 @@ class Tb2TonieplayCacheContractTests(unittest.TestCase):
             "error_t handleCloudChapterV3(",
         )
         self.assertIn("v3_tonieplay_library_activate", meta)
-        chapter = self.cloud[self.cloud.index("error_t handleCloudChapterV3(") :]
-        self.assertIn("v3_tonieplay_library_resolve", chapter)
-        self.assertIn("v3_tonieplay_library_route_assigned", chapter)
-        self.assertIn("v3_local_write_empty_status(connection, 404)", chapter)
+        chapter = self.section(
+            self.cloud, "error_t handleCloudChapterV3(", "error_t handleCloudOtaV3("
+        )
+        self.assertIn("v3_tonieplay_library_resolve_checked", chapter)
+        assigned = self.section(
+            chapter, "if (v3_tonieplay_library_resolve_checked(", "if (ambiguous)"
+        )
+        self.assertIn("!osStrcmp(assigned->json.source, tonieplay_source)", assigned)
+        self.assertLess(assigned.index("if (!current)"),
+                        assigned.index("httpSendResponseStreamUnsafe"))
+        self.assertIn("v3_local_write_empty_status(connection, 404)", assigned)
+        self.assertNotIn("v3_tonieplay_library_route_assigned", chapter)
+        native = chapter[chapter.index("native_action = v3_native_cache_chapter_prepare("):]
+        self.assertLess(native.index("v3_native_original_content_allowed("),
+                        native.index("if (native_action == V3_NATIVE_CHAPTER_SERVE)"))
+        unknown = self.section(
+            native,
+            "if (native_action == V3_NATIVE_CHAPTER_BYPASS)",
+            "if (client_ctx->settings->cloud.tb2_v3_enabled",
+        )
+        self.assertIn("return v3_local_write_empty_status(connection, 404)", unknown)
 
     def test_separate_setting_and_library_api_are_exposed(self) -> None:
         self.assertIn("bool cacheTonieplayToLibraryV3;", self.settings_header)

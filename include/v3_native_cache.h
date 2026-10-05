@@ -18,6 +18,14 @@
 #define V3_NATIVE_LIBRARY_STAGING_DIR ".tb2-native-staging"
 #define V3_NATIVE_LIBRARY_HASH_HEX_LENGTH 64
 #define V3_NATIVE_LIBRARY_HASH_HEX_SIZE (V3_NATIVE_LIBRARY_HASH_HEX_LENGTH + 1)
+#define V3_NATIVE_CACHE_ROUTES_PER_OVERLAY 8U
+
+/** Pinned runtime identity, never a pointer into a reusable routing slot. */
+typedef struct
+{
+    uint8_t overlay_id;
+    uint64_t serial;
+} v3_native_cache_route_handle_t;
 
 typedef struct
 {
@@ -42,6 +50,7 @@ typedef struct
     /* Compatibility aliases; both point to the same allocation. */
     v3_native_cache_download_chapter_t *chapters;
     size_t chapter_count;
+    v3_native_cache_route_handle_t route_handle;
 } v3_native_cache_download_plan_t;
 
 typedef struct
@@ -100,14 +109,18 @@ typedef struct
 typedef struct
 {
     char *cache_root;
+    char *library_root;
     uint8_t overlay_id;
     char ruid[TB2_RUID_SIZE];
     uint8_t *data;
     size_t length;
     size_t capacity;
     uint32_t status_code;
+    uint32_t version;
     bool_t store;
     bool_t failed;
+    error_t error;
+    v3_native_cache_route_handle_t route_handle;
 } v3_native_cache_meta_capture_t;
 
 typedef enum
@@ -138,10 +151,26 @@ typedef struct
     size_t object_index;
     char content_type[V3_NATIVE_CACHE_CONTENT_TYPE_SIZE];
     bool_t failed;
+    bool_t owns_capture;
+    v3_native_cache_route_handle_t route_handle;
 } v3_native_cache_chapter_capture_t;
 
 /** Accept only one portable, unambiguous filename segment. */
 bool_t v3_native_cache_chapter_name_is_safe(const char *name);
+
+/** Explicitly publish and pin a locally delivered manifest, unlike status reads. */
+error_t v3_native_cache_open_active_manifest(const char *cache_root,
+                                             const char *library_root,
+                                             uint8_t overlay_id,
+                                             const char *ruid,
+                                             uint8_t **data,
+                                             size_t *length,
+                                             uint32_t *version,
+                                             v3_native_cache_route_handle_t *handle);
+void v3_native_cache_route_release(v3_native_cache_route_handle_t *handle);
+
+/** Invalidate runtime requests only; preserve original cache files and marker. */
+void v3_native_cache_invalidate_routes(uint8_t overlay_id, const char *ruid);
 
 /** Load an active original manifest backed completely by cache or library. */
 error_t v3_native_cache_read_active_manifest(const char *cache_root,
@@ -187,6 +216,15 @@ error_t v3_native_cache_import_active_library(const char *cache_root,
                                                const char *ruid,
                                                char **library_source);
 
+/** Import only if the active snapshot still matches this completed version. */
+error_t v3_native_cache_import_active_library_version(
+    const char *cache_root,
+    const char *library_root,
+    uint8_t overlay_id,
+    const char *ruid,
+    uint32_t expected_version,
+    char **library_source);
+
 /**
  * Return the validated native-library source linked to one active generation.
  *
@@ -208,6 +246,13 @@ error_t v3_native_cache_import_active_tonieplay_library(
     const char *library_root,
     uint8_t overlay_id,
     const char *ruid);
+
+error_t v3_native_cache_import_active_tonieplay_library_version(
+    const char *cache_root,
+    const char *library_root,
+    uint8_t overlay_id,
+    const char *ruid,
+    uint32_t expected_version);
 
 /** Return true only for the canonical native-library source URI. */
 bool_t v3_native_library_source_is_candidate(const char *source);
@@ -256,6 +301,15 @@ bool_t v3_tonieplay_library_resolve(uint8_t overlay_id,
                                     char **path,
                                     char content_type[V3_NATIVE_CACHE_CONTENT_TYPE_SIZE]);
 
+/** Resolve assigned objects without overriding an equally named system object.
+ * Returned source and path are caller-owned; ambiguous names fail closed. */
+bool_t v3_tonieplay_library_resolve_checked(uint8_t overlay_id,
+                                            const char *name, const char *auth,
+                                            char **path,
+                                            char content_type[V3_NATIVE_CACHE_CONTENT_TYPE_SIZE],
+                                            char ruid[TB2_RUID_SIZE],
+                                            char **source, bool_t *ambiguous);
+
 bool_t v3_tonieplay_library_route_active(uint8_t overlay_id,
                                          const char *ruid);
 
@@ -275,6 +329,7 @@ void v3_native_cache_invalidate(const char *cache_root,
 
 void v3_native_cache_meta_capture_init(v3_native_cache_meta_capture_t *capture,
                                        const char *cache_root,
+                                       const char *library_root,
                                        uint8_t overlay_id,
                                        const char *ruid);
 /** Observe content-meta routing without persisting manifest or chapters. */
@@ -294,6 +349,9 @@ error_t v3_native_cache_download_plan_get(uint8_t overlay_id,
                                           const char *ruid,
                                           v3_native_cache_download_plan_t *plan);
 void v3_native_cache_download_plan_free(v3_native_cache_download_plan_t *plan);
+error_t v3_native_cache_download_plan_from_meta(
+    const v3_native_cache_meta_capture_t *meta,
+    v3_native_cache_download_plan_t *plan);
 
 /**
  * Resolve a chapter against the current content-meta route for an overlay.
@@ -307,6 +365,16 @@ v3_native_cache_chapter_action_t v3_native_cache_chapter_prepare(
     const char *cache_root,
     const char *library_root,
     uint8_t overlay_id,
+    const char *name,
+    const char *auth,
+    v3_native_cache_chapter_capture_t *capture,
+    char **serve_path);
+
+/** Resolve a manual object through its pinned manifest, not overlay name search. */
+v3_native_cache_chapter_action_t v3_native_cache_chapter_prepare_plan(
+    const char *cache_root,
+    const char *library_root,
+    const v3_native_cache_download_plan_t *plan,
     const char *name,
     v3_native_cache_chapter_capture_t *capture,
     char **serve_path);

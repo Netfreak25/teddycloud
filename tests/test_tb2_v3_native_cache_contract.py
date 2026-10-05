@@ -56,8 +56,8 @@ class Tb2V3NativeCacheContractTests(unittest.TestCase):
     def test_missing_or_damaged_chapter_cannot_activate(self):
         completeness = self.section(
             self.source,
-            "static bool_t v3_native_files_complete(",
-            "static error_t v3_native_write_active_marker(",
+            "static bool_t v3_native_cache_files_complete(",
+            "static bool_t v3_native_origin_list_has(",
         )
         self.assertIn("fsGetFileSize", completeness)
         self.assertIn("route->chapters[i].file_size", completeness)
@@ -66,8 +66,9 @@ class Tb2V3NativeCacheContractTests(unittest.TestCase):
             "static error_t v3_native_activate_route(",
             "void v3_native_cache_meta_capture_init(",
         )
-        self.assertIn("if (!v3_native_files_complete(route))", activation)
+        self.assertIn("if (!v3_native_cache_files_complete(route))", activation)
         self.assertIn("return ERROR_IN_PROGRESS", activation)
+        self.assertIn("route->invalidated || !route->selected", activation)
 
     def test_aborted_or_wrong_size_write_never_becomes_final(self):
         finish = self.section(
@@ -78,7 +79,13 @@ class Tb2V3NativeCacheContractTests(unittest.TestCase):
         self.assertLess(finish.index("capture->written != capture->expected_size"),
                         finish.index("fsRenameFile"))
         abort = self.source[self.source.index("void v3_native_cache_chapter_abort("):]
-        self.assertIn("v3_native_capture_paths_free(capture, TRUE)", abort)
+        self.assertLess(finish.index("!owner_matches || !route->valid"),
+                        finish.index("fsRenameFile"))
+        self.assertIn("v3_native_route_find(capture->route_handle)", finish)
+        self.assertIn("v3_native_capture_paths_free(capture, capture->owns_capture)", abort)
+        self.assertIn("capture->owns_capture && route != NULL", abort)
+        self.assertIn("!osStrcmp(route->ruid, capture->ruid)", abort)
+        self.assertIn("v3_native_route_unpin(route)", abort)
 
     def test_new_version_changes_active_marker_only_after_complete_publish(self):
         activation = self.section(

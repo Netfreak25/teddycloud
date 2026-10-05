@@ -61,9 +61,14 @@ class Tb2CachePreferenceContractTests(unittest.TestCase):
             "bool_t v3_native_cache_active_info(",
             "static error_t v3_native_remove_tree(",
         )
-        self.assertIn("v3_native_cache_read_active_manifest", active_info)
+        self.assertIn("v3_native_snapshot_load", active_info)
+        self.assertIn("const v3_native_route_t *route = &snapshot", active_info)
         self.assertIn("route->valid && route->active", active_info)
         self.assertIn("route->chapter_count > 0", active_info)
+        self.assertIn("v3_native_route_clear(&snapshot)", active_info)
+        for mutation in ("routes[", "v3_native_route_publish", "v3_native_route_reserve",
+                         "v3_native_compact_cache_files"):
+            self.assertNotIn(mutation, active_info)
 
     def test_tb2_prefers_v3_before_taf_and_taf_can_fallback_to_v3(self) -> None:
         meta = self.section(

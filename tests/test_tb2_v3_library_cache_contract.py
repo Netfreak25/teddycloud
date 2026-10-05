@@ -34,7 +34,7 @@ class Tb2V3LibraryCacheContractTests(unittest.TestCase):
         self.assertIn('OPTION_BOOL("toniebox2.cacheToLibraryV3"', self.settings)
         self.assertIn("&settings->cloud.cacheToLibraryV3, FALSE", self.settings)
         self.assertIn('!osStrcmp(opt->option_name, "toniebox2.cacheToLibraryV3")', self.api)
-        self.assertIn("read_only = !get_settings_ovl(overlay)->cloud.cacheContentV3", self.api)
+        self.assertIn("read_only = !scope->cloud.cacheContentV3", self.api)
         gate = self.section(
             self.handler,
             "static void v3_native_import_library_if_enabled(",
@@ -46,14 +46,22 @@ class Tb2V3LibraryCacheContractTests(unittest.TestCase):
     def test_import_accepts_only_a_complete_active_native_generation(self) -> None:
         import_flow = self.section(
             self.source,
-            "error_t v3_native_cache_import_active_library(",
-            "void v3_native_cache_invalidate(",
+            "error_t v3_native_cache_import_active_library_version(",
+            "static bool_t v3_native_library_hash_is_canonical(",
         )
         self.assertLess(
-            import_flow.index("v3_native_cache_read_active_manifest"),
-            import_flow.index("v3_native_parse_manifest"),
+            import_flow.index("v3_native_snapshot_load_locked"),
+            import_flow.index("v3_native_library_prepare_chapters"),
         )
-        self.assertIn("parsed_version != version", import_flow)
+        self.assertIn("version != expected_version", import_flow)
+        self.assertIn("!v3_native_objects_all_audio(snapshot.chapters, snapshot.chapter_count)", import_flow)
+        snapshot = self.section(
+            self.source,
+            "static error_t v3_native_snapshot_load_locked(",
+            "static error_t v3_native_snapshot_load(",
+        )
+        self.assertIn("v3_native_parse_manifest", snapshot)
+        self.assertIn("manifest_version == marker_version", snapshot)
         self.assertNotIn("staging/<overlay>", import_flow)
 
     def test_library_is_separate_from_taf_and_content_addressed(self) -> None:
@@ -100,8 +108,8 @@ class Tb2V3LibraryCacheContractTests(unittest.TestCase):
     def test_import_is_staged_compared_and_renamed_after_metadata(self) -> None:
         import_flow = self.section(
             self.source,
-            "error_t v3_native_cache_import_active_library(",
-            "void v3_native_cache_invalidate(",
+            "error_t v3_native_cache_import_active_library_version(",
+            "static bool_t v3_native_library_hash_is_canonical(",
         )
         copy = import_flow.index("fsCopyFile(source, target, TRUE)")
         compare = import_flow.index("fsCompareFiles(source, target, NULL)", copy)
@@ -115,8 +123,8 @@ class Tb2V3LibraryCacheContractTests(unittest.TestCase):
     def test_origin_is_metadata_and_content_hash_is_the_library_key(self) -> None:
         import_flow = self.section(
             self.source,
-            "error_t v3_native_cache_import_active_library(",
-            "void v3_native_cache_invalidate(",
+            "error_t v3_native_cache_import_active_library_version(",
+            "static bool_t v3_native_library_hash_is_canonical(",
         )
         self.assertIn("V3_NATIVE_LIBRARY_BY_DIR", import_flow)
         self.assertIn("V3_NATIVE_LIBRARY_CONTENT_HASH_DIR", import_flow)
@@ -128,8 +136,8 @@ class Tb2V3LibraryCacheContractTests(unittest.TestCase):
     def test_existing_identical_collection_is_reused_without_overwrite(self) -> None:
         import_flow = self.section(
             self.source,
-            "error_t v3_native_cache_import_active_library(",
-            "void v3_native_cache_invalidate(",
+            "error_t v3_native_cache_import_active_library_version(",
+            "static bool_t v3_native_library_hash_is_canonical(",
         )
         existing = self.section(
             import_flow,
@@ -144,45 +152,61 @@ class Tb2V3LibraryCacheContractTests(unittest.TestCase):
     def test_import_links_only_the_exact_active_generation_to_its_source(self) -> None:
         import_flow = self.section(
             self.source,
-            "error_t v3_native_cache_import_active_library(",
-            "void v3_native_cache_invalidate(",
+            "error_t v3_native_cache_import_active_library_version(",
+            "static bool_t v3_native_library_hash_is_canonical(",
         )
         self.assertIn("char **library_source", import_flow)
         self.assertIn("v3_native_cache_link_library_source", import_flow)
         self.assertIn('"lib://by/contentHash/%s/library-entry.json"', import_flow)
         setter = self.section(
             self.source,
-            "static error_t v3_native_cache_descriptor_set_library_source(",
-            "error_t v3_native_cache_active_library_source(",
+            "static error_t v3_native_cache_link_library_source(",
+            "error_t v3_native_cache_import_active_library(",
         )
         self.assertIn("mutex_lock(MUTEX_V3_NATIVE_CACHE)", setter)
         self.assertIn("mutex_unlock(MUTEX_V3_NATIVE_CACHE)", setter)
+        self.assertLess(setter.index("mutex_lock(MUTEX_V3_NATIVE_LIBRARY)"),
+                        setter.index("mutex_lock(MUTEX_V3_NATIVE_CACHE)"))
+        self.assertLess(setter.index("active_version != version"),
+                        setter.index("v3_native_cache_descriptor_set_library_source_locked"))
 
         getter = self.section(
             self.source,
             "error_t v3_native_cache_active_library_source(",
-            "static error_t v3_native_cache_link_library_source(",
+            "static error_t v3_native_snapshot_refresh_library_routes(",
         )
-        self.assertIn("v3_native_cache_read_active_manifest", getter)
+        self.assertIn("v3_native_snapshot_load", getter)
         self.assertIn("active_version != version", getter)
         self.assertIn("v3_native_library_paths_complete", getter)
         self.assertIn("strdup(route->library_source)", getter)
+        self.assertIn("const v3_native_route_t *route = &snapshot", getter)
+        self.assertNotIn("routes[", getter)
+        self.assertNotIn("v3_native_compact_cache_files", getter)
 
     def test_active_original_route_uses_one_complete_backing_store(self) -> None:
         loader = self.section(
             self.source,
-            "error_t v3_native_cache_read_active_manifest(",
-            "bool_t v3_native_cache_active_version(",
+            "static error_t v3_native_snapshot_load_locked(",
+            "static error_t v3_native_snapshot_load(",
         )
         self.assertIn("v3_native_route_use_library", loader)
         self.assertIn("v3_native_cache_files_complete", loader)
         self.assertIn("(!library_complete && !cache_complete)", loader)
-        self.assertIn("v3_native_compact_cache_files", loader)
+        self.assertNotIn("v3_native_compact_cache_files", loader)
+        self.assertNotIn("routes[", loader)
+        self.assertNotIn("v3_native_route_publish", loader)
+        activation = self.section(
+            self.source,
+            "error_t v3_native_cache_open_active_manifest(",
+            "bool_t v3_native_cache_active_version(",
+        )
+        self.assertLess(activation.index("v3_native_route_publish"),
+                        activation.index("v3_native_compact_cache_files"))
 
         resolver = self.section(
             self.source,
+            "static v3_native_cache_chapter_action_t v3_native_chapter_prepare_route(",
             "v3_native_cache_chapter_action_t v3_native_cache_chapter_prepare(",
-            "void v3_native_cache_object_content_type(",
         )
         self.assertIn("route->library_paths[index]", resolver)
         self.assertIn("v3_native_library_paths_complete", resolver)
@@ -206,7 +230,17 @@ class Tb2V3LibraryCacheContractTests(unittest.TestCase):
         )
         self.assertIn("v3_native_descriptor_references_library", recursive)
         self.assertIn("v3_native_active_marker_path", recursive)
-        self.assertIn("v3_native_route_clear(route)", recursive)
+        self.assertIn("slot < V3_NATIVE_CACHE_ROUTES_PER_OVERLAY", recursive)
+        self.assertIn("v3_native_route_invalidate_locked(route)", recursive)
+        invalidation = self.section(
+            self.source,
+            "static void v3_native_route_invalidate_locked(",
+            "static error_t v3_native_route_reserve(",
+        )
+        self.assertIn("route->invalidated = TRUE", invalidation)
+        self.assertIn("route->selected = FALSE", invalidation)
+        self.assertLess(invalidation.index("if (route->pins == 0)"),
+                        invalidation.index("v3_native_route_clear(route)"))
         self.assertIn("v3_native_remove_tree(directory)", recursive)
 
     def test_normal_mitm_cached_replay_and_manual_download_share_import_hook(self) -> None:
@@ -227,9 +261,17 @@ class Tb2V3LibraryCacheContractTests(unittest.TestCase):
             "static void v3_native_meta_response(",
         )
         self.assertIn(
-            "v3_native_import_library_if_enabled(client_ctx, ruid)",
+            "v3_native_import_library_if_enabled(client_ctx, ruid, manifest_version)",
             cached_replay,
         )
+        automatic = self.section(
+            self.handler,
+            "static void v3_native_import_library_if_enabled(",
+            "bool_t v3_original_content_metadata_complete(",
+        )
+        self.assertIn("active_version != completed_version", automatic)
+        self.assertIn("v3_native_cache_import_active_library_version", automatic)
+        self.assertIn("ruid, completed_version, NULL", automatic)
 
     def test_common_library_view_hides_staging_and_keeps_taf_actions_taf_only(self) -> None:
         self.assertIn("V3_NATIVE_LIBRARY_STAGING_DIR", self.api)
