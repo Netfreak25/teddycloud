@@ -24,6 +24,35 @@ For the older progressive content path, the fallback remains deliberately conser
 
 ## Code changes by file
 
+### Native V3 restart recovery (adjacent HTTP path)
+
+Original TONIES chapter requests can rebuild a missing RAM route from an existing
+overlay-scoped cache manifest after a server restart. TAP assignments, TAF
+generation, source authority and Freshness are unchanged. The full recovery
+contract is documented in [TB2_V3_CONTENT_CACHE.md](TB2_V3_CONTENT_CACHE.md).
+
+- `src/v3_native_cache.c`: loads metadata-only recovery snapshots, rejects
+  conflicts, publishes through the existing reserved route registry, remembers
+  later-chapter collisions and prevents restored versions from replacing another
+  active marker. This reuses existing cache/library formats instead of adding
+  a persistent routing database or scanning audio data. Runtime invalidation
+  barriers prevent disk recovery from undoing explicit source changes.
+- `include/v3_native_cache.h`: exposes a delivery-only recovery entry point,
+  temporary capacity result and request-local recovery flag. Status readers
+  keep their existing passive API; manual downloads keep pinned handles.
+- `src/handler_cloud.c`: attempts recovery only after a missing RAM lookup and
+  retries that lookup once. Existing source/NoCloud checks still precede serving
+  or forwarding. A recovered complete cache can finish the existing library
+  import; a full reserved pool yields HTTP 503. Keeping this in the native
+  original-content branch avoids changing TAP, TAF and assigned-library routing.
+- `tests/test_tb2_v3_routes_runtime.c` and `.py`: execute actual process restarts
+  over one temporary filesystem, plus deterministic race/authority cases, rather
+  than approximating lost RAM state using textual contracts alone.
+- `tests/test_tb2_v3_native_cache_contract.py` and
+  `tests/test_tb2_tonieplay_cache_contract.py`: preserve the handler policy/order
+  boundaries and verify the single recovery retry without altering Tonieplay
+  assignment semantics.
+
 ### `include/fs_ext.h`
 
 - What changed: declares `fsFlushFile(FsFile *file)`.

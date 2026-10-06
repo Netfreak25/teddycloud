@@ -62,6 +62,10 @@ def main():
         for case in cases:
             work = Path(directory) / case
             work.mkdir()
+            if case.startswith("restart-"):
+                # Two actual processes, sharing only the persisted cache/library.
+                subprocess.run([str(executable), "--seed", case], cwd=work,
+                               timeout=20, check=True)
             result = subprocess.run([str(executable), case], cwd=work, timeout=20)
             if result.returncode:
                 failures.append(case)

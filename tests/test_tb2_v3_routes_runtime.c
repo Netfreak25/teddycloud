@@ -11,6 +11,7 @@
 #include "mutex_manager.h"
 #include "v3_native_cache.h"
 #include "cJSON.h"
+#include "fs_ext.h"
 
 #undef TRACE_ERROR
 #undef TRACE_WARNING
@@ -1260,6 +1261,417 @@ static void test_tonieplay_auth_refresh_rejects_damaged_library_backing(void)
     free(source);
 }
 
+static void write_test_file(const char *path, const char *text);
+
+static void seed_restart(const char *scenario)
+{
+    if (!strcmp(scenario, "restart-auth"))
+    {
+        const char *ruids[] = {CONTENT_RUID, SYSTEM_RUID};
+        const char *tokens[] = {"opaque-A.lastc-1", "opaque-B.lastc-2"};
+        for (size_t i = 0; i < 2; i++)
+        {
+            v3_native_cache_meta_capture_t meta;
+            v3_native_cache_meta_capture_init(&meta, TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY, ruids[i]);
+            meta_body_auth(&meta, 7, "shared.opus", NULL, tokens[i]);
+            assert(v3_native_cache_meta_capture_finish(&meta) == NO_ERROR);
+            v3_native_cache_meta_capture_abort(&meta);
+        }
+        return;
+    }
+    manifest(CONTENT_RUID, 7, "original.opus", "second.opus", TRUE);
+    if (!strcmp(scenario, "restart-later-collision") || !strcmp(scenario, "restart-later-ambiguous"))
+    {
+        v3_native_cache_meta_capture_t meta;
+        v3_native_cache_meta_capture_init(&meta, TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY, SYSTEM_RUID);
+        meta_body_auth(&meta, 3, "second.opus", NULL,
+                      !strcmp(scenario, "restart-later-ambiguous") ? "opaque-token" : "system-token");
+        assert(v3_native_cache_meta_capture_finish(&meta) == NO_ERROR);
+        v3_native_cache_meta_capture_abort(&meta);
+    }
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(prepare("original.opus", &capture, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    finish_object(&capture);
+    if (!strcmp(scenario, "restart-complete") || !strcmp(scenario, "restart-library"))
+    {
+        assert(prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+        finish_object(&capture);
+    }
+    if (!strcmp(scenario, "restart-library"))
+    {
+        char *source = NULL;
+        assert(v3_native_cache_import_active_library(TEST_CACHE, TEST_LIBRARY,
+                   TEST_OVERLAY, CONTENT_RUID, &source) == NO_ERROR);
+        free(source);
+    }
+    if (!strcmp(scenario, "restart-isolation"))
+    {
+        manifest(SYSTEM_RUID, 3, "language.opus", NULL, TRUE);
+        v3_native_cache_meta_capture_t meta;
+        v3_native_cache_meta_capture_init(&meta, TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY + 1, CONTENT_RUID);
+        meta_body(&meta, 9, "other-box.opus", NULL);
+        assert(v3_native_cache_meta_capture_finish(&meta) == NO_ERROR);
+        v3_native_cache_meta_capture_abort(&meta);
+    }
+    if (!strcmp(scenario, "restart-marker") || !strcmp(scenario, "restart-staged-marker"))
+        complete_generation(CONTENT_RUID, 8, "new.opus");
+    if (!strcmp(scenario, "restart-part"))
+    {
+        assert(prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+        v3_native_cache_chapter_append(&capture, "O", 1);
+        assert(fsFlushFile(capture.file) == NO_ERROR);
+        /* Exit without finish/abort: a genuine interrupted .part writer. */
+    }
+    if (!strcmp(scenario, "restart-complete-staging") || !strcmp(scenario, "restart-staged-marker") ||
+        !strcmp(scenario, "restart-complete-no-cache"))
+        write_test_file(TEST_CACHE "/v3-native/staging/5/" CONTENT_RUID "/7/chapters/second.opus", "OggS");
+}
+
+static v3_native_cache_chapter_action_t restart_prepare(
+    const char *name, v3_native_cache_chapter_capture_t *capture, char **path)
+{
+    settings.internal.cachedirfull = TEST_CACHE;
+    settings.internal.librarydirfull = TEST_LIBRARY;
+    settings.internal.overlayNumber = TEST_OVERLAY;
+    settings.cloud.cacheContentV3 = TRUE;
+    return v3_native_chapter_prepare_recover(&settings, name, NULL, capture, path);
+}
+
+static void test_restart_staging(void)
+{
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(!v3_native_cache_route_matches(TEST_OVERLAY, CONTENT_RUID, 7, "second.opus"));
+    assert(restart_prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    finish_object(&capture);
+    uint32_t version = 0;
+    assert(v3_native_cache_active_version(TEST_CACHE, TEST_OVERLAY, CONTENT_RUID, &version));
+    assert(version == 7);
+    char *source = NULL;
+    assert(v3_native_cache_import_active_library(TEST_CACHE, TEST_LIBRARY,
+               TEST_OVERLAY, CONTENT_RUID, &source) == NO_ERROR);
+    assert(v3_native_library_source_is_candidate(source));
+    free(source);
+}
+
+static void test_restart_complete(void)
+{
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(!v3_native_cache_route_matches(TEST_OVERLAY, CONTENT_RUID, 7, "original.opus"));
+    assert(restart_prepare("original.opus", &capture, &path) == V3_NATIVE_CHAPTER_SERVE);
+    assert(path != NULL);
+    free(path);
+    v3_native_cache_chapter_abort(&capture);
+    assert(v3_native_cache_route_matches(TEST_OVERLAY, CONTENT_RUID, 7, "second.opus"));
+}
+
+static void test_restart_complete_staging(void)
+{
+    test_restart_complete();
+    uint32_t version = 0;
+    assert(v3_native_cache_active_version(TEST_CACHE, TEST_OVERLAY, CONTENT_RUID, &version) && version == 7);
+    char *source = NULL;
+    assert(v3_native_cache_import_active_library(TEST_CACHE, TEST_LIBRARY,
+               TEST_OVERLAY, CONTENT_RUID, &source) == NO_ERROR);
+    free(source);
+}
+
+static error_t recover(const char *name, const char *auth, bool_t store)
+{
+    return v3_native_cache_recover_chapter_route(TEST_CACHE, TEST_LIBRARY,
+                                                   TEST_OVERLAY, name, auth, store);
+}
+
+static void test_restart_isolation(void)
+{
+    v3_native_cache_chapter_capture_t content, system, other;
+    char *path = NULL;
+    assert(restart_prepare("second.opus", &content, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    assert(restart_prepare("language.opus", &system, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    assert(restart_prepare("other-box.opus", &other, &path) == V3_NATIVE_CHAPTER_BYPASS);
+    assert(v3_native_cache_recover_chapter_route(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY + 1,
+                                                   "other-box.opus", NULL, TRUE) == NO_ERROR);
+    assert(v3_native_cache_chapter_prepare(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY + 1,
+              "other-box.opus", NULL, &other, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    finish_object(&content);
+    finish_object(&system);
+    finish_object(&other);
+    uint32_t version = 0;
+    assert(v3_native_cache_active_version(TEST_CACHE, TEST_OVERLAY, CONTENT_RUID, &version) && version == 7);
+    assert(v3_native_cache_active_version(TEST_CACHE, TEST_OVERLAY + 1, CONTENT_RUID, &version) && version == 9);
+}
+
+static void test_restart_auth(void)
+{
+    assert(recover("shared.opus", NULL, TRUE) == ERROR_INVALID_FILE);
+    assert(recover("shared.opus", "changed.lastc-1", TRUE) == ERROR_INVALID_FILE);
+    assert(recover("shared.opus", "opaque-A.lastc-1", TRUE) == NO_ERROR);
+    v3_native_cache_chapter_capture_t first, second;
+    char *path = NULL;
+    assert(v3_native_cache_chapter_prepare(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+              "shared.opus", "opaque-A.lastc-1", &first, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    assert(!strcmp(first.ruid, CONTENT_RUID));
+    /* An auth-only upstream refresh must keep both the writer and the known
+     * on-disk collision, even while only the first collection is in RAM. */
+    v3_native_cache_meta_capture_t refresh;
+    v3_native_cache_meta_capture_init(&refresh, TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY, CONTENT_RUID);
+    meta_body_auth(&refresh, 7, "shared.opus", NULL, "opaque-A-refreshed.lastc-9");
+    assert(v3_native_cache_meta_capture_finish(&refresh) == NO_ERROR);
+    v3_native_cache_meta_capture_abort(&refresh);
+    assert(v3_native_cache_chapter_prepare(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+              "shared.opus", "opaque-B.lastc-2", &second, &path) == V3_NATIVE_CHAPTER_BYPASS);
+    assert(recover("shared.opus", "opaque-B.lastc-2", TRUE) == NO_ERROR);
+    assert(v3_native_cache_chapter_prepare(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+              "shared.opus", "opaque-B.lastc-2", &second, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    assert(!strcmp(second.ruid, SYSTEM_RUID));
+    finish_object(&first);
+    finish_object(&second);
+}
+
+static void test_restart_marker(void)
+{
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(restart_prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    finish_object(&capture);
+    uint32_t version = 0;
+    assert(v3_native_cache_active_version(TEST_CACHE, TEST_OVERLAY, CONTENT_RUID, &version) && version == 8);
+    /* Only a newly accepted content-meta may select this completed version. */
+    manifest(CONTENT_RUID, 7, "original.opus", "second.opus", TRUE);
+    assert(v3_native_cache_active_version(TEST_CACHE, TEST_OVERLAY, CONTENT_RUID, &version) && version == 7);
+}
+
+static void test_restart_staged_marker(void)
+{
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(restart_prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_SERVE);
+    free(path);
+    v3_native_cache_chapter_abort(&capture);
+    uint32_t version = 0;
+    assert(v3_native_cache_active_version(TEST_CACHE, TEST_OVERLAY, CONTENT_RUID, &version) && version == 8);
+    manifest(CONTENT_RUID, 7, "original.opus", "second.opus", TRUE);
+    size_t count = 0;
+    bool_t game = FALSE;
+    assert(v3_native_cache_active_info(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+               CONTENT_RUID, &version, &count, &game) && version == 7 && count == 2);
+}
+
+static void test_restart_complete_no_cache(void)
+{
+    assert(recover("second.opus", NULL, FALSE) == NO_ERROR);
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_SERVE);
+    free(path);
+    v3_native_cache_chapter_abort(&capture);
+    assert(!v3_native_cache_active_version(TEST_CACHE, TEST_OVERLAY, CONTENT_RUID, NULL));
+    assert(fsFileExists(TEST_CACHE "/v3-native/staging/5/" CONTENT_RUID "/7/chapters/second.opus"));
+    /* A file disappearing later must not turn a cache-off recovered route into
+     * a writer merely because it was complete during the first request. */
+    assert(fsDeleteFile(TEST_CACHE "/v3-native/staging/5/" CONTENT_RUID "/7/chapters/second.opus") == NO_ERROR);
+    assert(prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_FORWARD);
+    assert(capture.file == NULL);
+    v3_native_cache_chapter_abort(&capture);
+}
+
+static void test_restart_unknown_without_manifest(void)
+{
+    assert(recover("unknown.opus", NULL, FALSE) == ERROR_NOT_FOUND);
+    assert(!fsDirExists(TEST_CACHE "/v3-native/versions"));
+    assert(!v3_native_cache_route_matches(TEST_OVERLAY, CONTENT_RUID, 7, "original.opus"));
+}
+
+static void test_restart_later_collision(void)
+{
+    assert(recover("original.opus", NULL, TRUE) == NO_ERROR);
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(v3_native_cache_chapter_prepare(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+              "second.opus", "system-token", &capture, &path) == V3_NATIVE_CHAPTER_BYPASS);
+    assert(recover("second.opus", "system-token", TRUE) == NO_ERROR);
+    assert(v3_native_cache_chapter_prepare(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+              "second.opus", "system-token", &capture, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    assert(!strcmp(capture.ruid, SYSTEM_RUID));
+    v3_native_cache_chapter_abort(&capture);
+}
+
+static void test_restart_later_ambiguous(void)
+{
+    assert(recover("original.opus", NULL, TRUE) == NO_ERROR);
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(v3_native_cache_chapter_prepare(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+              "second.opus", "opaque-token", &capture, &path) == V3_NATIVE_CHAPTER_REJECT);
+}
+
+static void test_restart_fresh_route(void)
+{
+    manifest(CONTENT_RUID, 8, "new.opus", NULL, FALSE);
+    assert(recover("second.opus", NULL, TRUE) == ERROR_ABORTED);
+    assert(v3_native_cache_route_matches(TEST_OVERLAY, CONTENT_RUID, 8, "new.opus"));
+}
+
+static void test_restart_pending_route(void)
+{
+    v3_native_cache_meta_capture_t meta;
+    v3_native_cache_meta_observe_init(&meta, TEST_OVERLAY, CONTENT_RUID);
+    assert(recover("second.opus", NULL, TRUE) == ERROR_ABORTED);
+    v3_native_cache_meta_capture_abort(&meta);
+    assert(recover("second.opus", NULL, TRUE) == NO_ERROR);
+}
+
+static void test_restart_barrier(void)
+{
+    v3_native_cache_invalidate_routes(TEST_OVERLAY, CONTENT_RUID);
+    assert(recover("second.opus", NULL, TRUE) == ERROR_ABORTED);
+    test_unpinned_pool_uses_least_recent_route();
+    assert(recover("second.opus", NULL, TRUE) == ERROR_ABORTED);
+    manifest(CONTENT_RUID, 7, "original.opus", "second.opus", TRUE);
+    assert(recover("second.opus", NULL, TRUE) == NO_ERROR);
+}
+
+static void test_restart_capacity(void)
+{
+    v3_native_cache_meta_capture_t pending[TEST_ROUTE_CAPACITY];
+    for (unsigned i = 0; i < TEST_ROUTE_CAPACITY; i++)
+    {
+        char ruid[17];
+        snprintf(ruid, sizeof(ruid), "%016X", i + 1);
+        v3_native_cache_meta_observe_init(&pending[i], TEST_OVERLAY, ruid);
+        assert(!pending[i].failed);
+    }
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(restart_prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_BUSY);
+    for (unsigned i = 0; i < TEST_ROUTE_CAPACITY; i++)
+        v3_native_cache_meta_capture_abort(&pending[i]);
+    assert(restart_prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    v3_native_cache_chapter_abort(&capture);
+}
+
+static void test_restart_no_cache(void)
+{
+    assert(recover("second.opus", "changed.lastc-value", FALSE) == NO_ERROR);
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_FORWARD);
+    assert(capture.file == NULL);
+    v3_native_cache_chapter_abort(&capture);
+    assert(!v3_native_cache_active_version(TEST_CACHE, TEST_OVERLAY, CONTENT_RUID, NULL));
+}
+
+static void test_restart_readonly_and_fast_path(void)
+{
+    uint32_t version = 0;
+    size_t count = 0;
+    bool_t game = FALSE;
+    assert(!v3_native_cache_active_info(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+                                         CONTENT_RUID, &version, &count, &game));
+    assert(!v3_native_cache_route_matches(TEST_OVERLAY, CONTENT_RUID, 7, "original.opus"));
+    assert(recover("second.opus", NULL, TRUE) == NO_ERROR);
+    /* Losing the manifest now proves that a subsequent chapter uses only RAM. */
+    assert(remove(TEST_CACHE "/v3-native/staging/5/" CONTENT_RUID "/7/manifest.json") == 0);
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(restart_prepare("original.opus", &capture, &path) == V3_NATIVE_CHAPTER_STAGED);
+    v3_native_cache_chapter_abort(&capture);
+    assert(restart_prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    v3_native_cache_chapter_abort(&capture);
+}
+
+static void write_test_file(const char *path, const char *text)
+{
+    FILE *file = fopen(path, "wb");
+    assert(file != NULL);
+    assert(fwrite(text, 1, strlen(text), file) == strlen(text));
+    assert(fclose(file) == 0);
+}
+
+static void test_restart_invalid_manifest(void)
+{
+    const char *path = TEST_CACHE "/v3-native/staging/5/" CONTENT_RUID "/7/manifest.json";
+    char *original = read_test_file(path);
+    const char *invalid[] = {"{invalid}", "{\"version\":8,\"content\":[{\"name\":\"second.opus\",\"fileSize\":4}]}",
+        "{\"version\":7,\"content\":[{\"name\":\"../second.opus\",\"fileSize\":4}]}"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
+    {
+        write_test_file(path, invalid[i]);
+        assert(recover("second.opus", NULL, TRUE) == ERROR_NOT_FOUND);
+        assert(!v3_native_cache_route_matches(TEST_OVERLAY, CONTENT_RUID, 7, "second.opus"));
+    }
+    write_test_file(path, original);
+    free(original);
+    assert(recover("second.opus", NULL, TRUE) == NO_ERROR);
+}
+
+static void test_restart_duplicate_manifest(void)
+{
+    const char *directory = TEST_CACHE "/v3-native/versions/5/" CONTENT_RUID "/7";
+    assert(fsCreateDirEx(directory, true) == NO_ERROR);
+    const char *path = TEST_CACHE "/v3-native/versions/5/" CONTENT_RUID "/7/manifest.json";
+    char *original = read_test_file(TEST_CACHE "/v3-native/staging/5/" CONTENT_RUID "/7/manifest.json");
+    write_test_file(path, "{\"version\":7,\"content\":[{\"name\":\"second.opus\",\"fileSize\":5}]}");
+    assert(recover("second.opus", NULL, TRUE) == ERROR_INVALID_FILE);
+    write_test_file(path, original);
+    free(original);
+    assert(recover("second.opus", NULL, TRUE) == NO_ERROR);
+}
+
+static void fresh_manifest_after_recovery(void)
+{
+    manifest(CONTENT_RUID, 8, "new.opus", NULL, FALSE);
+}
+
+static void test_restart_race(void)
+{
+    library_release_hook = fresh_manifest_after_recovery;
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(restart_prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_BYPASS);
+    assert(library_release_hook == NULL);
+    assert(v3_native_cache_route_matches(TEST_OVERLAY, CONTENT_RUID, 8, "new.opus"));
+}
+
+static void test_restart_policy(void)
+{
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    policy_content.json.nocloud = TRUE;
+    assert(restart_prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    assert(!v3_native_original_content_allowed(&settings, capture.ruid, TRUE));
+    v3_native_cache_chapter_abort(&capture);
+    assert(!v3_native_cache_active_version(TEST_CACHE, TEST_OVERLAY, CONTENT_RUID, NULL));
+    /* Complete local data remains allowed under NoCloud, but never a custom
+     * source. Exercise the very same policy used after handler recovery. */
+    assert(prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    finish_object(&capture);
+    assert(restart_prepare("original.opus", &capture, &path) == V3_NATIVE_CHAPTER_SERVE);
+    assert(v3_native_original_content_allowed(&settings, capture.ruid, FALSE));
+    const char *sources[] = {"lib://custom", "playlist.tap", "http://custom"};
+    for (size_t i = 0; i < sizeof(sources) / sizeof(sources[0]); i++)
+    {
+        policy_content.json.source = (char *)sources[i];
+        assert(!v3_native_original_content_allowed(&settings, capture.ruid, FALSE));
+    }
+    free(path);
+    v3_native_cache_chapter_abort(&capture);
+    assert(policy_reads == policy_frees);
+}
+
+static void test_restart_ambiguous_runtime(void)
+{
+    manifest(CONTENT_RUID, 8, "second.opus", NULL, FALSE);
+    manifest(SYSTEM_RUID, 3, "second.opus", NULL, FALSE);
+    /* A cached version must not be used to bypass live ambiguity. */
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(restart_prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_REJECT);
+    assert(!v3_native_cache_route_matches(TEST_OVERLAY, CONTENT_RUID, 7, "original.opus"));
+}
+
 int main(int argc, char **argv)
 {
     struct { const char *name; void (*run)(void); } cases[] = {
@@ -1304,7 +1716,36 @@ int main(int argc, char **argv)
         {"auth-refresh-tonieplay", test_tonieplay_auth_refresh_imports_from_immutable_library},
         {"auth-refresh-library-race", test_tonieplay_auth_refresh_checks_manifest_before_linking},
         {"auth-refresh-library-corrupt", test_tonieplay_auth_refresh_rejects_damaged_library_backing},
+        {"restart-staging", test_restart_staging},
+        {"restart-complete", test_restart_complete},
+        {"restart-library", test_restart_complete},
+        {"restart-isolation", test_restart_isolation},
+        {"restart-auth", test_restart_auth},
+        {"restart-marker", test_restart_marker},
+        {"restart-fresh", test_restart_fresh_route},
+        {"restart-pending", test_restart_pending_route},
+        {"restart-barrier", test_restart_barrier},
+        {"restart-capacity", test_restart_capacity},
+        {"restart-no-cache", test_restart_no_cache},
+        {"restart-readonly", test_restart_readonly_and_fast_path},
+        {"restart-part", test_restart_staging},
+        {"restart-invalid", test_restart_invalid_manifest},
+        {"restart-duplicate", test_restart_duplicate_manifest},
+        {"restart-race", test_restart_race},
+        {"restart-policy", test_restart_policy},
+        {"restart-runtime-ambiguity", test_restart_ambiguous_runtime},
+        {"restart-complete-staging", test_restart_complete_staging},
+        {"restart-staged-marker", test_restart_staged_marker},
+        {"restart-complete-no-cache", test_restart_complete_no_cache},
+        {"restart-unknown", test_restart_unknown_without_manifest},
+        {"restart-later-collision", test_restart_later_collision},
+        {"restart-later-ambiguous", test_restart_later_ambiguous},
     };
+    if (argc == 3 && !strcmp(argv[1], "--seed"))
+    {
+        seed_restart(argv[2]);
+        return 0;
+    }
     assert(argc == 2);
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
     {

@@ -41,6 +41,8 @@ typedef struct
     char content_type[V3_NATIVE_CACHE_CONTENT_TYPE_SIZE];
     uint32_t file_size;
     bool_t capturing;
+    bool_t recovery_auth_required;
+    bool_t recovery_auth_ambiguous;
 } v3_native_object_t;
 
 typedef v3_native_object_t v3_native_chapter_t;
@@ -73,7 +75,46 @@ typedef struct
     size_t pins;
     bool_t selected;
     bool_t invalidated;
+    bool_t recovered;
 } v3_native_route_t;
+
+/* Invalidated source mappings must not reappear through disk recovery after
+ * slot eviction. These process-local barriers expire on accepted content-meta. */
+typedef struct v3_native_recovery_barrier
+{
+    struct v3_native_recovery_barrier *next;
+    uint8_t overlay_id;
+    char ruid[TB2_RUID_SIZE];
+} v3_native_recovery_barrier_t;
+
+static v3_native_recovery_barrier_t *recovery_barriers;
+static bool_t recovery_disabled[MAX_OVERLAYS];
+
+static bool_t v3_native_recovery_blocked(uint8_t overlay_id, const char *ruid)
+{
+    for (const v3_native_recovery_barrier_t *item = recovery_barriers; item != NULL; item = item->next)
+    {
+        if (item->overlay_id == overlay_id && !osStrcmp(item->ruid, ruid))
+            return TRUE;
+    }
+    return recovery_disabled[overlay_id];
+}
+
+static void v3_native_recovery_barrier_clear(uint8_t overlay_id, const char *ruid)
+{
+    v3_native_recovery_barrier_t **link = &recovery_barriers;
+    while (*link != NULL)
+    {
+        v3_native_recovery_barrier_t *item = *link;
+        if (item->overlay_id == overlay_id && !osStrcmp(item->ruid, ruid))
+        {
+            *link = item->next;
+            osFreeMem(item);
+            return;
+        }
+        link = &item->next;
+    }
+}
 
 typedef struct
 {
@@ -90,6 +131,7 @@ static v3_tonieplay_assigned_route_t assigned_routes[MAX_OVERLAYS];
 
 static bool_t v3_native_library_hash_is_canonical(const char *value);
 static void v3_native_compact_cache_files(v3_native_route_t *route);
+static void v3_native_route_clear_library_backing(v3_native_route_t *route);
 
 static char *v3_native_format(const char *format, ...)
 {
@@ -330,6 +372,7 @@ static error_t v3_native_route_publish(v3_native_cache_route_handle_t *handle,
             /* An observed route can become cacheable after configuration or
              * storage recovery. It has no writer to replace. */
             osFreeMem(target->generation_dir);
+            v3_native_route_clear_library_backing(target);
             target->generation_dir = loaded->generation_dir;
             loaded->generation_dir = NULL;
             target->capture_enabled = TRUE;
@@ -354,6 +397,13 @@ static error_t v3_native_route_publish(v3_native_cache_route_handle_t *handle,
     }
     target->last_used = ++route_clock;
     target->manifest_order = manifest_order;
+    if (refresh_auth)
+    {
+        target->recovered = FALSE;
+        for (size_t i = 0; i < target->chapter_count; i++)
+            target->chapters[i].recovery_auth_ambiguous = FALSE;
+        v3_native_recovery_barrier_clear(target->overlay_id, target->ruid);
+    }
     return NO_ERROR;
 }
 
@@ -4054,6 +4104,24 @@ void v3_native_cache_invalidate_routes(uint8_t overlay_id, const char *ruid)
     }
 
     mutex_lock(MUTEX_V3_NATIVE_CACHE);
+    if (!v3_native_recovery_blocked(overlay_id, canonical_ruid))
+    {
+        v3_native_recovery_barrier_t *barrier = osAllocMem(sizeof(*barrier));
+        if (barrier != NULL)
+        {
+            barrier->overlay_id = overlay_id;
+            osStrcpy(barrier->ruid, canonical_ruid);
+            barrier->next = recovery_barriers;
+            recovery_barriers = barrier;
+        }
+        else
+        {
+            /* Losing a denial is unsafe; ordinary fresh manifests still work. */
+            recovery_disabled[overlay_id] = TRUE;
+            TRACE_WARNING("TB2 V3 disk recovery disabled after allocation failure overlay=%u\r\n",
+                          (unsigned)overlay_id);
+        }
+    }
     for (size_t i = 0; i < V3_NATIVE_CACHE_ROUTES_PER_OVERLAY; i++)
     {
         v3_native_route_t *route = &routes[overlay_id][i];
@@ -4131,6 +4199,19 @@ static error_t v3_native_activate_route(v3_native_route_t *route, const char *ca
     if (!v3_native_cache_files_complete(route))
     {
         return ERROR_IN_PROGRESS;
+    }
+    if (route->recovered)
+    {
+        uint32_t active_version = 0;
+        error_t marker_error = v3_native_read_active_marker(
+            cache_root, route->overlay_id, route->ruid, &active_version, NULL);
+        if ((marker_error == NO_ERROR && active_version != route->version) ||
+            (marker_error != NO_ERROR && marker_error != ERROR_FILE_NOT_FOUND))
+        {
+            TRACE_WARNING("TB2 V3 recovered generation awaits content-meta before activation overlay=%u rUID=%s version=%" PRIu32 "\r\n",
+                          (unsigned)route->overlay_id, route->ruid, route->version);
+            return ERROR_IN_PROGRESS;
+        }
     }
     char *version_dir = v3_native_generation_dir(cache_root, "versions",
                                                  route->overlay_id, route->ruid,
@@ -4634,7 +4715,7 @@ static v3_native_cache_chapter_action_t v3_native_chapter_prepare_route(
     osStrcpy(capture->ruid, route->ruid);
     osStrcpy(capture->name, name);
     osStrcpy(capture->content_type, route->chapters[index].content_type);
-    if (!route->capture_enabled)
+    if (!route->capture_enabled && !route->active && !route->recovered)
     {
         return V3_NATIVE_CHAPTER_FORWARD;
     }
@@ -4663,7 +4744,9 @@ static v3_native_cache_chapter_action_t v3_native_chapter_prepare_route(
     bool_t complete_file = path != NULL &&
                            fsGetFileSize(path, &existing_size) == NO_ERROR &&
                            existing_size == route->chapters[index].file_size;
-    if (route->active)
+    /* A recovered, fully staged generation is locally usable even if another
+     * active version prevents publication. Keep active=false until promoted. */
+    if (route->active || (route->recovered && v3_native_cache_files_complete(route)))
     {
         if (complete_file)
         {
@@ -4674,6 +4757,11 @@ static v3_native_cache_chapter_action_t v3_native_chapter_prepare_route(
         return V3_NATIVE_CHAPTER_FORWARD;
     }
 
+    if (!route->capture_enabled)
+    {
+        osFreeMem(path);
+        return V3_NATIVE_CHAPTER_FORWARD;
+    }
     if (complete_file)
     {
         osFreeMem(path);
@@ -4714,6 +4802,62 @@ static v3_native_cache_chapter_action_t v3_native_chapter_prepare_route(
     return V3_NATIVE_CHAPTER_CAPTURE;
 }
 
+/** Exact RAM lookup shared by the fast path and recovery's final locked check. */
+static error_t v3_native_chapter_route_find(uint8_t overlay_id, const char *name,
+                                            const char *auth, v3_native_route_t **found)
+{
+    v3_native_route_t *only_match = NULL;
+    v3_native_route_t *auth_match = NULL;
+    size_t matches = 0;
+    size_t auth_matches = 0;
+    bool_t recovery_auth_required = FALSE;
+    for (size_t i = 0; i < V3_NATIVE_CACHE_ROUTES_PER_OVERLAY; i++)
+    {
+        v3_native_route_t *route = &routes[overlay_id][i];
+        if (!route->valid || !route->selected || route->invalidated)
+        {
+            continue;
+        }
+        for (size_t j = 0; j < route->chapter_count; j++)
+        {
+            if (!osStrcmp(route->chapters[j].name, name))
+            {
+                only_match = route;
+                recovery_auth_required = route->chapters[j].recovery_auth_required;
+                matches++;
+                if (auth != NULL && !osStrcmp(route->chapters[j].auth, auth))
+                {
+                    auth_match = route;
+                    auth_matches++;
+                }
+                break;
+            }
+        }
+    }
+    *found = matches == 1 ? only_match
+                                : (auth_matches == 1 ? auth_match : NULL);
+    /* Recovery may have discovered an on-disk namesake not loaded into RAM.
+     * Do not let that collection's next request silently use this sole slot. */
+    if (matches == 1 && recovery_auth_required && auth_matches == 0)
+    {
+        *found = NULL;
+        return ERROR_NOT_FOUND;
+    }
+    if (*found != NULL)
+    {
+        for (size_t i = 0; i < (*found)->chapter_count; i++)
+        {
+            if (!osStrcmp((*found)->chapters[i].name, name) &&
+                (*found)->chapters[i].recovery_auth_ambiguous)
+            {
+                *found = NULL;
+                return ERROR_INVALID_FILE;
+            }
+        }
+    }
+    return *found != NULL ? NO_ERROR : (matches == 0 ? ERROR_NOT_FOUND : ERROR_INVALID_FILE);
+}
+
 v3_native_cache_chapter_action_t v3_native_cache_chapter_prepare(
     const char *cache_root, const char *library_root, uint8_t overlay_id,
     const char *name, const char *auth,
@@ -4731,39 +4875,283 @@ v3_native_cache_chapter_action_t v3_native_cache_chapter_prepare(
         return V3_NATIVE_CHAPTER_REJECT;
     }
     mutex_lock(MUTEX_V3_NATIVE_CACHE);
-    v3_native_route_t *only_match = NULL;
-    v3_native_route_t *auth_match = NULL;
-    size_t matches = 0;
-    size_t auth_matches = 0;
-    for (size_t i = 0; i < V3_NATIVE_CACHE_ROUTES_PER_OVERLAY; i++)
-    {
-        v3_native_route_t *route = &routes[overlay_id][i];
-        if (!route->valid || !route->selected || route->invalidated)
-        {
-            continue;
-        }
-        for (size_t j = 0; j < route->chapter_count; j++)
-        {
-            if (!osStrcmp(route->chapters[j].name, name))
-            {
-                only_match = route;
-                matches++;
-                if (auth != NULL && !osStrcmp(route->chapters[j].auth, auth))
-                {
-                    auth_match = route;
-                    auth_matches++;
-                }
-                break;
-            }
-        }
-    }
-    v3_native_route_t *route = matches == 1 ? only_match
-                                : (auth_matches == 1 ? auth_match : NULL);
+    v3_native_route_t *route = NULL;
+    error_t error = v3_native_chapter_route_find(overlay_id, name, auth, &route);
     v3_native_cache_chapter_action_t action = route != NULL
         ? v3_native_chapter_prepare_route(cache_root, route, name, capture, serve_path)
-        : (matches == 0 ? V3_NATIVE_CHAPTER_BYPASS : V3_NATIVE_CHAPTER_REJECT);
+        : (error == ERROR_NOT_FOUND ? V3_NATIVE_CHAPTER_BYPASS : V3_NATIVE_CHAPTER_REJECT);
     mutex_unlock(MUTEX_V3_NATIVE_CACHE);
     return action;
+}
+
+/** Metadata-only snapshot: no route publication, object reads or disk writes. */
+static error_t v3_native_recovery_snapshot(const char *directory, uint8_t overlay_id,
+                                           const char *ruid, const char *version_name,
+                                           v3_native_route_t *snapshot)
+{
+    char *path = v3_native_format("%s%cmanifest.json", directory, PATH_SEPARATOR);
+    uint8_t *data = NULL;
+    size_t length = 0;
+    uint32_t size = 0;
+    error_t error = path == NULL ? ERROR_OUT_OF_MEMORY : fsGetFileSize(path, &size);
+    if (error == NO_ERROR && (size == 0 || size > V3_NATIVE_CACHE_META_LIMIT))
+        error = ERROR_INVALID_FILE;
+    if (error == NO_ERROR)
+        error = v3_native_read_file(path, &data, &length);
+    if (error == NO_ERROR)
+        error = v3_native_parse_manifest(data, length, &snapshot->version, snapshot->content_type,
+                                           &snapshot->chapters, &snapshot->chapter_count);
+    char expected_version[16];
+    osSnprintf(expected_version, sizeof(expected_version), "%" PRIu32, snapshot->version);
+    if (error == NO_ERROR && osStrcmp(version_name, expected_version))
+        error = ERROR_INVALID_FILE;
+    if (error == NO_ERROR)
+    {
+        snapshot->generation_dir = strdup(directory);
+        error = snapshot->generation_dir != NULL ? NO_ERROR : ERROR_OUT_OF_MEMORY;
+        snapshot->valid = error == NO_ERROR;
+        snapshot->overlay_id = overlay_id;
+        osStrcpy(snapshot->ruid, ruid);
+    }
+    osFreeMem(path);
+    osFreeMem(data);
+    return error;
+}
+
+static const v3_native_object_t *v3_native_recovery_object(const v3_native_route_t *snapshot,
+                                                          const char *name)
+{
+    for (size_t i = 0; snapshot->valid && i < snapshot->chapter_count; i++)
+        if (!osStrcmp(snapshot->chapters[i].name, name))
+            return &snapshot->chapters[i];
+    return NULL;
+}
+
+typedef struct
+{
+    v3_native_route_t match;
+    size_t matches;
+    size_t auth_matches;
+    bool_t mark_collisions;
+} v3_native_recovery_search_t;
+
+/** Remember collisions for later chapters too, including identical tokens.
+ * The second metadata pass keeps memory bounded instead of retaining every
+ * manifest. A fresh accepted live manifest remains the routing authority. */
+static void v3_native_recovery_mark_collisions(v3_native_route_t *selected,
+                                                const v3_native_route_t *other)
+{
+    if (!other->valid || (selected->version == other->version && !osStrcmp(selected->ruid, other->ruid)))
+        return;
+    for (size_t i = 0; i < selected->chapter_count; i++)
+    {
+        v3_native_object_t *object = &selected->chapters[i];
+        const v3_native_object_t *namesake = v3_native_recovery_object(other, object->name);
+        if (namesake != NULL)
+        {
+            object->recovery_auth_required = TRUE;
+            if (!osStrcmp(object->auth, namesake->auth))
+                object->recovery_auth_ambiguous = TRUE;
+        }
+    }
+}
+
+/* Visit a generation once. A second staging/published copy is equivalent only
+ * if both content and opaque auth agree. Never use timestamps to resolve it. */
+static error_t v3_native_recovery_candidate(const char *directory, const char *other_directory,
+                                            uint8_t overlay_id, const char *ruid,
+                                            const char *version_name, const char *name,
+                                            const char *auth, v3_native_recovery_search_t *search)
+{
+    v3_native_route_t candidate = {0}, other = {0};
+    error_t error = v3_native_recovery_snapshot(directory, overlay_id, ruid, version_name, &candidate);
+    bool_t duplicate = fsDirExists(other_directory);
+    error_t other_error = duplicate
+        ? v3_native_recovery_snapshot(other_directory, overlay_id, ruid, version_name, &other)
+        : NO_ERROR;
+    const v3_native_object_t *object = v3_native_recovery_object(&candidate, name);
+    bool_t relevant = object != NULL || v3_native_recovery_object(&other, name) != NULL;
+    if (error == ERROR_OUT_OF_MEMORY || other_error == ERROR_OUT_OF_MEMORY)
+        error = ERROR_OUT_OF_MEMORY;
+    else if (relevant && duplicate &&
+             (error != NO_ERROR || other_error != NO_ERROR ||
+              !v3_native_routes_same_content(&candidate, &other)))
+        error = ERROR_INVALID_FILE;
+    else if (!relevant)
+        error = NO_ERROR; /* An unrelated malformed manifest is not a candidate. */
+    if (error == NO_ERROR && object != NULL && duplicate)
+    {
+        for (size_t i = 0; i < candidate.chapter_count; i++)
+            if (osStrcmp(candidate.chapters[i].auth, other.chapters[i].auth))
+                error = ERROR_INVALID_FILE;
+    }
+    if (error == NO_ERROR && search->mark_collisions)
+    {
+        v3_native_recovery_mark_collisions(&search->match, &candidate);
+        v3_native_recovery_mark_collisions(&search->match, &other);
+    }
+    else if (error == NO_ERROR && object != NULL)
+    {
+        search->matches++;
+        bool_t auth_match = auth != NULL && !osStrcmp(object->auth, auth);
+        if (auth_match)
+            search->auth_matches++;
+        if (search->matches == 1 || auth_match)
+        {
+            v3_native_route_clear(&search->match);
+            search->match = candidate;
+            osMemset(&candidate, 0, sizeof(candidate));
+        }
+    }
+    v3_native_route_clear(&candidate);
+    v3_native_route_clear(&other);
+    return error;
+}
+
+/** Bounded depth and constant snapshot memory, scoped to one overlay. */
+static error_t v3_native_recovery_scan(const char *cache_root, uint8_t overlay_id,
+                                       const char *state, const char *name, const char *auth,
+                                       v3_native_recovery_search_t *search)
+{
+    char *root = v3_native_format("%s%c%s%c%s%c%u", cache_root, PATH_SEPARATOR,
+                                    V3_NATIVE_CACHE_DIR, PATH_SEPARATOR, state,
+                                    PATH_SEPARATOR, (unsigned)overlay_id);
+    if (root == NULL)
+        return ERROR_OUT_OF_MEMORY;
+    FsDir *ruids = fsOpenDir(root);
+    error_t error = ruids != NULL || !fsDirExists(root) ? NO_ERROR : ERROR_FILE_OPENING_FAILED;
+    FsDirEntry ruid_entry;
+    while (error == NO_ERROR && ruids != NULL &&
+           (error = fsReadDir(ruids, &ruid_entry)) == NO_ERROR)
+    {
+        char ruid[TB2_RUID_SIZE];
+        if (!(ruid_entry.attributes & FS_FILE_ATTR_DIRECTORY) ||
+            !tb2_ruid_canonicalize(ruid_entry.name, ruid) || osStrcmp(ruid_entry.name, ruid))
+            continue;
+        char *ruid_path = v3_native_format("%s%c%s", root, PATH_SEPARATOR, ruid);
+        FsDir *versions = ruid_path != NULL ? fsOpenDir(ruid_path) : NULL;
+        error = ruid_path == NULL ? ERROR_OUT_OF_MEMORY
+                                 : (versions == NULL ? ERROR_FILE_OPENING_FAILED : NO_ERROR);
+        FsDirEntry version_entry;
+        while (error == NO_ERROR && (error = fsReadDir(versions, &version_entry)) == NO_ERROR)
+        {
+            if (!(version_entry.attributes & FS_FILE_ATTR_DIRECTORY) ||
+                version_entry.name[0] == '\0' ||
+                strspn(version_entry.name, "0123456789") != osStrlen(version_entry.name))
+                continue;
+            char *directory = v3_native_format("%s%c%s", ruid_path, PATH_SEPARATOR, version_entry.name);
+            char *other = v3_native_format("%s%c%s%c%s%c%u%c%s%c%s", cache_root,
+                PATH_SEPARATOR, V3_NATIVE_CACHE_DIR, PATH_SEPARATOR,
+                !osStrcmp(state, "versions") ? "staging" : "versions", PATH_SEPARATOR,
+                (unsigned)overlay_id, PATH_SEPARATOR, ruid, PATH_SEPARATOR, version_entry.name);
+            if (directory == NULL || other == NULL)
+                error = ERROR_OUT_OF_MEMORY;
+            else if (osStrcmp(state, "staging") || !fsDirExists(other))
+                error = v3_native_recovery_candidate(directory, other, overlay_id, ruid,
+                                                        version_entry.name, name, auth, search);
+            osFreeMem(directory);
+            osFreeMem(other);
+        }
+        if (error == ERROR_END_OF_STREAM)
+            error = NO_ERROR;
+        if (versions != NULL)
+            fsCloseDir(versions);
+        osFreeMem(ruid_path);
+    }
+    if (ruids != NULL)
+        fsCloseDir(ruids);
+    osFreeMem(root);
+    return error == ERROR_END_OF_STREAM ? NO_ERROR : error;
+}
+
+error_t v3_native_cache_recover_chapter_route(
+    const char *cache_root, const char *library_root, uint8_t overlay_id,
+    const char *name, const char *auth, bool_t capture_enabled)
+{
+    if (cache_root == NULL || library_root == NULL || overlay_id >= MAX_OVERLAYS ||
+        !v3_native_cache_chapter_name_is_safe(name))
+        return ERROR_INVALID_PARAMETER;
+    mutex_lock(MUTEX_V3_NATIVE_LIBRARY);
+    mutex_lock(MUTEX_V3_NATIVE_CACHE);
+    v3_native_route_t *current = NULL;
+    error_t error = v3_native_chapter_route_find(overlay_id, name, auth, &current);
+    v3_native_recovery_search_t search = {0};
+    if (error == ERROR_NOT_FOUND)
+    {
+        error = v3_native_recovery_scan(cache_root, overlay_id, "versions", name, auth, &search);
+        if (error == NO_ERROR)
+            error = v3_native_recovery_scan(cache_root, overlay_id, "staging", name, auth, &search);
+        if (error == NO_ERROR && search.matches == 0)
+            error = ERROR_NOT_FOUND;
+        if (error == NO_ERROR && search.matches > 1 && search.auth_matches != 1)
+            error = ERROR_INVALID_FILE;
+        if (error == NO_ERROR && v3_native_recovery_blocked(overlay_id, search.match.ruid))
+            error = ERROR_ABORTED;
+        /* Fresh/pending manifests, invalidated handles and captures take
+         * precedence even when they do not contain this old object name. */
+        for (size_t i = 0; error == NO_ERROR && i < V3_NATIVE_CACHE_ROUTES_PER_OVERLAY; i++)
+            if (routes[overlay_id][i].serial != 0 &&
+                !osStrcmp(routes[overlay_id][i].ruid, search.match.ruid))
+                error = ERROR_ABORTED;
+        if (error == NO_ERROR)
+        {
+            search.mark_collisions = TRUE;
+            error = v3_native_recovery_scan(cache_root, overlay_id, "versions", name, auth, &search);
+            if (error == NO_ERROR)
+                error = v3_native_recovery_scan(cache_root, overlay_id, "staging", name, auth, &search);
+        }
+        if (error == NO_ERROR)
+        {
+            char *library_source = NULL;
+            v3_native_load_descriptor(search.match.generation_dir, &search.match, &library_source);
+            bool_t complete = v3_native_route_use_library(library_root, library_source, &search.match);
+            if (!complete)
+                complete = v3_native_cache_files_complete(&search.match);
+            osFreeMem(library_source);
+            char *published_directory = v3_native_generation_dir(cache_root, "versions",
+                overlay_id, search.match.ruid, search.match.version);
+            search.match.active = complete && published_directory != NULL &&
+                                  !osStrcmp(search.match.generation_dir, published_directory);
+            if (published_directory == NULL)
+                error = ERROR_OUT_OF_MEMORY;
+            osFreeMem(published_directory);
+            search.match.capture_enabled = capture_enabled;
+            search.match.recovered = TRUE;
+            v3_native_cache_route_handle_t handle = {0};
+            if (error == NO_ERROR)
+                error = v3_native_route_reserve(overlay_id, search.match.ruid, &handle);
+            if (error == NO_ERROR)
+                error = v3_native_route_publish(&handle, &search.match, FALSE);
+            v3_native_route_t *restored = v3_native_route_find(handle);
+            if (error == NO_ERROR && restored != NULL)
+            {
+                /* A crash can leave all final objects but no active marker.
+                 * Reuse normal publication, including the recovered-version
+                 * guard. Cache-off recovery never creates persistent state. */
+                uint32_t active_version = 0;
+                if (complete && capture_enabled && v3_native_cache_files_complete(restored) &&
+                    (v3_native_read_active_marker(cache_root, overlay_id, restored->ruid,
+                                                     &active_version, NULL) != NO_ERROR ||
+                     active_version != restored->version))
+                {
+                    error_t activation = v3_native_activate_route(restored, cache_root);
+                    if (activation != NO_ERROR && activation != ERROR_IN_PROGRESS)
+                        TRACE_WARNING("TB2 V3 recovered cache publication failed overlay=%u rUID=%s error=%d\r\n",
+                                      (unsigned)overlay_id, restored->ruid, activation);
+                }
+                TRACE_INFO("Recovered TB2 V3 chapter route overlay=%u rUID=%s version=%" PRIu32 " complete=%u\r\n",
+                           (unsigned)overlay_id, restored->ruid, restored->version, (unsigned)complete);
+            }
+            v3_native_route_unpin(v3_native_route_find(handle));
+        }
+    }
+    v3_native_route_clear(&search.match);
+    mutex_unlock(MUTEX_V3_NATIVE_CACHE);
+    mutex_unlock(MUTEX_V3_NATIVE_LIBRARY);
+    if (error != NO_ERROR && error != ERROR_NOT_FOUND)
+        TRACE_WARNING("TB2 V3 chapter route recovery rejected overlay=%u name=%s error=%d\r\n",
+                      (unsigned)overlay_id, name, error);
+    return error;
 }
 
 v3_native_cache_chapter_action_t v3_native_cache_chapter_prepare_plan(

@@ -108,6 +108,38 @@ class Tb2V3NativeCacheContractTests(unittest.TestCase):
         self.assertIn("v3_native_cache_chapter_append", self.handler)
         self.assertIn("cbrCloudBodyPassthrough", self.handler)
 
+    def test_recovery_is_only_a_single_box_delivery_retry(self):
+        helper = self.section(self.handler, "static v3_native_cache_chapter_action_t v3_native_chapter_prepare_recover(",
+                              "static int v3_native_auth_hex_value(")
+        self.assertLess(helper.index("if (action != V3_NATIVE_CHAPTER_BYPASS)"),
+                        helper.index("v3_native_cache_recover_chapter_route("))
+        self.assertEqual(helper.count("v3_native_cache_chapter_prepare("), 2)
+        self.assertIn("settings->cloud.cacheContentV3", helper)
+        self.assertIn("ERROR_OUT_OF_RESOURCES", helper)
+        chapter = self.section(self.handler, "error_t handleCloudChapterV3(", "error_t handleCloudOtaV3(")
+        original = chapter[chapter.index("native_action = v3_native_chapter_prepare_recover("):]
+        self.assertIn("return v3_local_write_empty_status(connection, 503)", original)
+        self.assertLess(original.index("v3_native_original_content_allowed("),
+                        original.index("v3_native_import_library_if_enabled("))
+        self.assertLess(original.index("v3_native_original_content_allowed("),
+                        original.index("httpSendResponseStreamUnsafe("))
+        readers = self.section(self.source, "static error_t v3_native_snapshot_load_locked(",
+                               "error_t v3_native_cache_open_active_manifest(")
+        self.assertNotIn("recover_chapter_route", readers)
+
+    def test_recovery_has_no_new_storage_or_unbounded_library_scan(self):
+        recovery = self.section(self.source, "static error_t v3_native_recovery_snapshot(",
+                                "v3_native_cache_chapter_action_t v3_native_cache_chapter_prepare_plan(")
+        self.assertIn("V3_NATIVE_CACHE_META_LIMIT", recovery)
+        self.assertIn('"versions", name, auth', recovery)
+        self.assertIn('"staging", name, auth', recovery)
+        self.assertNotIn("v3_native_write_descriptor", recovery)
+        self.assertNotIn("fsReadFile", recovery)
+        self.assertNotIn("cloud_request", recovery)
+        self.assertLess(recovery.index("mutex_lock(MUTEX_V3_NATIVE_LIBRARY)"),
+                        recovery.index("mutex_lock(MUTEX_V3_NATIVE_CACHE)"))
+        self.assertIn("complete && capture_enabled", recovery)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -132,6 +132,7 @@ typedef enum
     V3_NATIVE_CHAPTER_STAGED,
     V3_NATIVE_CHAPTER_FORWARD,
     V3_NATIVE_CHAPTER_REJECT,
+    V3_NATIVE_CHAPTER_BUSY,
 } v3_native_cache_chapter_action_t;
 
 /** Streaming capture state for one expected TONIES V3 object. */
@@ -152,6 +153,7 @@ typedef struct
     char content_type[V3_NATIVE_CACHE_CONTENT_TYPE_SIZE];
     bool_t failed;
     bool_t owns_capture;
+    bool_t recovered_route;
     v3_native_cache_route_handle_t route_handle;
 } v3_native_cache_chapter_capture_t;
 
@@ -369,6 +371,15 @@ v3_native_cache_chapter_action_t v3_native_cache_chapter_prepare(
     const char *auth,
     v3_native_cache_chapter_capture_t *capture,
     char **serve_path);
+
+/** Recover only a missing box route from this overlay's persisted manifests.
+ * Returns NOT_FOUND, INVALID_FILE (ambiguous/conflicting), ABORTED (blocked),
+ * or OUT_OF_RESOURCES (all slots pinned). Never grants cloud/source authority.
+ * Call chapter_prepare once again after success; status readers must not call it.
+ */
+error_t v3_native_cache_recover_chapter_route(
+    const char *cache_root, const char *library_root, uint8_t overlay_id,
+    const char *name, const char *auth, bool_t capture_enabled);
 
 /** Resolve a manual object through its pinned manifest, not overlay name search. */
 v3_native_cache_chapter_action_t v3_native_cache_chapter_prepare_plan(

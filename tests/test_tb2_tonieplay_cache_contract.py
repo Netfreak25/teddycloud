@@ -178,7 +178,7 @@ class Tb2TonieplayCacheContractTests(unittest.TestCase):
                         assigned.index("httpSendResponseStreamUnsafe"))
         self.assertIn("v3_local_write_empty_status(connection, 404)", assigned)
         self.assertNotIn("v3_tonieplay_library_route_assigned", chapter)
-        native = chapter[chapter.index("native_action = v3_native_cache_chapter_prepare("):]
+        native = chapter[chapter.index("native_action = v3_native_chapter_prepare_recover("):]
         self.assertLess(native.index("v3_native_original_content_allowed("),
                         native.index("if (native_action == V3_NATIVE_CHAPTER_SERVE)"))
         unknown = self.section(

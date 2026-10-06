@@ -87,6 +87,69 @@ decodes once, and keeps literal `+` bytes intact. The upstream query remains
 unchanged. Manually generated queries percent-encode the original manifest token
 without interpreting or logging its contents.
 
+### Chapter recovery after a server restart
+
+A box can keep a manifest across a TeddyCloud restart and request an object
+without another `content-meta`. The normal chapter path first searches RAM.
+Only a missing mapping triggers recovery from `manifest.json` files in this
+overlay's `versions/<overlay>/` and `staging/<overlay>/` directories. Status,
+metadata and library queries never initiate recovery.
+
+Recovery validates manifests with the existing parser and 1 MiB manifest limit,
+including the version directory and canonical RUID. It matches the exact object
+name. A single candidate does not require an unchanged auth token; multiple
+candidates require exactly one full, opaque auth match. Version numbers, active
+markers and modification times are not tie-breakers. Equivalent published and
+staged copies of one generation count once; conflicting copies are rejected.
+
+The search retains only a constant number of manifest snapshots. A second
+metadata pass records name/auth collisions for the selected collection's other
+objects, so a later chapter cannot silently borrow the only loaded route when
+another matching collection still exists only on disk. It neither scans the
+library nor reads audio payloads. Only the selected descriptor's library link
+is validated, using existing origin, object and size checks. Normal following
+chapters use RAM; a token identifying another not-yet-loaded collection needs
+its own recovery.
+
+The selected snapshot enters the existing eight-slot registry. Recovery and
+publication hold `LIBRARY -> CACHE`, never a network transfer. A newer live
+mapping, pending manifest or reserved capture for that RUID is not replaced.
+Explicit source invalidations also retain a process-local recovery barrier,
+including after slot eviction; a successfully accepted upstream manifest clears
+it. No barrier or new routing index is persisted.
+
+Complete cache/library objects are served through the existing local path.
+Incomplete generations resume normal forwarding and capture when permitted.
+Complete staged files remain intact; `.part` files never satisfy completeness.
+If every final file already exists, recovery can finish normal publication when
+caching is enabled. Neither that publication nor a later capture completion may
+replace an active marker for another version. A new accepted manifest is needed
+for that version switch. Complete staged data can still be served locally while
+publication is deferred. The existing version-checked library importer handles
+completion, including a transfer interrupted after cache publication.
+
+Current source ownership and NoCloud are checked before local delivery or
+forwarding. Recovery does not grant cloud permission, change assignments or
+clear Freshness. With caching disabled, a previously stored manifest can still
+route permitted requests, but incomplete objects are not captured and recovery
+does not create a new active marker or initiate a library transfer.
+
+No usable manifest means the chapter still receives HTTP 404; ambiguous,
+conflicting or blocked mappings remain rejected. A fully pinned slot pool
+returns temporary HTTP 503 rather than displacing a running download. Recovery
+logs overlay, RUID, version and completeness, never auth contents. There is no
+new setting, background scan, database or cache/library schema migration.
+**Without a stored manifest, recovery is intentionally impossible:** observe-only
+operation does not start persisting manifests behind the cache setting.
+
+`tests/test_tb2_v3_routes_runtime.py` exercises the production cache and handler
+helpers with real POSIX files. Restart cases run a seeding process and a second
+process in the same temporary directory, sharing no RAM. Coverage includes
+staging, interrupted writers, complete cache/library backing, overlay separation,
+auth collisions (including later chapters), source/NoCloud policy, invalid
+manifests, capacity, explicit invalidation, new-manifest races and active-marker
+protection. These host tests do not constitute a hardware playback test.
+
 ### Refreshable object authentication
 
 An object's opaque `auth` value is request metadata, not its content identity.

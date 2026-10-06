@@ -862,6 +862,32 @@ static bool_t v3_native_original_content_allowed(settings_t *settings,
     return allowed;
 }
 
+/** Only box delivery may recover RAM routes. Status/metadata reads stay passive. */
+static v3_native_cache_chapter_action_t v3_native_chapter_prepare_recover(
+    settings_t *settings, const char *name, const char *auth,
+    v3_native_cache_chapter_capture_t *capture, char **path)
+{
+    v3_native_cache_chapter_action_t action = v3_native_cache_chapter_prepare(
+        settings->internal.cachedirfull, settings->internal.librarydirfull,
+        settings->internal.overlayNumber, name, auth, capture, path);
+    if (action != V3_NATIVE_CHAPTER_BYPASS)
+        return action;
+    error_t error = v3_native_cache_recover_chapter_route(
+        settings->internal.cachedirfull, settings->internal.librarydirfull,
+        settings->internal.overlayNumber, name, auth, settings->cloud.cacheContentV3);
+    if (error == ERROR_NOT_FOUND)
+        return V3_NATIVE_CHAPTER_BYPASS;
+    if (error == ERROR_OUT_OF_RESOURCES)
+        return V3_NATIVE_CHAPTER_BUSY;
+    if (error != NO_ERROR)
+        return V3_NATIVE_CHAPTER_REJECT;
+    action = v3_native_cache_chapter_prepare(
+        settings->internal.cachedirfull, settings->internal.librarydirfull,
+        settings->internal.overlayNumber, name, auth, capture, path);
+    capture->recovered_route = TRUE;
+    return action;
+}
+
 static int v3_native_auth_hex_value(unsigned char value)
 {
     if (value >= '0' && value <= '9')
@@ -5966,11 +5992,12 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
         {
             return v3_local_write_empty_status(connection, 404);
         }
-        native_action = v3_native_cache_chapter_prepare(
-            client_ctx->settings->internal.cachedirfull,
-            client_ctx->settings->internal.librarydirfull,
-            client_ctx->settings->internal.overlayNumber, native_name,
-            auth_value, &native_capture, &native_path);
+        native_action = v3_native_chapter_prepare_recover(
+            client_ctx->settings, native_name, auth_value, &native_capture, &native_path);
+        if (native_action == V3_NATIVE_CHAPTER_BUSY)
+        {
+            return v3_local_write_empty_status(connection, 503);
+        }
         if (native_action != V3_NATIVE_CHAPTER_BYPASS &&
             native_action != V3_NATIVE_CHAPTER_REJECT &&
             !v3_native_original_content_allowed(
@@ -5986,6 +6013,13 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
         }
         if (native_action == V3_NATIVE_CHAPTER_SERVE)
         {
+            if (native_capture.recovered_route && client_ctx->settings->cloud.cacheContentV3)
+            {
+                /* Finish a library transfer interrupted after cache completion.
+                 * The existing importer checks active version and settings. */
+                v3_native_import_library_if_enabled(client_ctx, native_capture.ruid,
+                                                     native_capture.version);
+            }
             TRACE_INFO("TB2 V3 chapter route source=original-cache cache=hit overlay=%u rUID=%s activeVersion=%" PRIu32 " requestedVersion=%" PRIu32 " name=%s action=local\r\n",
                        (unsigned)client_ctx->settings->internal.overlayNumber,
                        native_capture.ruid, native_capture.version,
