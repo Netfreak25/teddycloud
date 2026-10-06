@@ -74,6 +74,8 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
     @classmethod
     def overlay_eligible(cls, option_id: str) -> bool:
         overlay = cls.layout["overlay"]
+        if option_id in overlay.get("excludedIds", []):
+            return False
         return option_id in overlay["ids"] or any(
             option_id.startswith(prefix) for prefix in overlay["prefixes"]
         )
@@ -102,6 +104,7 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
             "core.client_cert_tb1.file.crt": "tb1",
             "core.server_cert.file.crt": "tb1",
             "cloud.enabled": "tb1",
+            "cloud.cacheOtaV3BothSlots": "tb2",
             "cloud.enableV2Content": "tb1",
             "toniebox.overrideCloud": "tb1",
             "core.certdir_tb2": "tb2",
@@ -188,6 +191,7 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
                 "cloud.tb2_v3_enabled",
                 "cloud.enableV3FreshnessCheck",
                 "cloud.enableV3Ota",
+                "cloud.cacheOtaV3BothSlots",
                 "cloud.enableV3SetupStatus",
                 "cloud.enableV3ContentMeta",
                 "cloud.enableV3Chapter",
@@ -201,6 +205,12 @@ class SettingsScopeLayoutContractTests(unittest.TestCase):
         )
         self.assertNotIn("cloud.tb2_capture_enabled", self.public_setting_ids)
         self.assertNotIn("cloud.tb2_capture_enabled", section["ids"])
+
+    def test_counterpart_cache_is_global_only_without_changing_shared_ota_policy(self) -> None:
+        self.assertFalse(self.overlay_eligible("cloud.cacheOtaV3BothSlots"))
+        for option in ("cloud.cacheOta", "cloud.localOta"):
+            self.assertEqual("global", self.scope_of(option))
+            self.assertTrue(self.overlay_eligible(option))
 
     def test_dependency_controls_and_listener_cleanup_are_wired(self) -> None:
         scope_tabs = (FORM_COMPONENTS_PATH / "SettingsScopeTabs.tsx").read_text(

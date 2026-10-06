@@ -102,6 +102,7 @@ typedef struct
     bool cacheToLibraryV3;
     bool cacheTonieplayToLibraryV3;
     bool cacheOta;
+    bool cacheOtaV3BothSlots;
     bool localOta;
     bool cacheContent;
     bool cacheToLibrary;

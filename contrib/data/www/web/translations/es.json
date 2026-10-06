@@ -1281,6 +1281,10 @@
         "warning": "¡Atención! Nivel de configuración",
         "warningHint": "Actualmente, los campos de texto deben guardarse explícitamente hasta que se implemente una mejor solución. Para hacerlo, haz clic en el símbolo de guardar al final del campo. Si faltan configuraciones, aumenta el 'Nivel de configuración'.",
         "optionText": {
+            "cloud__cacheOtaV3BothSlots": {
+                "label": "Guardar también el firmware del otro slot",
+                "description": "Cuando una caja solicita una actualización de firmware, TeddyCloud también descarga el firmware ofrecido para el otro slot si aún no está en la caché."
+            },
             "log__level": {
                 "label": "Nivel de registro",
                 "description": "0=apagado - 6=detallado"

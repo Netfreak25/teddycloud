@@ -1281,6 +1281,10 @@
         "warning": "Attention ! Niveau des paramètres",
         "warningHint": "Si des paramètres vous manquent, augmentez le 'Niveau des paramètres'.",
         "optionText": {
+            "cloud__cacheOtaV3BothSlots": {
+                "label": "Mettre aussi en cache le firmware de l’autre slot",
+                "description": "Lorsqu’une box demande une mise à jour, TeddyCloud télécharge aussi le firmware proposé pour l’autre slot s’il n’est pas déjà en cache."
+            },
             "log__level": {
                 "label": "Niveau de journalisation",
                 "description": "0=désactivé - 6=verbeux"

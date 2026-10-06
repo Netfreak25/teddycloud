@@ -8,6 +8,7 @@
 #include "debug.h"
 #include "settings.h"
 #include "mqtt_server.h"
+#include "tb2_ota_cache.h"
 #include "mutex_manager.h"
 #include "tls_adapter.h"
 
@@ -372,6 +373,7 @@ static void option_map_init(uint8_t settingsId)
     OPTION_BOOL("toniebox2.cacheToLibraryV3", &settings->cloud.cacheToLibraryV3, FALSE, "Cache TB2 V3 content to library", "Import complete active TONIES V3 versions into the native TB2 library (requires TB2 V3 content caching)", LEVEL_DETAIL)
     OPTION_BOOL("toniebox2.cacheTonieplayToLibraryV3", &settings->cloud.cacheTonieplayToLibraryV3, FALSE, "Cache Tonieplay to library", "Import complete Tonieplay manifests and every referenced object into the TB2 library (requires TB2 V3 content caching)", LEVEL_DETAIL)
     OPTION_BOOL("cloud.cacheOta", &settings->cloud.cacheOta, TRUE, "Cache OTA", "Cache OTA files in firmware dir of local server (this still blocks OTA if local OTA delivery is disabled)", LEVEL_EXPERT)
+    OPTION_BOOL("cloud.cacheOtaV3BothSlots", &settings->cloud.cacheOtaV3BothSlots, FALSE, "Cache the other firmware slot", "After a box requests firmware, also cache the offered firmware for the other slot if missing (global only)", LEVEL_EXPERT)
     OPTION_BOOL("cloud.localOta", &settings->cloud.localOta, FALSE, "Local OTA delivery", "Send local OTA files in firmware dir", LEVEL_EXPERT)
     OPTION_BOOL("cloud.cacheContent", &settings->cloud.cacheContent, TRUE, "Cache content", "Cache cloud content on local server", LEVEL_DETAIL)
     OPTION_BOOL("cloud.cacheToLibrary", &settings->cloud.cacheToLibrary, TRUE, "Cache to library", "Cache cloud content to library", LEVEL_DETAIL)
@@ -2663,7 +2665,8 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
         return false;
     }
 
-    if (settingsId > 0 && (!osStrcmp(item, "mqtt_client_upstream.enabled") ||
+    if (settingsId > 0 && (!osStrcmp(item, "cloud.cacheOtaV3BothSlots") ||
+                           !osStrcmp(item, "mqtt_client_upstream.enabled") ||
                            !osStrcmp(item, CORE_SERVER_SNI_CERT_SELECTION_SETTING)))
     {
         TRACE_WARNING("Setting '%s' is global and cannot be overridden\r\n", item);
@@ -2681,6 +2684,10 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
     }
 
     *((bool *)opt->ptr) = value;
+    if (settingsId == 0 && !osStrcmp(item, "cloud.cacheOtaV3BothSlots"))
+    {
+        tb2_ota_cache_set_enabled(value);
+    }
     if (settingsId == 0 && !osStrcmp(item, CORE_SERVER_SNI_CERT_SELECTION_SETTING))
     {
         settings_reconcile_sni_generation_cycle(get_settings());
@@ -2716,6 +2723,10 @@ bool settings_reset_id(const char *item, uint8_t settingsId)
     }
 
     overlay_settings_init_opt(option, globalOption);
+    if (settingsId == 0 && !osStrcmp(item, "cloud.cacheOtaV3BothSlots"))
+    {
+        tb2_ota_cache_set_enabled(*((bool *)option->ptr));
+    }
     if (settings_is_tb2_https_mode(item) && *((bool *)option->ptr))
     {
         settings_select_tb2_https_mode(settingsId, item);

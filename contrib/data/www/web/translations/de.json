@@ -1281,6 +1281,10 @@
         "warning": "Achtung! Settings level",
         "warningHint": "Falls du Einstellungen vermisst, erhöhe das 'Settings level'.",
         "optionText": {
+            "cloud__cacheOtaV3BothSlots": {
+                "label": "Andere Firmware-Slot-Variante mitcachen",
+                "description": "Wenn eine Box ein Firmware-Update anfordert, lädt TeddyCloud zusätzlich die angebotene Firmware für den anderen Slot, sofern sie noch nicht im Cache liegt."
+            },
             "log__level": {
                 "label": "Loglevel",
                 "description": "0=aus - 6=ausführlich"

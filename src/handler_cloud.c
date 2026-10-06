@@ -22,6 +22,7 @@
 #include "toniesJson.h"
 #include "tonie_audio_playlist_internal.h"
 #include "tb2_client_identity.h"
+#include "tb2_ota_cache.h"
 #include "tb2_ruid.h"
 #include "v3_local_content.h"
 #include "v3_native_cache.h"
@@ -3677,9 +3678,7 @@ error_t handleCloudCheckOtaV3(HttpConnection *connection, const char_t *uri, con
 
     if (client_ctx->settings->cloud.tb2_v3_enabled && client_ctx->settings->cloud.enableV3Ota)
     {
-        cbr_ctx_t ctx;
-        req_cbr_t cbr = getCloudCbr(connection, uri, queryString, V3_CHECK_OTA, &ctx, client_ctx);
-        if (!cloud_request_tb2_post(client_ctx->settings->cloud.remote_hostname_tb2, 0, uri, queryString, data, size, NULL, &cbr))
+        if (!tb2_ota_cache_check(connection, uri, queryString, client_ctx, data, size))
         {
             return NO_ERROR;
         }
@@ -6112,7 +6111,7 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
     return httpWriteResponse(connection, NULL, 0, false);
 }
 
-error_t handleCloudOtaV3(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
+static error_t handleCloudOtaV3Legacy(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
 {
     error_t ret = NO_ERROR;
     char *query = strdup(queryString);
@@ -6153,11 +6152,6 @@ error_t handleCloudOtaV3(HttpConnection *connection, const char_t *uri, const ch
     }
     char *local_dir = custom_asprintf("%s%cota%c%s%" PRIu8 "%c", client_ctx->settings->internal.firmwaredirfull, PATH_SEPARATOR, PATH_SEPARATOR, folder, fileId, PATH_SEPARATOR);
     osFreeMem(folder);
-
-    // Provide the original URI and everything to cache it
-    char current_time[64];
-    time_format_current(current_time);
-    mqtt_sendBoxEvent("LastCloudOtaTime", current_time, client_ctx);
 
     if (client_ctx->settings->cloud.tb2_v3_enabled && client_ctx->settings->cloud.enableV3Ota)
     {
@@ -6222,6 +6216,14 @@ error_t handleCloudOtaV3(HttpConnection *connection, const char_t *uri, const ch
     osFreeMem(query);
     osFreeMem(localUri);
     return ret;
+}
+
+error_t handleCloudOtaV3(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
+{
+    char current_time[64];
+    time_format_current(current_time);
+    mqtt_sendBoxEvent("LastCloudOtaTime", current_time, client_ctx);
+    return tb2_ota_cache_serve(connection, uri, queryString, client_ctx, handleCloudOtaV3Legacy);
 }
 
 error_t handleCloudReset(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)

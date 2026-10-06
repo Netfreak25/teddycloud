@@ -39,6 +39,7 @@
 #include "cert.h"
 #include "tb2_https_passthrough.h"
 #include "tb2_mqtt_passthrough.h"
+#include "tb2_ota_cache.h"
 #include "toniebox_state.h"       // for get_toniebox_state, get_toniebox_s...
 #include "toniebox_state_type.h"  // for toniebox_state_box_t, toniebox_sta...
 #include "toniesJson.h"           // for tonieboxes_update, tonies_deinit
@@ -1084,6 +1085,8 @@ void server_init(bool test)
         return;
     }
 
+    tb2_ota_cache_init();
+
     HttpServerSettings http_settings;
     HttpServerSettings https_web_settings;
     HttpServerSettings https_api_settings;
@@ -1284,6 +1287,7 @@ void server_init(bool test)
             settings_set_bool("internal.exit", TRUE);
         }
     }
+    tb2_ota_cache_deinit();
     mqtt_server_deinit();
     tb2_mqtt_passthrough_deinit();
     tb2_https_passthrough_deinit();

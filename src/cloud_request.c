@@ -121,9 +121,12 @@ static error_t httpClientTlsInitCallbackClientAuthTb2(HttpClientContext *context
                                                        TlsContext *tlsContext)
 {
     req_cbr_t *cbr_ctx = context->sourceCtx;
-    client_ctx_t *client_ctx = ((cbr_ctx_t *)cbr_ctx->ctx)->client_ctx;
+    cbr_ctx_t *request = cbr_ctx->ctx;
+    client_ctx_t *client_ctx = request->client_ctx;
     settings_t *settings = client_ctx != NULL ? client_ctx->settings : get_settings();
-    const settings_cert_t *identity = tb2_client_identity_resolve(settings, NULL);
+    const settings_cert_t *identity = request->tb2_identity != NULL
+                                         ? request->tb2_identity
+                                         : tb2_client_identity_resolve(settings, NULL);
     if (identity == NULL)
     {
         return ERROR_FAILURE;
@@ -431,6 +434,11 @@ static error_t web_request_internal(const char *server, int port, bool https, co
 
                 if (status == 302 && redirect_counter < MAX_REDIRECTS)
                 {
+                    if (cbr_ctx->reject_redirects)
+                    {
+                        error = ERROR_INVALID_RESPONSE;
+                        break;
+                    }
                     // Extract location from response header
                     const char *location = httpClientGetHeaderField(&httpClientContext, "Location");
                     if (!location)

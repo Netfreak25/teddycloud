@@ -275,6 +275,10 @@
         "save": "pol",
         "title": "DuHmey",
         "optionText": {
+            "cloud__cacheOtaV3BothSlots": {
+                "label": "Also cache the other firmware slot",
+                "description": "When a box requests a firmware update, TeddyCloud also downloads the offered firmware for the other slot if it is not already cached."
+            },
             "log__level": {
                 "label": "QonoS patlh"
             },

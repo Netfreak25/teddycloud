@@ -78,6 +78,9 @@ typedef struct
     error_t freshnessResponseError;
     HttpConnection *connection;
     client_ctx_t *client_ctx;
+    /* Optional owned identity for a request that outlives its box connection. */
+    const settings_cert_t *tb2_identity;
+    bool reject_redirects;
 } cbr_ctx_t;
 
 void fillBaseCtx(HttpConnection *connection, const char_t *uri, const char_t *queryString, cloudapi_t api, cbr_ctx_t *ctx, client_ctx_t *client_ctx);
