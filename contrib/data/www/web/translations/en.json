@@ -114,6 +114,7 @@
             },
             "errorLoadingPlugin": "Failed to load metadata for plugin {{pluginname}}",
             "filter": {
+                "hidden": "Hidden plugins only",
                 "unknown": "Section unset"
             },
             "help": {
@@ -125,6 +126,7 @@
                 "fields": {
                     "author": "Author of the plugin",
                     "description": "Short summary of the plugin",
+                    "hideInNav": "Optional boolean, defaults to false. Set to true (without quotes) to hide the plugin only from navigation. It remains available in the plugin overview and through its direct link.",
                     "icon": "The icon used for the plugin. Must be a valid Ant Design icon component from https://ant.design/components/icon, e.g. TrophyOutlined, TagsOutlined",
                     "pluginHomepage": "Homepage of the plugin",
                     "pluginName": "The title shown in menus (mandatory)",
@@ -134,18 +136,25 @@
                 },
                 "fieldsTitle": "Fields:",
                 "folderStructureTitle": "Plugin Folder Structure:",
-                "intro": "To make your plugin discoverable and listed in the Community navigation, it must follow this structure and include a valid index.html and plugin.json file. An optional preview.png will be shown as an image in the plugins card.",
+                "intro": "To make your plugin discoverable and listed in the plugin overview, it must follow this structure and include a valid index.html and plugin.json file. An optional preview.png will be shown as an image in the plugins card.",
                 "popoverTitle": "Plugin Help",
                 "title": "Plugin Folder Structure & Requirements"
             },
             "helpButton": "Help",
             "helpTextCreatePlugin": "Some Text about how to create a plugin",
+            "hiddenInNav": "Hidden from navigation",
             "installedPlugins": "Installed plugins",
             "intro": "Here you find your added TeddyCloud plugins and you can add new plugins provided by you or the TeddyCloud community!",
             "navigationTitle": "TC Plugins",
             "ok": "OK",
             "open": "Open Plugin",
+            "pagination": {
+                "showAll": "Show all",
+                "showPages": "Show pages",
+                "total": "{{rangeStart}}–{{rangeEnd}} of {{total}} plugins"
+            },
             "plugin": "Plugin",
+            "storageUnavailable": "Display preferences cannot be saved in this browser.",
             "title": "TeddyCloud Plugins",
             "upload": {
                 "add": "Add Plugin",

@@ -114,6 +114,7 @@
             },
             "errorLoadingPlugin": "Fehler beim Laden der Metadaten für Plugin {{pluginname}}",
             "filter": {
+                "hidden": "Nur ausgeblendete Plugins",
                 "unknown": "Bereich nicht gesetzt"
             },
             "help": {
@@ -125,6 +126,7 @@
                 "fields": {
                     "author": "Autor des Plugins",
                     "description": "Kurze Zusammenfassung des Plugins",
+                    "hideInNav": "Optionaler boolescher Wert, standardmäßig false. Mit true (ohne Anführungszeichen) wird das Plugin nur aus der Navigation ausgeblendet. Über die Pluginübersicht und den direkten Link bleibt es erreichbar.",
                     "icon": "Das für das Plugin verwendete Icon. Muss eine gültige Ant Design Icon-Komponente von https://ant.design/components/icon sein, z. B. TrophyOutlined, TagsOutlined",
                     "pluginHomepage": "Homepage des Plugins",
                     "pluginName": "Der Titel, der in Menüs angezeigt wird (erforderlich)",
@@ -134,18 +136,25 @@
                 },
                 "fieldsTitle": "Felder:",
                 "folderStructureTitle": "Plugin-Ordnerstruktur:",
-                "intro": "Damit dein Plugin auffindbar ist und in der Community-Navigation erscheint, muss es dieser Struktur folgen und eine gültige index.html und plugin.json Datei enthalten. Eine optionale preview.png wird als Bild in der Plugin-Karte angezeigt.",
+                "intro": "Damit dein Plugin auffindbar ist und in der Pluginübersicht erscheint, muss es dieser Struktur folgen und eine gültige index.html und plugin.json Datei enthalten. Eine optionale preview.png wird als Bild in der Plugin-Karte angezeigt.",
                 "popoverTitle": "Plugin-Hilfe",
                 "title": "Plugin-Ordnerstruktur & Anforderungen"
             },
             "helpButton": "Hilfe",
             "helpTextCreatePlugin": "Ein Text darüber, wie man ein Plugin erstellt",
+            "hiddenInNav": "In Navigation ausgeblendet",
             "installedPlugins": "Installierte Plugins",
             "intro": "Hier findest du deine hinzugefügten TeddyCloud Plugins und kannst neue Plugins von dir oder der TeddyCloud Community hinzufügen!",
             "navigationTitle": "TC Plugins",
             "ok": "OK",
             "open": "Plugin öffnen",
+            "pagination": {
+                "showAll": "Alle anzeigen",
+                "showPages": "Seitenweise anzeigen",
+                "total": "{{rangeStart}}–{{rangeEnd}} von {{total}} Plugins"
+            },
             "plugin": "Plugin",
+            "storageUnavailable": "Die Anzeigeeinstellungen können in diesem Browser nicht gespeichert werden.",
             "title": "TeddyCloud Plugins",
             "upload": {
                 "add": "Plugin hinzufügen",

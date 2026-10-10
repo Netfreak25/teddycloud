@@ -114,6 +114,7 @@
             },
             "errorLoadingPlugin": "Error al cargar los metadatos del plugin {{pluginname}}",
             "filter": {
+                "hidden": "Solo plugins ocultos",
                 "unknown": "Sección no definida"
             },
             "help": {
@@ -125,6 +126,7 @@
                 "fields": {
                     "author": "Autor del plugin",
                     "description": "Resumen breve del plugin",
+                    "hideInNav": "Valor booleano opcional, false de forma predeterminada. Con true (sin comillas), el plugin se oculta solo en la navegación. Sigue disponible en la lista de plugins y mediante su enlace directo.",
                     "icon": "El icono utilizado para el plugin. Debe ser un componente de icono válido de Ant Design de https://ant.design/components/icon, p. ej. TrophyOutlined, TagsOutlined",
                     "pluginHomepage": "Página principal del plugin",
                     "pluginName": "El título que aparece en los menús (obligatorio)",
@@ -134,18 +136,25 @@
                 },
                 "fieldsTitle": "Campos:",
                 "folderStructureTitle": "Estructura de carpetas del plugin:",
-                "intro": "Para que tu plugin sea visible y listado en la navegación comunitaria, debe seguir esta estructura e incluir un archivo index.html y plugin.json válidos. Un archivo opcional preview.png se mostrará como imagen en la tarjeta del plugin.",
+                "intro": "Para que tu plugin sea visible en la lista de plugins, debe seguir esta estructura e incluir un archivo index.html y plugin.json válidos. Un archivo opcional preview.png se mostrará como imagen en la tarjeta del plugin.",
                 "popoverTitle": "Ayuda del Plugin",
                 "title": "Estructura de carpetas y requisitos del plugin"
             },
             "helpButton": "Ayuda",
             "helpTextCreatePlugin": "Texto sobre cómo crear un plugin",
+            "hiddenInNav": "Oculto en la navegación",
             "installedPlugins": "Plugins instalados",
             "intro": "Aquí puedes ver tus plugins añadidos a TeddyCloud y también agregar nuevos plugins creados por ti o por la comunidad TeddyCloud.",
             "navigationTitle": "Plugins TC",
             "ok": "OK",
             "open": "Abrir plugin",
+            "pagination": {
+                "showAll": "Mostrar todos",
+                "showPages": "Mostrar por páginas",
+                "total": "{{rangeStart}}–{{rangeEnd}} de {{total}} plugins"
+            },
             "plugin": "Plugin",
+            "storageUnavailable": "No se pueden guardar las preferencias de visualización en este navegador.",
             "title": "Plugins de TeddyCloud",
             "upload": {
                 "add": "Agregar plugin",

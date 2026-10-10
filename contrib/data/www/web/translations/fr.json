@@ -114,6 +114,7 @@
             },
             "errorLoadingPlugin": "Échec du chargement des métadonnées pour le plugin {{pluginname}}",
             "filter": {
+                "hidden": "Uniquement les plugins masqués",
                 "unknown": "Section non définie"
             },
             "help": {
@@ -125,6 +126,7 @@
                 "fields": {
                     "author": "Auteur du plugin",
                     "description": "Résumé court du plugin",
+                    "hideInNav": "Booléen facultatif, false par défaut. Avec true (sans guillemets), le plugin est masqué uniquement dans la navigation. Il reste accessible dans la liste des plugins et par son lien direct.",
                     "icon": "L'icône utilisée pour le plugin. Doit être un composant d'icône Ant Design valide depuis https://ant.design/components/icon, par ex. TrophyOutlined, TagsOutlined",
                     "pluginHomepage": "Page d'accueil du plugin",
                     "pluginName": "Le titre affiché dans les menus (obligatoire)",
@@ -134,18 +136,25 @@
                 },
                 "fieldsTitle": "Champs :",
                 "folderStructureTitle": "Structure du dossier du plugin :",
-                "intro": "Pour que votre plugin soit détectable et listé dans la navigation Communauté, il doit suivre cette structure et inclure un fichier index.html et plugin.json valides. Un preview.png optionnel sera affiché comme image dans la carte du plugin.",
+                "intro": "Pour que votre plugin soit détectable et affiché dans la liste des plugins, il doit suivre cette structure et inclure un fichier index.html et plugin.json valides. Un preview.png optionnel sera affiché comme image dans la carte du plugin.",
                 "popoverTitle": "Aide du plugin",
                 "title": "Structure du dossier plugin et exigences"
             },
             "helpButton": "Aide",
             "helpTextCreatePlugin": "Un texte sur la création d'un plugin",
+            "hiddenInNav": "Masqué dans la navigation",
             "installedPlugins": "Plugins installés",
             "intro": "Vous trouverez ici vos plugins TeddyCloud ajoutés et pouvez ajouter de nouveaux plugins fournis par vous-même ou la communauté TeddyCloud !",
             "navigationTitle": "Plugins TC",
             "ok": "OK",
             "open": "Ouvrir le plugin",
+            "pagination": {
+                "showAll": "Tout afficher",
+                "showPages": "Afficher par pages",
+                "total": "{{rangeStart}}–{{rangeEnd}} sur {{total}} plugins"
+            },
             "plugin": "Plugin",
+            "storageUnavailable": "Les préférences d’affichage ne peuvent pas être enregistrées dans ce navigateur.",
             "title": "Plugins TeddyCloud",
             "upload": {
                 "add": "Ajouter un plugin",

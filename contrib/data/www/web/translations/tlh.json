@@ -13,7 +13,22 @@
             "deletion": {
                 "delete": "Qaw'"
             },
-            "helpButton": "QaH"
+            "filter": {
+                "hidden": "Pluginmey So'lu'bogh neH"
+            },
+            "help": {
+                "fields": {
+                    "hideInNav": "DuH Boolean; motlh false. true Dalo'chugh (chu'mey yIchelQo'), navigationDaq neH Plugin So'lu'. Plugin tetlhDaq 'ej rarwI' patlhDaq DapoSmoHlaHtaH."
+                }
+            },
+            "helpButton": "QaH",
+            "hiddenInNav": "navigationDaq So'lu'",
+            "pagination": {
+                "showAll": "Hoch yI'ang",
+                "showPages": "tenwalmey yI'ang",
+                "total": "{{rangeStart}}–{{rangeEnd}}; Hoch {{total}} Pluginmey"
+            },
+            "storageUnavailable": "cha'bogh DuHmey pol-laHbe' browservam."
         },
         "translations": {
             "language": "Hol"
