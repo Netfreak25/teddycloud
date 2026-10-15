@@ -3,6 +3,9 @@
 
 import json
 from pathlib import Path
+import re
+import subprocess
+import tempfile
 import unittest
 
 
@@ -124,6 +127,56 @@ class ContentPlaylistContractTests(unittest.TestCase):
         self.assertIn('cJSON_AddArrayToObject(playlist, "durations")', self.api)
         self.assertIn("trackDurations={tonie?.playlist?.durations}", self.controls)
         self.assertIn("chapterDuration", self.drawer)
+
+    def test_total_seconds_only_uses_the_selected_taf_content(self):
+        tag_info = self.api[self.api.index("error_t getTagInfoJson") :]
+        compact = re.sub(r"\s+", " ", tag_info)
+        self.assertIn(
+            "bool_t use_original_v3_content = !source_configured && "
+            "tb2_context && v3_cache_complete && "
+            "(prefer_native_cache || !taf_cache_complete);",
+            compact,
+        )
+        self.assertIn(
+            "bool_t use_original_v3_playlist = use_original_v3_content && "
+            "!v3_cache_tonieplay;",
+            compact,
+        )
+        self.assertIn(
+            "else { api_add_content_playlist(jsonEntry, tafInfo, "
+            "client_ctx->settings, item2); if (!use_original_v3_content) { "
+            "api_add_taf_total_seconds(jsonEntry, tafInfo); } }",
+            compact,
+        )
+        self.assertEqual(tag_info.count("api_add_taf_total_seconds("), 1)
+
+    def test_total_seconds_production_helper(self):
+        """Compile the real helper with real types/cJSON and a controlled stat."""
+        start = self.api.index("static void api_add_taf_total_seconds(")
+        end = self.api.index("\n}", start) + 2
+        fixture = (ROOT / "tests/test_taginfo_total_seconds_runtime.c").read_text(
+            encoding="utf-8"
+        )
+        includes = [
+            "include", "include/protobuf-c", "src/proto", "src/cyclone/common",
+            "src/cyclone/cyclone_tcp", "cyclone/common", "cyclone/cyclone_ssl",
+            "cyclone/cyclone_tcp", "cyclone/cyclone_crypto", "cJSON",
+        ]
+        with tempfile.TemporaryDirectory(prefix="tc-taginfo-duration-") as directory:
+            source = Path(directory) / "taginfo_duration.c"
+            source.write_text(fixture + "\n" + self.api[start:end], encoding="utf-8")
+            executable = Path(directory) / "taginfo_duration"
+            subprocess.run(
+                [
+                    "gcc", "-Wall", "-Wextra", "-Werror",
+                    "-DGPL_LICENSE_TERMS_ACCEPTED",
+                    *["-I" + path for path in includes],
+                    str(source), "cJSON/cJSON.c", "-lm", "-o", str(executable),
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+            subprocess.run([str(executable)], cwd=directory, check=True)
 
     def test_custom_title_uses_only_exact_taf_metadata_as_default(self):
         custom_start = self.controls.index("const series = customContent")

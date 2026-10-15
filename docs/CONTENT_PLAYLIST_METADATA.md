@@ -1,6 +1,6 @@
 # Custom TAF playlist display metadata
 
-This subsystem stores display names for directly assigned custom TAF files. It is independent of the TB1 TAP playlist subsystem and is not used for streams, TONIES original content, or playback routing.
+This subsystem stores display names for directly assigned custom TAF files. It is independent of the TB1 TAP playlist subsystem and is not used for streams, TONIES original content, or playback routing. The read-only tag-info duration below also supports original cached TAFs without a source assignment.
 
 ## Behavior
 
@@ -31,6 +31,35 @@ The same document stores the calculated duration of every chapter. Durations are
 
 Changing the assigned TAF selects a different metadata document, while assigning the exact same TAF reuses its saved names. The metadata does not alter TAF audio, chapter boundaries, V3 manifests, or playback control. Writes use a temporary file followed by the project filesystem move operation so readers never observe a partially written playlist.
 
+## Read-only total duration in tag info
+
+`GET /api/getTagInfo?ruid=<RUID>&overlay=<BOX>&contentVersion=<VERSION>`
+optionally returns `tagInfo.totalSeconds`, a JSON integer in seconds on the
+same timeline as `tagInfo.trackSeconds`:
+
+```json
+{"tagInfo":{"trackSeconds":[0,61,125],"totalSeconds":200}}
+```
+
+Clients can derive chapter durations of 61, 64 and 75 seconds. Existing
+`playlist.durations` take precedence. This also works without catalog chapter
+names or a manually assigned source. The shared tag-index entries expose the
+same optional field.
+
+The API reuses the already calculated TAF end time and checks the selected
+file's size against its declared payload length. A valid header alone is not
+evidence of a complete download. Missing/zero end times, incomplete files,
+failed size queries, mismatched chapter counts and inconsistent chapter starts
+omit the field; no guessed duration or dummy zero is returned.
+
+Only the selected complete cached or directly assigned TAF supplies this
+duration. Native collections, Tonieplay, TAP, streams and unresolved source
+assignments must not borrow it from a neighbouring TAF cache. Their existing
+playlist and content-version handling remains unchanged. The addition performs
+no audio scan, download, hash validation, encoding or metadata write, and does
+not change source selection or routing. Older clients can ignore the field;
+TeddyRemote 0.1.30 already consumes it.
+
 ## Code changes by file
 
 ### `include/content_playlist.h` and `src/content_playlist.c`
@@ -41,9 +70,9 @@ Changing the assigned TAF selects a different metadata document, while assigning
 
 ### `src/handler_api.c`, `include/handler_api.h`, and `src/server.c`
 
-- What changed: `getTagInfoJson()` exposes the exact direct-TAF chapter count, user-saved names or exact TAF catalog defaults, and `POST /api/content/playlist/<RUID>` saves one complete set of names for the selected overlay. Native TB2 collections expose a separate read-only playlist resolved from their recorded origins and chapters.
+- What changed: `getTagInfoJson()` exposes the exact direct-TAF chapter count, user-saved names or exact TAF catalog defaults, and `POST /api/content/playlist/<RUID>` saves one complete set of names for the selected overlay. Native TB2 collections expose a separate read-only playlist resolved from their recorded origins and chapters. A small internal API helper adds the optional total duration from the same selected TAF and chapter positions, after completeness and timeline checks.
 - Why: the server is the only place that can validate the current direct TAF identity and chapter count before accepting edited names.
-- Why this approach: accepting a client-provided content hash or chapter count would allow stale browser state to write metadata for the wrong source. Resolving defaults from the exact TAF identity avoids reusing unrelated metadata from the physical Tonie.
+- Why this approach: accepting a client-provided content hash or chapter count would allow stale browser state to write metadata for the wrong source. Resolving defaults from the exact TAF identity avoids reusing unrelated metadata from the physical Tonie. Reusing the existing calculated end time closes the last-chapter duration gap without a new playlist format or an audio rescan.
 
 ### `include/v3_native_cache.h` and `src/v3_native_cache.c`
 

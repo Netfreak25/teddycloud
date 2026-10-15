@@ -6696,6 +6696,54 @@ static void api_add_tap_playlist(cJSON *json_entry,
     v3_local_content_generation_free(&generation);
 }
 
+/* Use the same TAF timeline as trackSeconds, without scanning audio or
+ * borrowing the duration of a cache beside another selected source. */
+static void api_add_taf_total_seconds(cJSON *json_entry,
+                                      const tonie_info_t *taf_info)
+{
+    if (taf_info == NULL || !taf_info->valid || !taf_info->exists ||
+        taf_info->tafHeader == NULL || taf_info->contentPath == NULL)
+    {
+        return;
+    }
+
+    bool_t cached_taf = taf_info->json._source_type == CT_SOURCE_NONE &&
+                        (taf_info->json.source == NULL ||
+                         taf_info->json.source[0] == '\0');
+    if (!cached_taf && taf_info->json._source_type != CT_SOURCE_TAF)
+    {
+        return;
+    }
+
+    const TonieboxAudioFileHeader *header = taf_info->tafHeader;
+    const track_positions_t *positions = &taf_info->additional.track_positions;
+    if (!header->has_ogg_granule_position || header->num_bytes == 0 ||
+        positions->total_seconds == 0 || positions->pos == NULL ||
+        positions->count == 0 || positions->count != header->n_track_page_nums)
+    {
+        return;
+    }
+    for (size_t i = 0; i < positions->count; i++)
+    {
+        if (positions->pos[i] > positions->total_seconds ||
+            (i > 0 && positions->pos[i] < positions->pos[i - 1]))
+        {
+            return;
+        }
+    }
+
+    /* Header validity alone does not prove that a download is complete. */
+    uint32_t file_size = 0;
+    if (fsGetFileSize(taf_info->contentPath, &file_size) != NO_ERROR ||
+        file_size < TONIEFILE_FRAME_SIZE ||
+        (uint64_t)file_size - TONIEFILE_FRAME_SIZE < header->num_bytes)
+    {
+        return;
+    }
+
+    cJSON_AddNumberToObject(json_entry, "totalSeconds", positions->total_seconds);
+}
+
 error_t getTagInfoJson(char ruid[17],
                        cJSON *jsonTarget,
                        client_ctx_t *client_ctx,
@@ -6928,10 +6976,11 @@ error_t getTagInfoJson(char ruid[17],
                            CONTENT_JSON_CACHE_PREFERENCE_V3) ||
                 !osStrcmp(cache_preference,
                            CONTENT_JSON_CACHE_PREFERENCE_AUTO);
-            bool_t use_original_v3_playlist =
+            bool_t use_original_v3_content =
                 !source_configured && tb2_context && v3_cache_complete &&
-                !v3_cache_tonieplay &&
                 (prefer_native_cache || !taf_cache_complete);
+            bool_t use_original_v3_playlist =
+                use_original_v3_content && !v3_cache_tonieplay;
             if (tafInfo->json._source_type == CT_SOURCE_TAP_STREAM ||
                 tafInfo->json._source_type == CT_SOURCE_TAP_CACHED)
             {
@@ -6952,6 +7001,10 @@ error_t getTagInfoJson(char ruid[17],
             {
                 api_add_content_playlist(jsonEntry, tafInfo,
                                          client_ctx->settings, item2);
+                if (!use_original_v3_content)
+                {
+                    api_add_taf_total_seconds(jsonEntry, tafInfo);
+                }
             }
             bool_t source_info_available =
                 contentJson._source_model != NULL &&
