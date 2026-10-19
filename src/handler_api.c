@@ -36,6 +36,8 @@
 #include "toniebox_state.h"
 #include "v3_local_content.h"
 #include "v3_native_cache.h"
+#include "original_content_cache.h"
+#include "taf_original_cache.h"
 #include "tonie_user_metadata.h"
 
 #define CERTIFICATE_DOCTOR_OUTPUT_LIMIT (1024U * 1024U)
@@ -2673,6 +2675,18 @@ error_t handleApiContent(HttpConnection *connection, const char_t *uri, const ch
 
     bool_t isStream = false;
     tonie_info_t *tafInfo = getTonieInfo(file_path, false, client_ctx->settings);
+    /* A reference is an original cache, never an override of a user source. */
+    if (error != NO_ERROR && tafInfo != NULL &&
+        (tafInfo->json.source == NULL || tafInfo->json.source[0] == '\0'))
+    {
+        char *original = taf_original_cache_resolve(file_path, client_ctx->settings);
+        if (original != NULL)
+        {
+            osFreeMem(file_path);
+            file_path = original;
+            error = fsGetFileSize(file_path, &length);
+        }
+    }
 
     if (tafInfo->valid && tafInfo->json._source_type == CT_SOURCE_STREAM)
     {
@@ -6766,8 +6780,13 @@ error_t getTagInfoJson(char ruid[17],
         /* read TAF info - would create .json if not existing */
         // tonie_info_t *tafInfo = getTonieInfoFromRuid(ruid, true, client_ctx->settings);
         tonie_info_t *tafInfo = getTonieInfo(fullTagPath, false, client_ctx->settings);
-        bool_t taf_cache_complete = fsFileExists(fullTagPath) &&
-                                    isValidTaf(fullTagPath, false);
+        bool_t taf_cache_complete = taf_original_file_complete(fullTagPath);
+        if (!taf_cache_complete)
+        {
+            char *original = taf_original_cache_resolve(fullTagPath, client_ctx->settings);
+            taf_cache_complete = original != NULL;
+            osFreeMem(original);
+        }
         uint32_t v3_cache_version = 0;
         size_t v3_object_count = 0;
         bool_t v3_cache_tonieplay = FALSE;
@@ -6873,6 +6892,7 @@ error_t getTagInfoJson(char ruid[17],
                                        : CONTENT_JSON_CACHE_PREFERENCE_AUTO);
             cJSON *cache_state = cJSON_AddObjectToObject(jsonEntry,
                                                          "cacheState");
+            original_content_cache_add_status(cache_state, client_ctx->settings, ruid);
             cJSON_AddBoolToObject(cache_state, "tafComplete",
                                   taf_cache_complete);
             cJSON_AddBoolToObject(cache_state, "v3Complete",
@@ -6961,6 +6981,12 @@ error_t getTagInfoJson(char ruid[17],
                 {
                     cJSON_AddStringToObject(jsonEntry, "downloadTriggerUrl", "");
                 }
+            }
+            if (!preferred_cache_complete && !isSys)
+            {
+                const char *blocked = original_content_cache_blocked_reason(client_ctx->settings,
+                    ruid, !osStrcmp(preferred_original_kind, "v3") ? ORIGINAL_CACHE_V3 : ORIGINAL_CACHE_TAF);
+                cJSON_AddStringToObject(cache_state, "downloadBlockedReason", blocked != NULL ? blocked : "");
             }
             osFreeMem(audioUrl);
             osFreeMem(downloadUrl);

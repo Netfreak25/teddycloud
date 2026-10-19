@@ -271,8 +271,10 @@ class Tb2NativeLibrarySourceContractTests(unittest.TestCase):
         self.assertIn("closeNativeCollectionDetail", self.web_browser)
 
     def test_assigned_native_collection_uses_multichapter_player(self) -> None:
-        self.assertIn("isNativeCollectionSource", self.web_card)
-        self.assertIn("loadNativeCollectionFromSource", self.web_card)
+        tonie_audio = (ROOT / "teddycloud_web/src/utils/audio/tonieAudio.ts").read_text(encoding="utf-8")
+        self.assertIn("isNativeCollectionSource", tonie_audio)
+        self.assertIn("loadNativeCollectionFromSource", tonie_audio)
+        self.assertIn("loadTonieNativePlaybackItem", self.web_card)
         self.assertIn("playPlaybackItem", self.web_card)
         self.assertIn("library-entry.json", self.web_native_audio)
 

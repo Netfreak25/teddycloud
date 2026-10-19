@@ -1634,6 +1634,14 @@
                 "label": "Local OTA delivery",
                 "description": "Send local OTA files in firmware dir"
             },
+            "cloud__cacheBothFormatsOnDownload": {
+                "label": "Cache both audio formats on manual download",
+                "description": "For manual downloads, also fetch the missing TAF/V3 format sequentially when TB1 and TB2 are configured. Existing cloud, cache and library permissions still apply."
+            },
+            "cloud__cacheBothFormatsOnPlayback": {
+                "label": "Cache both audio formats on box download",
+                "description": "After a box completes an original download, fetch the missing format when TB1 and TB2 are configured. No bulk backfill; existing permissions still apply."
+            },
             "cloud__cacheContent": {
                 "label": "Cache content",
                 "description": "Cache cloud content on local server"
@@ -2997,6 +3005,40 @@
         "warningUseAtYourOwnRiskText": "Flashing your Toniebox with a patched firmware will void your warranty and may lead to a broken box. Please follow the instructions carefully and ensure you understand the risks involved."
     },
     "tonies": {
+        "cacheDownload": {
+            "reasons": {
+                "private_source": "This Tonie has an assigned local source.",
+                "nocloud": "Cloud access is blocked for this Tonie. Local content remains available.",
+                "live_content": "Live content is not downloaded into the original cache.",
+                "missing_content_auth": "This Tonie's download authorization is missing.",
+                "invalid_content_metadata": "The stored content metadata is invalid.",
+                "taf_cache_disabled": "TAF caching is disabled.",
+                "v3_cache_disabled": "V3 caching is disabled.",
+                "boxine_forwarding_disabled": "Boxine content forwarding is disabled.",
+                "tonies_forwarding_disabled": "TONIES V3 content forwarding is disabled.",
+                "missing_tb1_certificates": "Complete TB1 client certificates are missing.",
+                "missing_tb2_certificates": "Complete TB2 client certificates are missing.",
+                "tonieplay_has_no_taf": "Tonieplay has no TAF format.",
+                "taf_not_available": "Boxine provides no TAF for this Tonie.",
+                "policy_changed_or_disabled": "Download permission was changed or disabled.",
+                "download_failed": "The content could not be downloaded completely.",
+                "not_requested": "This format was not requested.",
+                "queue_full": "The download queue is full. Please try again later.",
+                "worker_unavailable": "The download service is currently unavailable.",
+                "cache_request_rejected": "The download request was rejected.",
+                "complete_native_audio_not_found": "No complete local V3 audio is available.",
+                "chapter_no_longer_available": "This local chapter is no longer available."
+            },
+            "download": "Download preferred original format",
+            "accepted": "Download accepted",
+            "acceptedDetails": "Missing permitted formats will download sequentially. Progress appears on the Tonie card.",
+            "queued": "Queued",
+            "running": "Downloading",
+            "complete": "Complete",
+            "skipped": "Skipped",
+            "failed": "Failed",
+            "noCloud": "Cloud access is blocked for this Tonie. Existing local content remains available."
+        },
         "addNewCustomTonie": "Create new model",
         "addNewCustomTonieHint": "Create a new model and assign it to the current tag",
         "addNewCustomTonieModal": {
@@ -3350,6 +3392,7 @@
             "titleSelect": "Select image"
         },
         "infoModal": {
+            "downloadNative": "Download native audio chapters as ZIP",
             "download": "Download TAF as *.ogg",
             "exists": "Exists:",
             "model": "Model:",

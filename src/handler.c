@@ -1,4 +1,7 @@
 #include "handler.h"
+#include "taf_original_cache.h"
+#include "original_content_cache.h"
+#include "original_content_transfer.h"
 #include <limits.h>
 #include "toniesJson.h"
 #include "server_helpers.h"
@@ -485,61 +488,80 @@ void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const 
     switch (ctx->api)
     {
     case V2_CONTENT: // Also handles V1_CONTENT
-        if (ctx->client_ctx->settings->cloud.cacheContent && httpClientContext->statusCode == 200)
+    {
+        /* Keep the original cache write target separate from resolved Library
+         * read paths. Each concurrent request owns its staging file. */
+        size_t json_length = osStrlen(ctx->tonieInfo->jsonPath);
+        char *rawPath = json_length > 5 ? strndup(ctx->tonieInfo->jsonPath, json_length - 5) : NULL;
+        char *tmpPath = rawPath != NULL ? custom_asprintf("%s.%p.download.tmp", rawPath, (void *)ctx) : NULL;
+        if (tmpPath != NULL && ctx->client_ctx->settings->cloud.cacheContent && httpClientContext->statusCode == 200)
         {
             // TRACE_INFO(">> cbrCloudBodyPassthrough: %lu received\r\n", length);
             // TRACE_INFO(">> %s\r\n", ctx->uri);
             if (ctx->status == PROX_STATUS_HEAD)
             {
-                /* URI is always "/v2/content/xxxxxxxxxx0304E0" where the x's are hex digits. length has to be fixed */
                 TRACE_INFO(">> Start caching uri=%s\r\n", ctx->uri);
-                // TODO detect partial downloads
-                if (strlen(ctx->uri) < 28)
+                char *dir = strdup(rawPath);
+                if (dir != NULL)
                 {
-                    TRACE_ERROR(">> ctx->uri is too short\r\n");
-                    return;
+                    dir[osStrlen(dir) - 8] = '\0';
+                    fsCreateDir(dir);
+                    ctx->file = fsOpenFile(tmpPath, FS_FILE_MODE_WRITE | FS_FILE_MODE_TRUNC);
+                    free(dir);
                 }
-                char *tmpPath = custom_asprintf("%s.tmp", ctx->tonieInfo->contentPath);
-
-                char *dir = strdup(ctx->tonieInfo->contentPath);
-                dir[osStrlen(dir) - 8] = '\0';
-                fsCreateDir(dir);
-
-                ctx->file = fsOpenFile(tmpPath, FS_FILE_MODE_WRITE | FS_FILE_MODE_TRUNC);
 
                 if (ctx->file == NULL)
                 {
+                    ctx->content_cache_failed = true;
                     TRACE_ERROR(">> Could not open file %s\r\n", tmpPath);
                 }
-                free(tmpPath);
-                free(dir);
             }
             if (length > 0 && ctx->file != NULL)
             {
-                error = fsWriteFile(ctx->file, (void *)payload, length);
-                if (error)
+                error_t write_error = fsWriteFile(ctx->file, (void *)payload, length);
+                if (write_error)
                 {
-                    TRACE_ERROR(">> fsWriteFile Error: %s\r\n", error2text(error));
+                    ctx->content_cache_failed = true;
+                    TRACE_ERROR(">> fsWriteFile Error: %s\r\n", error2text(write_error));
                 }
             }
-            if (error == ERROR_END_OF_STREAM)
+            if (error == ERROR_END_OF_STREAM && !ctx->content_cache_finished)
             {
-                fsCloseFile(ctx->file);
-                char *tmpPath = custom_asprintf("%s.tmp", ctx->tonieInfo->contentPath);
-
-                if (isValidTaf(tmpPath, true))
+                ctx->content_cache_finished = true;
+                if (ctx->file != NULL)
                 {
-                    fsDeleteFile(ctx->tonieInfo->contentPath);
-                    fsRenameFile(tmpPath, ctx->tonieInfo->contentPath);
-                    if (fsFileExists(ctx->tonieInfo->contentPath))
+                    if (fsFlushFile(ctx->file) != NO_ERROR)
+                        ctx->content_cache_failed = true;
+                    fsCloseFile(ctx->file);
+                }
+                ctx->file = NULL;
+
+                if (!ctx->content_cache_failed)
+                {
+                    settings_t *settings = ctx->client_ctx->settings;
+                    const char *relative = rawPath + osStrlen(settings->internal.contentdirfull) + 1;
+                    char ruid[TB2_RUID_SIZE];
+                    osSnprintf(ruid, sizeof(ruid), "%.8s%.8s", relative, relative + 9);
+                    bool preserve_original = tb2_ruid_classify(ruid) == TB2_RUID_CONTENT &&
+                        original_content_cache_playback_enabled() &&
+                        (ctx->tonieInfo->json.source == NULL || ctx->tonieInfo->json.source[0] == '\0');
+                    error_t published = original_content_publish_taf(tmpPath, rawPath, settings,
+                        preserve_original && settings->cloud.cacheToLibrary);
+                    if (published == NO_ERROR)
                     {
                         TRACE_INFO(">> Successfully cached %s\r\n", ctx->tonieInfo->contentPath);
 
-                        if (ctx->client_ctx->settings->cloud.cacheToLibrary)
+                        tonie_info_t *info = getTonieInfo(rawPath, false, settings);
+                        original_content_cache_submit(settings, ruid, ORIGINAL_CACHE_TAF, true,
+                            info->tafHeader != NULL ? info->tafHeader->audio_id : 0, NULL);
+                        freeTonieInfo(info);
+                        if (!preserve_original && ctx->client_ctx->settings->cloud.cacheToLibrary)
                         {
-                            tonie_info_t *tonieInfo = getTonieInfoV2(ctx->tonieInfo->contentPath, true, true, ctx->client_ctx->settings);
+                            mutex_lock(MUTEX_ORIGINAL_CONTENT_FILES);
+                            tonie_info_t *tonieInfo = getTonieInfoV2(rawPath, true, true, ctx->client_ctx->settings);
                             moveTAF2Lib(tonieInfo, ctx->client_ctx->settings, false);
                             freeTonieInfo(tonieInfo);
+                            mutex_unlock(MUTEX_ORIGINAL_CONTENT_FILES);
                         }
                     }
                     else
@@ -551,9 +573,12 @@ void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const 
                 {
                     TRACE_ERROR(">> Error caching %s, not a valid TAF\r\n", ctx->tonieInfo->contentPath);
                 }
-                free(tmpPath);
             }
         }
+        if (error == ERROR_END_OF_STREAM && tmpPath != NULL && fsFileExists(tmpPath))
+            fsDeleteFile(tmpPath);
+        osFreeMem(rawPath);
+        osFreeMem(tmpPath);
         send_err = httpSend(ctx->connection, payload, length, HTTP_FLAG_DELAY);
         if (send_err)
         {
@@ -561,6 +586,7 @@ void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const 
         }
         total_sent += length;
         break;
+    }
     case V3_FRESHNESS_CHECK:
         receiveFreshnessCloudResponseV3(ctx, httpClientContext, payload, length, error);
         return; /* Preserve DONE across the subsequent zero-byte EOF callback. */
@@ -673,6 +699,20 @@ void cbrCloudBodyPassthrough(void *src_ctx, HttpClientContext *cloud_ctx, const 
 void cbrCloudServerDiscoPassthrough(void *src_ctx, HttpClientContext *cloud_ctx)
 {
     cbr_ctx_t *ctx = src_ctx;
+    if (ctx->api == V2_CONTENT && ctx->tonieInfo != NULL)
+    {
+        if (ctx->file != NULL)
+        {
+            fsCloseFile(ctx->file);
+            ctx->file = NULL;
+        }
+        size_t length = osStrlen(ctx->tonieInfo->jsonPath);
+        char *temporary = length > 5 ? custom_asprintf("%.*s.%p.download.tmp",
+            (int)(length - 5), ctx->tonieInfo->jsonPath, (void *)ctx) : NULL;
+        if (temporary != NULL && fsFileExists(temporary))
+            fsDeleteFile(temporary);
+        osFreeMem(temporary);
+    }
     if (ctx->api == V3_FRESHNESS_CHECK)
     {
         finishFreshnessResponseV3(ctx);
@@ -965,6 +1005,16 @@ tonie_info_t *getTonieInfoV2(const char *contentPath, bool lock, bool force_taf_
         {
             osFreeMem(tonieInfo->contentPath);
             tonieInfo->contentPath = custom_asprintf("%s.tmp", tonieInfo->json._source_resolved);
+        }
+        else if ((tonieInfo->json.source == NULL || tonieInfo->json.source[0] == '\0') &&
+                 !fsFileExists(tonieInfo->contentPath))
+        {
+            char *original = taf_original_cache_resolve(contentPath, settings);
+            if (original != NULL)
+            {
+                osFreeMem(tonieInfo->contentPath);
+                tonieInfo->contentPath = original;
+            }
         }
         tonieInfo->exists = fsFileExists(tonieInfo->contentPath);
 

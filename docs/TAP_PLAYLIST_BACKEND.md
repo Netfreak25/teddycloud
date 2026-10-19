@@ -6,6 +6,65 @@ Display metadata for directly assigned custom TAF files is separate from this TB
 
 ## Implementation overview
 
+### Original TAF Library backing and dual-format downloads
+
+Original downloads can retain their RUID/source preference while importing audio
+into the Library. This is distinct from TAP generation: no TAP ordering, generated
+versions, freshness markers or playback confirmation changes are involved.
+
+The global, default-off options `cloud.cacheBothFormatsOnDownload` and
+`cloud.cacheBothFormatsOnPlayback` request serial TAF/TONIES V3 caching in mixed
+TB1/TB2 installations. They never enable cache, Library or forwarding permissions.
+Source-assigned, live and NoCloud contents are excluded. An existing complete
+format needs no network access; an enabled Library import can be completed locally.
+
+A TAF is published to the Library before an atomic original-cache reference is
+written below the global cache root at
+`taf-original/<SHA256-normalized-contentdir>/<RUID>.json`. Only then is its
+identical raw cache copy removed. References validate Library URI, audio ID,
+header SHA-1 and complete file size. Imports also verify the audio hash. Deleted
+or changed Library files yield a cache miss. References remain useful after the
+new options are disabled; existing explicit Sources are never migrated.
+
+Changes by file:
+
+- `src/taf_original_cache.c` / `include/taf_original_cache.h`: implement bounded
+  reference validation and atomic import. An exact content-directory/RUID mapping
+  avoids guessed catalog/model matches and permanent duplicate audio storage.
+- `src/original_content_cache.c` / `include/original_content_cache.h`: a single
+  worker owns a 32-entry deduplicated RAM job/status table. Owned settings and
+  certificate snapshots, repeated current-policy checks and serial formats avoid
+  borrowed HTTP contexts, identity substitution and recursive automatic work.
+  Terminal automatic attempts are not continuously retried; manual requests can
+  explicitly retry. No persistent queue or download retry loop is introduced.
+- `src/original_content_transfer.c` / `include/original_content_transfer.h`:
+  separate physical cache write targets from reference-resolved read paths.
+  Staging publication and original imports share a short file-publication mutex;
+  download bytes are never written into a shared Library file.
+- `src/handler.c` / `include/handler.h`: use reference-backed originals when raw
+  cache files are absent; own per-request staging files and check write/flush
+  results. Dual-playback imports preserve Source instead of assigning the Library
+  file. Legacy imports with the option off retain their prior behavior.
+- `src/handler_cloud.c`: reuse the existing V3 download pipeline with an optional
+  owned job context. Background jobs bypass legacy manual Source assignment;
+  complete original downloads/cache access can enqueue one automatic complement.
+- `src/cloud_request.c`: accept the worker's owned TB1 certificate identity using
+  the existing request context, avoiding another box's credentials after reload.
+- `src/original_content_api.c` / `include/original_content_api.h`, `src/server.c`:
+  expose bounded cache-job admission and read-only native audio URLs; tie worker
+  lifetime to server startup/shutdown. No cloud access is hidden behind export.
+- `src/handler_api.c`: expose per-format progress and blockers, use complete-file
+  checks/reference resolution for cache presence and ordinary TAF downloads.
+- `src/settings.c` / `include/settings.h`, `include/mutex_manager.h`: register
+  the two global-only options and dedicated worker/reference/publication locks;
+  overlays cannot set/reset the options. No configuration migration is needed.
+- `src/v3_native_cache.c` / `include/v3_native_cache.h`: provide an owned,
+  read-only audio snapshot without selecting or replacing active runtime routes.
+
+Focused runtime tests exercise worker admission/policy/partial success, reference
+publication failures and restarts, native cache/Library exports, and callback
+completion failures. Existing cache/source/freshness contracts remain applicable.
+
 The backend changes are grouped around one behavior: stable TAF-only TAP playlists should be generated fast, streamed from a growing `.taf.tmp`, published safely as a final `.taf`, and then stay valid across freshness checks.
 
 The main backend change is the TAF-only remux path. It avoids PCM decoding and Opus re-encoding, derives a complete final TAF header before streaming, writes Ogg pages with predictable block alignment, and allows the first download to be cache-safe.

@@ -3549,6 +3549,56 @@ static char *v3_native_snapshot_object_path(const v3_native_route_t *snapshot,
                               snapshot->chapters[index].name);
 }
 
+error_t v3_native_cache_audio_snapshot(const char *cache_root,
+    const char *library_root, uint8_t overlay_id, const char *ruid,
+    uint32_t expected_version, uint32_t *version,
+    v3_native_library_collection_t *collection)
+{
+    if (collection == NULL || version == NULL)
+        return ERROR_INVALID_PARAMETER;
+    osMemset(collection, 0, sizeof(*collection));
+    v3_native_route_t snapshot = {0};
+    uint8_t *manifest = NULL;
+    size_t length = 0;
+    mutex_lock(MUTEX_V3_NATIVE_LIBRARY);
+    mutex_lock(MUTEX_V3_NATIVE_CACHE);
+    error_t error = v3_native_snapshot_load_locked(cache_root, library_root,
+        overlay_id, ruid, &manifest, &length, version, &snapshot);
+    mutex_unlock(MUTEX_V3_NATIVE_CACHE);
+    if (error == NO_ERROR &&
+        (v3_native_route_is_tonieplay(&snapshot) ||
+         (expected_version != 0 && expected_version != *version)))
+        error = ERROR_NOT_FOUND;
+    if (error == NO_ERROR)
+    {
+        collection->chapters = osAllocMem(snapshot.chapter_count * sizeof(*collection->chapters));
+        if (collection->chapters == NULL)
+            error = ERROR_OUT_OF_MEMORY;
+        else
+        {
+            osMemset(collection->chapters, 0, snapshot.chapter_count * sizeof(*collection->chapters));
+            collection->chapter_count = snapshot.chapter_count;
+            for (size_t i = 0; i < collection->chapter_count; i++)
+            {
+                collection->chapters[i].index = i;
+                collection->chapters[i].file_size = snapshot.chapters[i].file_size;
+                collection->chapters[i].path = v3_native_snapshot_object_path(&snapshot, i);
+                if (collection->chapters[i].path == NULL)
+                {
+                    error = ERROR_OUT_OF_MEMORY;
+                    break;
+                }
+            }
+        }
+    }
+    v3_native_route_clear(&snapshot);
+    osFreeMem(manifest);
+    mutex_unlock(MUTEX_V3_NATIVE_LIBRARY);
+    if (error != NO_ERROR)
+        v3_native_library_collection_free(collection);
+    return error;
+}
+
 error_t v3_native_cache_import_active_tonieplay_library_version(
     const char *cache_root,
     const char *library_root,

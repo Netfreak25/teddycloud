@@ -80,7 +80,10 @@ typedef struct
     client_ctx_t *client_ctx;
     /* Optional owned identity for a request that outlives its box connection. */
     const settings_cert_t *tb2_identity;
+    const settings_cert_t *tb1_identity;
     bool reject_redirects;
+    bool content_cache_failed;
+    bool content_cache_finished;
 } cbr_ctx_t;
 
 void fillBaseCtx(HttpConnection *connection, const char_t *uri, const char_t *queryString, cloudapi_t api, cbr_ctx_t *ctx, client_ctx_t *client_ctx);

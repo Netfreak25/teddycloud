@@ -91,6 +91,13 @@ static error_t httpClientTlsInitCallbackClientAuthBoxine(HttpClientContext *cont
                                                          TlsContext *tlsContext)
 {
     req_cbr_t *cbr_ctx = context->sourceCtx;
+    const settings_cert_t *owned = ((cbr_ctx_t *)cbr_ctx->ctx)->tb1_identity;
+    if (owned != NULL)
+    {
+        if (client_cert_is_incomplete(owned))
+            return ERROR_AUTH_REQUIRED;
+        return httpClientTlsInitCallbackBase(context, tlsContext, owned->ca, owned->crt, owned->key);
+    }
     client_ctx_t *client_ctx = ((cbr_ctx_t *)cbr_ctx->ctx)->client_ctx;
     settings_t *settings = client_ctx->settings;
     const settings_cert_t *clientCert = &settings->internal.client_tb1;

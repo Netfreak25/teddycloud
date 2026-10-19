@@ -26,6 +26,8 @@
 #include "tb2_ruid.h"
 #include "v3_local_content.h"
 #include "v3_native_cache.h"
+#include "original_content_cache.h"
+#include "taf_original_cache.h"
 #include "cJSON.h"
 
 #include <byteswap.h>
@@ -59,6 +61,7 @@ typedef struct
 {
     cbr_ctx_t passthrough;
     v3_native_cache_meta_capture_t cache;
+    const original_content_cache_job_t *job;
     error_t cache_error;
     bool_t finished;
 } v3_native_meta_cbr_t;
@@ -67,6 +70,7 @@ typedef struct
 {
     cbr_ctx_t passthrough;
     v3_native_cache_chapter_capture_t cache;
+    const original_content_cache_job_t *job;
     bool_t cache_enabled;
     bool_t response_successful;
     bool_t downstream_failed;
@@ -99,6 +103,8 @@ static void v3_native_import_library_if_enabled(client_ctx_t *client_ctx,
 
     if (!tonieplay)
     {
+        original_content_cache_submit(client_ctx->settings, ruid,
+            ORIGINAL_CACHE_V3, true, completed_version, NULL);
         char canonical_ruid[TB2_RUID_SIZE];
         if (tb2_ruid_canonicalize(ruid, canonical_ruid))
         {
@@ -287,7 +293,8 @@ static void v3_native_meta_body(void *source, HttpClientContext *cloud,
     {
         context->finished = TRUE;
         settings_t *settings = context->passthrough.client_ctx->settings;
-        if (!v3_native_original_content_allowed(settings, context->cache.ruid, TRUE))
+        if (!v3_native_original_content_allowed(settings, context->cache.ruid, TRUE) ||
+            (context->job != NULL && !original_content_cache_job_allowed(context->job, ORIGINAL_CACHE_V3)))
         {
             v3_native_cache_invalidate_routes(settings->internal.overlayNumber,
                                                context->cache.ruid);
@@ -302,7 +309,7 @@ static void v3_native_meta_body(void *source, HttpClientContext *cloud,
             TRACE_WARNING("TB2 V3 content-meta was received but not cached: %s\r\n",
                           error2text(context->cache_error));
         }
-        else
+        else if (context->job == NULL)
         {
             v3_native_import_library_if_enabled(
                 context->passthrough.client_ctx, context->cache.ruid,
@@ -383,7 +390,8 @@ static void v3_native_chapter_body(void *source, HttpClientContext *cloud,
         if (context->cache_enabled && !context->cache.failed)
         {
             settings_t *settings = context->passthrough.client_ctx->settings;
-            if (!v3_native_original_content_allowed(settings, context->cache.ruid, TRUE))
+            if (!v3_native_original_content_allowed(settings, context->cache.ruid, TRUE) ||
+                (context->job != NULL && !original_content_cache_job_allowed(context->job, ORIGINAL_CACHE_V3)))
             {
                 v3_native_cache_invalidate_routes(settings->internal.overlayNumber,
                                                    context->cache.ruid);
@@ -399,7 +407,7 @@ static void v3_native_chapter_body(void *source, HttpClientContext *cloud,
                               context->cache.name,
                               error2text(context->cache_error));
             }
-            else
+            else if (context->job == NULL)
             {
                 v3_native_import_library_if_enabled(
                     context->passthrough.client_ctx, context->cache.ruid,
@@ -1899,6 +1907,10 @@ error_t handleCloudContentExt(HttpConnection *connection, const char_t *uri, con
     }
     else if (tonieInfo->exists && tonieInfo->valid && (!tonie_marked || !can_use_cloud))
     {
+        if (tonieInfo->json._source_type != CT_SOURCE_TAF_INCOMPLETE &&
+            (tonieInfo->json.source == NULL || tonieInfo->json.source[0] == '\0'))
+            original_content_cache_submit(client_ctx->settings, ruid,
+                ORIGINAL_CACHE_TAF, true, tonieInfo->tafHeader->audio_id, NULL);
         TRACE_INFO("Serve local content from %s\r\n", tonieInfo->contentPath);
         connection->response.keepAlive = true;
 
@@ -4789,6 +4801,8 @@ static error_t v3_manual_download_write_result(HttpConnection *connection,
                                                size_t total,
                                                const v3_manual_download_result_t *result)
 {
+    if (connection == NULL)
+        return stage == V3_MANUAL_DOWNLOAD_COMPLETE ? NO_ERROR : ERROR_FAILURE;
     bool_t cache_complete = result != NULL && result->cache_complete;
     bool_t library_imported = result != NULL && result->library_imported;
     bool_t assigned = result != NULL && result->assigned;
@@ -4883,6 +4897,8 @@ static error_t v3_manual_download_fail_with_result(
                 chapter != NULL ? chapter : "",
                 upstream_status,
                 error2text(error));
+    if (connection == NULL)
+        return error != NO_ERROR ? error : ERROR_FAILURE;
     return v3_manual_download_write_result(
         connection, stage,
         v3_manual_download_message(stage, error, upstream_status), ruid,
@@ -5014,13 +5030,14 @@ static error_t v3_manual_download_assign_library_source(
     return error;
 }
 
-error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *ruid,
+static error_t v3_content_download_run(HttpConnection *connection, const char *ruid,
                                      const contentJson_t *content,
-                                     client_ctx_t *client_ctx)
+                                     client_ctx_t *client_ctx,
+                                     const original_content_cache_job_t *job)
 {
     char canonical_ruid[TB2_RUID_SIZE];
     settings_t *settings = client_ctx != NULL ? client_ctx->settings : NULL;
-    if (connection == NULL || settings == NULL)
+    if (settings == NULL)
     {
         return ERROR_INVALID_PARAMETER;
     }
@@ -5080,8 +5097,14 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
     v3_native_meta_cbr_t meta;
     osMemset(&meta, 0, sizeof(meta));
     meta.cache_error = ERROR_IN_PROGRESS;
+    meta.job = job;
     fillBaseCtx(NULL, meta_uri, "", V3_CONTENT_META, &meta.passthrough,
                 client_ctx);
+    if (job != NULL)
+    {
+        meta.passthrough.tb2_identity = &job->tb2_identity;
+        meta.passthrough.reject_redirects = true;
+    }
     v3_native_cache_meta_capture_init(&meta.cache,
                                       settings->internal.cachedirfull,
                                       settings->internal.librarydirfull,
@@ -5151,7 +5174,8 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
     for (size_t i = 0; i < plan.object_count; i++)
     {
         const v3_native_cache_download_object_t *object = &plan.objects[i];
-        if (!v3_native_original_content_allowed(settings, canonical_ruid, TRUE))
+        if (!v3_native_original_content_allowed(settings, canonical_ruid, TRUE) ||
+            (job != NULL && !original_content_cache_job_allowed(job, ORIGINAL_CACHE_V3)))
         {
             v3_native_cache_invalidate_routes(settings->internal.overlayNumber,
                                                canonical_ruid);
@@ -5207,11 +5231,17 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
         v3_native_chapter_cbr_t chapter_context;
         osMemset(&chapter_context, 0, sizeof(chapter_context));
         chapter_context.cache = capture;
+        chapter_context.job = job;
         chapter_context.cache_enabled = TRUE;
         chapter_context.cache_error = ERROR_IN_PROGRESS;
         osMemset(&capture, 0, sizeof(capture));
         fillBaseCtx(NULL, chapter_uri, chapter_query, V3_CHAPTER,
                     &chapter_context.passthrough, client_ctx);
+        if (job != NULL)
+        {
+            chapter_context.passthrough.tb2_identity = &job->tb2_identity;
+            chapter_context.passthrough.reject_redirects = true;
+        }
         req_cbr_t chapter_cbr = {
             .ctx = &chapter_context,
             .response = v3_native_chapter_response,
@@ -5287,6 +5317,11 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
                                        NULL, 0, version, completed, total,
                                        TRUE);
     }
+
+    /* Jobs import through the cache adapter, never assign a private source. */
+    if (job != NULL)
+        return original_content_cache_job_allowed(job, ORIGINAL_CACHE_V3)
+                   ? NO_ERROR : ERROR_ABORTED;
 
     if (tonieplay)
     {
@@ -5408,6 +5443,30 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
         canonical_ruid, NULL, 200, version, completed, total, &result);
     osFreeMem(library_source);
     return response_error;
+}
+
+error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *ruid,
+    const contentJson_t *content, client_ctx_t *client_ctx)
+{
+    if (connection == NULL)
+        return ERROR_INVALID_PARAMETER;
+    return v3_content_download_run(connection, ruid, content, client_ctx, NULL);
+}
+
+error_t original_content_download_v3(original_content_cache_job_t *job)
+{
+    if (!original_content_cache_job_allowed(job, ORIGINAL_CACHE_V3))
+        return ERROR_ACCESS_DENIED;
+    contentJson_t content = {0};
+    content.source = "";
+    content.cloud_auth = job->auth;
+    content.cloud_auth_len = sizeof(job->auth);
+    content._has_cloud_auth = true;
+    content.cloud_override = strcmp(job->ruid, job->upstream_ruid) != 0;
+    content.cloud_ruid = job->upstream_ruid;
+    client_ctx_t ctx = {0};
+    ctx.settings = &job->settings;
+    return v3_content_download_run(NULL, job->ruid, &content, &ctx, job);
 }
 
 error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)

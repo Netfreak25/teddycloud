@@ -22,8 +22,8 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
         api_end = cls.api.index("typedef struct", api_start)
         cls.download_api = cls.api[api_start:api_end]
 
-        manual_start = cls.cloud.index("error_t handleCloudContentDownloadV3(")
-        manual_end = cls.cloud.index("error_t handleCloudContentMetaV3(", manual_start)
+        manual_start = cls.cloud.index("static error_t v3_content_download_run(")
+        manual_end = cls.cloud.index("error_t handleCloudContentDownloadV3(", manual_start)
         cls.manual = cls.cloud[manual_start:manual_end]
 
     def test_download_action_uses_explicit_preference_or_auto_generation(self):
@@ -102,7 +102,7 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
             "static error_t v3_manual_download_assign_library_source("
         )
         assignment_end = self.cloud.index(
-            "error_t handleCloudContentDownloadV3(", assignment_start
+            "static error_t v3_content_download_run(", assignment_start
         )
         assignment = self.cloud[assignment_start:assignment_end]
         self.assertIn("getTonieInfoFromRuid((char *)ruid, true, settings)", assignment)
@@ -160,7 +160,7 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
         restore_start = self.cloud.index(
             "static void v3_manual_download_restore_active_route("
         )
-        restore_end = self.cloud.index("error_t handleCloudContentDownloadV3(")
+        restore_end = self.cloud.index("static error_t v3_content_download_run(")
         restore = self.cloud[restore_start:restore_end]
         self.assertIn("v3_native_cache_read_active_manifest", restore)
         self.assertNotIn("v3_native_cache_open_active_manifest", restore)

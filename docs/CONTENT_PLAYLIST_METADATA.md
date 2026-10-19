@@ -60,6 +60,22 @@ no audio scan, download, hash validation, encoding or metadata write, and does
 not change source selection or routing. Older clients can ignore the field;
 TeddyRemote 0.1.30 already consumes it.
 
+## Native audio downloads and shared player selection
+
+The info dialog can export complete native audio from either an assigned Library
+collection or the read-only original-cache API documented in
+[TB2_V3_CONTENT_CACHE.md](TB2_V3_CONTENT_CACHE.md). Exports contain unchanged Opus
+chapters in playback order, named `001 - Title.opus` etc.; titles require a complete
+matching list. Otherwise the UI uses localized chapter numbers. Filenames are
+sanitized, and a failed chapter fetch aborts the entire export.
+
+`teddycloud_web/src/utils/audio/tonieAudio.ts` shares source/preference/fallback
+selection between card, information dialog and player. A playable V3 fallback
+does not hide the action to download a missing preferred TAF. Library-only player
+entries retain Library metadata priority; tonie-bound starts retain their RUID
+and custom-image context. No audio conversion or Library manifest rewrite is
+performed, and File Manager archive export is unchanged.
+
 ## Code changes by file
 
 ### `include/content_playlist.h` and `src/content_playlist.c`

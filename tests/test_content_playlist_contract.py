@@ -221,10 +221,12 @@ class ContentPlaylistContractTests(unittest.TestCase):
             self.api,
         )
         self.assertIn("item->tracks_count == collection->chapter_count", self.api)
-        self.assertIn("metadata?.tracks?.length === collection.chapterCount", self.native_playback)
+        self.assertIn("metadata?.tracks?.length === audio.chapters.length", self.native_playback)
         self.assertIn("record.tonieInfo?.tracks", self.file_browser)
         self.assertIn("record.tonieInfo?.tracks", self.audio_player_page)
-        self.assertIn("tonieCard.playlist?.tracks", self.tonie_card)
+        tonie_audio = (WEB / "src/utils/audio/tonieAudio.ts").read_text(encoding="utf-8")
+        self.assertIn("tonie.playlist?.tracks", tonie_audio)
+        self.assertIn("loadTonieNativePlaybackItem", self.tonie_card)
         self.assertIn("record.tonieInfo?.tracks?.some", self.file_browser_columns)
 
     def test_tonieplay_name_uses_manifest_metadata_in_file_browser(self):

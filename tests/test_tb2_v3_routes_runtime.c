@@ -10,6 +10,7 @@
 #include "handler.h"
 #include "mutex_manager.h"
 #include "v3_native_cache.h"
+#include "original_content_cache.h"
 #include "cJSON.h"
 #include "fs_ext.h"
 
@@ -38,6 +39,12 @@ void osFreeMem(void *pointer) { free(pointer); }
 void osSuspendAllTasks(void) {}
 void osResumeAllTasks(void) {}
 settings_t *get_settings(void) { return &settings; }
+bool original_content_cache_job_allowed(const original_content_cache_job_t *job,
+                                       original_cache_format_t format)
+{
+    assert(job != NULL && format == ORIGINAL_CACHE_V3);
+    return true;
+}
 
 tonie_info_t *getTonieInfoFromRuid(char ruid[17], bool lock, settings_t *current)
 {
@@ -1672,10 +1679,85 @@ static void test_restart_ambiguous_runtime(void)
     assert(!v3_native_cache_route_matches(TEST_OVERLAY, CONTENT_RUID, 7, "original.opus"));
 }
 
+static void test_audio_snapshot_cache_and_library(void)
+{
+    manifest(CONTENT_RUID, 7, "original.opus", "second.opus", TRUE);
+    v3_native_cache_chapter_capture_t capture;
+    char *path = NULL;
+    assert(prepare("original.opus", &capture, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    finish_object(&capture);
+    v3_native_library_collection_t audio = {0};
+    uint32_t version = 0;
+    assert(v3_native_cache_audio_snapshot(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+        CONTENT_RUID, 0, &version, &audio) != NO_ERROR);
+    assert(audio.chapters == NULL && audio.chapter_count == 0);
+    assert(prepare("second.opus", &capture, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+    finish_object(&capture);
+
+    for (unsigned backing = 0; backing < 2; backing++)
+    {
+        char *source = NULL;
+        if (backing)
+        {
+            assert(v3_native_cache_import_active_library(TEST_CACHE, TEST_LIBRARY,
+                TEST_OVERLAY, CONTENT_RUID, &source) == NO_ERROR);
+            free(source);
+        }
+        assert(v3_native_cache_audio_snapshot(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+            CONTENT_RUID, 7, &version, &audio) == NO_ERROR);
+        assert(version == 7 && audio.chapter_count == 2);
+        for (size_t i = 0; i < audio.chapter_count; i++)
+        {
+            assert(audio.chapters[i].index == i && audio.chapters[i].file_size == 4);
+            assert(strstr(audio.chapters[i].path, backing ? "library/" : "cache/") != NULL);
+            char *bytes = read_test_file(audio.chapters[i].path);
+            assert(!strcmp(bytes, "OggS"));
+            free(bytes);
+        }
+        assert(strcmp(audio.chapters[0].path, audio.chapters[1].path) != 0);
+        v3_native_library_collection_free(&audio);
+        assert(v3_native_cache_audio_snapshot(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+            CONTENT_RUID, 8, &version, &audio) != NO_ERROR);
+        assert(audio.chapters == NULL && audio.chapter_count == 0);
+    }
+}
+
+static void test_audio_snapshot_readonly_and_rejections(void)
+{
+    test_import_requires_requested_active_version();
+    v3_native_library_collection_t audio = {0};
+    uint32_t version = 0;
+    assert(v3_native_cache_audio_snapshot(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+        "DC467027500304E0", 9, &version, &audio) != NO_ERROR);
+    assert(audio.chapters == NULL && audio.chapter_count == 0);
+    assert(v3_native_cache_audio_snapshot(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY + 1,
+        CONTENT_RUID, 0, &version, &audio) != NO_ERROR);
+    assert(v3_native_cache_audio_snapshot(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+        "../invalid", 0, &version, &audio) == ERROR_INVALID_PARAMETER);
+
+    /* A reader must not restore an older active route over a live download. */
+    manifest(CONTENT_RUID, 8, "new.opus", NULL, FALSE);
+    assert(v3_native_cache_audio_snapshot(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+        CONTENT_RUID, 7, &version, &audio) == NO_ERROR);
+    assert(version == 7);
+    assert(v3_native_cache_route_matches(TEST_OVERLAY, CONTENT_RUID, 8, "new.opus"));
+    assert(!v3_native_cache_route_matches(TEST_OVERLAY, CONTENT_RUID, 7, "original.opus"));
+    char *object = strdup(audio.chapters[0].path);
+    v3_native_library_collection_free(&audio);
+    assert(object != NULL && fsDeleteFile(object) == NO_ERROR);
+    free(object);
+    assert(v3_native_cache_audio_snapshot(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+        CONTENT_RUID, 7, &version, &audio) != NO_ERROR);
+    assert(audio.chapters == NULL && audio.chapter_count == 0);
+    assert(v3_native_cache_route_matches(TEST_OVERLAY, CONTENT_RUID, 8, "new.opus"));
+}
+
 int main(int argc, char **argv)
 {
     struct { const char *name; void (*run)(void); } cases[] = {
         {"interleaved", test_interleaved_content_and_system_manifest},
+        {"audio-snapshot-backing", test_audio_snapshot_cache_and_library},
+        {"audio-snapshot-readonly", test_audio_snapshot_readonly_and_rejections},
         {"duplicate-abort", test_duplicate_abort_keeps_original_capture},
         {"stored-interleaving", test_stored_interleaving_completes_both_generations},
         {"readonly-info", test_active_info_does_not_rollback_live_route},

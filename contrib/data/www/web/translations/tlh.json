@@ -294,6 +294,14 @@
                 "label": "Also cache the other firmware slot",
                 "description": "When a box requests a firmware update, TeddyCloud also downloads the offered firmware for the other slot if it is not already cached."
             },
+            "cloud__cacheBothFormatsOnDownload": {
+                "label": "lISlu'DI' cha' wab Seghmey pol",
+                "description": "TB1 TB2 je lutu'lu'chugh, TAF/V3 Segh Hutlhbogh tlhap. QIn pat, polmeH pat, paqghom je chaw'mey quvmoH."
+            },
+            "cloud__cacheBothFormatsOnPlayback": {
+                "label": "box tlhapDI' cha' wab Seghmey pol",
+                "description": "box wa' De' naQ tlhapDI', Segh Hutlhbogh tlhap; TB1 TB2 je lutu'lu'nIS. De' Hoch ngo' tlhapqa'be'. chaw'mey quvmoH."
+            },
             "log__level": {
                 "label": "QonoS patlh"
             },
@@ -419,6 +427,43 @@
         }
     },
     "tonies": {
+        "cacheDownload": {
+            "reasons": {
+                "private_source": "Tonie-vaD Daqvam Hal wIvlu'.",
+                "nocloud": "Tonie-vaD cloud naw' botlu'. De' DaqvamDaq polbogh lo'laH.",
+                "live_content": "Live De' cacheDaq tlhapbe'.",
+                "missing_content_auth": "Tonie tlhapmeH chaw' Hutlh.",
+                "invalid_content_metadata": "lughbe' De' polbogh.",
+                "taf_cache_disabled": "TAF cache Qotlhlu'.",
+                "v3_cache_disabled": "V3 cache Qotlhlu'.",
+                "boxine_forwarding_disabled": "Boxine De' ngeHmeH mIw Qotlhlu'.",
+                "tonies_forwarding_disabled": "TONIES V3 De' ngeHmeH mIw Qotlhlu'.",
+                "missing_tb1_certificates": "TB1 client certificates naQ Hutlh.",
+                "missing_tb2_certificates": "TB2 client certificates naQ Hutlh.",
+                "tonieplay_has_no_taf": "Tonieplay-vaD TAF Segh tu'be'lu'.",
+                "taf_not_available": "Tonie-vaD TAF nobbe' Boxine.",
+                "policy_changed_or_disabled": "tlhapmeH chaw' choHlu' pagh Qotlhlu'.",
+                "download_failed": "De' naQ tlhaplaHbe'.",
+                "not_requested": "Seghvam tlhobbe'lu'.",
+                "queue_full": "buy' tlhapmeH tetlh. tugh yInIDqa'.",
+                "worker_unavailable": "tlhapmeH toy'wI' tu'be'lu'.",
+                "cache_request_rejected": "tlhapmeH Qu' lajbe'lu'.",
+                "complete_native_audio_not_found": "DaqvamDaq V3 wab naQ tu'be'lu'.",
+                "chapter_no_longer_available": "DaH 'ay'vam tu'be'lu'."
+            },
+            "download": "wab Segh wIvlu'bogh yItlhap",
+            "accepted": "tlhapmeH Qu' lajlu'",
+            "acceptedDetails": "Seghmey Hutlhbogh, chaw'lu'bogh je tlhap. mIwmey Tonie nav 'ang.",
+            "queued": "loS",
+            "running": "tlhaptaH",
+            "complete": "naQ",
+            "skipped": "juS",
+            "failed": "luj",
+            "noCloud": "Tonie-vaD cloud naw' botlu'. De' naQ DaqDaq polbogh lo'laH."
+        },
+        "infoModal": {
+            "downloadNative": "wab 'ay'mey ZIP yItlhap"
+        },
         "addNewCustomTonieModal": {
             "language": "Hol",
             "save": "pol"

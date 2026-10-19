@@ -106,6 +106,8 @@ typedef struct
     bool localOta;
     bool cacheContent;
     bool cacheToLibrary;
+    bool cacheBothFormatsOnDownload;
+    bool cacheBothFormatsOnPlayback;
     bool markCustomTagByPass;
     bool markCustomTagByUid;
     bool prioCustomContent;

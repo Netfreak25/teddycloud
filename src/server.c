@@ -40,6 +40,8 @@
 #include "tb2_https_passthrough.h"
 #include "tb2_mqtt_passthrough.h"
 #include "tb2_ota_cache.h"
+#include "original_content_api.h"
+#include "original_content_cache.h"
 #include "toniebox_state.h"       // for get_toniebox_state, get_toniebox_s...
 #include "toniebox_state_type.h"  // for toniebox_state_box_t, toniebox_sta...
 #include "toniesJson.h"           // for tonieboxes_update, tonies_deinit
@@ -150,6 +152,8 @@ request_type_t request_paths[] = {
     /* cached files */
     {REQ_GET, "/cache/", SERTY_WEB, &handleCacheDownload},
     /* web interface directory */
+    {REQ_POST, "/api/content/cache/", SERTY_WEB, &handleApiOriginalCache},
+    {REQ_GET, "/api/content/native/", SERTY_WEB, &handleApiNativeContent},
     {REQ_GET, "/content/download/", SERTY_WEB, &handleApiContentDownload},
     {REQ_GET, "/content/json/get/", SERTY_WEB, &handleApiContentJsonGet},
     {REQ_POST, "/content/json/set/", SERTY_WEB, &handleApiContentJsonSet},
@@ -1086,6 +1090,7 @@ void server_init(bool test)
     }
 
     tb2_ota_cache_init();
+    original_content_cache_init();
 
     HttpServerSettings http_settings;
     HttpServerSettings https_web_settings;
@@ -1288,6 +1293,7 @@ void server_init(bool test)
         }
     }
     tb2_ota_cache_deinit();
+    original_content_cache_deinit();
     mqtt_server_deinit();
     tb2_mqtt_passthrough_deinit();
     tb2_https_passthrough_deinit();

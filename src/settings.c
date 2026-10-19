@@ -377,6 +377,8 @@ static void option_map_init(uint8_t settingsId)
     OPTION_BOOL("cloud.localOta", &settings->cloud.localOta, FALSE, "Local OTA delivery", "Send local OTA files in firmware dir", LEVEL_EXPERT)
     OPTION_BOOL("cloud.cacheContent", &settings->cloud.cacheContent, TRUE, "Cache content", "Cache cloud content on local server", LEVEL_DETAIL)
     OPTION_BOOL("cloud.cacheToLibrary", &settings->cloud.cacheToLibrary, TRUE, "Cache to library", "Cache cloud content to library", LEVEL_DETAIL)
+    OPTION_BOOL("cloud.cacheBothFormatsOnDownload", &settings->cloud.cacheBothFormatsOnDownload, FALSE, "Cache both original formats on download", "Cache TAF and native V3 sequentially in mixed TB1/TB2 installations; existing cache, library and cloud permissions still apply (global only)", LEVEL_DETAIL)
+    OPTION_BOOL("cloud.cacheBothFormatsOnPlayback", &settings->cloud.cacheBothFormatsOnPlayback, FALSE, "Cache both original formats during playback", "After a complete original content access, fill the missing format in the background; existing cache, library and cloud permissions still apply (global only)", LEVEL_DETAIL)
     OPTION_BOOL("cloud.markCustomTagByPass", &settings->cloud.markCustomTagByPass, TRUE, "Autodetect custom tags (password)", "Automatically mark custom tags by password", LEVEL_EXPERT)
     OPTION_BOOL("cloud.markCustomTagByUid", &settings->cloud.markCustomTagByUid, TRUE, "Autodetect custom tags (uid)", "Automatically mark custom tags by uid", LEVEL_EXPERT)
     OPTION_BOOL("cloud.prioCustomContent", &settings->cloud.prioCustomContent, TRUE, "Prioritize custom content", "Prioritize custom content over tonies content (force update, only if \"Update content on lower audio id\" is disabled)", LEVEL_EXPERT)
@@ -2341,7 +2343,9 @@ static error_t settings_read_ovl(bool overlay)
                                 *((bool *)opt->ptr) = false;
                                 break;
                             }
-                            if (overlay && !osStrcmp(option_name, CORE_SERVER_SNI_CERT_SELECTION_SETTING))
+                            if (overlay && (!osStrcmp(option_name, CORE_SERVER_SNI_CERT_SELECTION_SETTING) ||
+                                            !osStrcmp(option_name, "cloud.cacheBothFormatsOnDownload") ||
+                                            !osStrcmp(option_name, "cloud.cacheBothFormatsOnPlayback")))
                             {
                                 TRACE_WARNING("Ignoring overlay-only value for global setting '%s'\r\n",
                                               option_name);
@@ -2666,6 +2670,8 @@ bool settings_set_bool_id(const char *item, bool value, uint8_t settingsId)
     }
 
     if (settingsId > 0 && (!osStrcmp(item, "cloud.cacheOtaV3BothSlots") ||
+                           !osStrcmp(item, "cloud.cacheBothFormatsOnDownload") ||
+                           !osStrcmp(item, "cloud.cacheBothFormatsOnPlayback") ||
                            !osStrcmp(item, "mqtt_client_upstream.enabled") ||
                            !osStrcmp(item, CORE_SERVER_SNI_CERT_SELECTION_SETTING)))
     {
@@ -2714,6 +2720,9 @@ bool settings_reset_id(const char *item, uint8_t settingsId)
     {
         return false;
     }
+    if (settingsId > 0 && (!osStrcmp(item, "cloud.cacheBothFormatsOnDownload") ||
+                          !osStrcmp(item, "cloud.cacheBothFormatsOnPlayback")))
+        return false;
 
     setting_item_t *option = settings_get_by_name_id(item, settingsId);
     setting_item_t *globalOption = settings_get_by_name_id(item, 0);

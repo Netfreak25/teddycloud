@@ -10,6 +10,61 @@ heterogeneous object model and this audio-oriented cache are documented in
 
 ## Native TONIES original-content cache
 
+### Manual and playback-driven complementary caching
+
+`cloud.cacheBothFormatsOnDownload` and `cloud.cacheBothFormatsOnPlayback` are
+independent, global-only options, both off by default. With configured TB1 and
+TB2 boxes, manual downloads process the selected original format first and then
+the other format. Playback completion or access to an already complete original
+cache can request the same serial work without a browser. Playback entirely from
+box storage does not trigger a downloader; there is no MQTT hook.
+
+`POST /api/content/cache/<RUID>?overlay=<id>` admits an original-content job and
+returns HTTP 202, not a completion claim. A full 32-entry queue returns 503;
+invalid identifiers return 400 and policy rejection returns 409. The legacy
+download endpoint remains compatible. Repeated requests for a pending RUID and
+overlay are deduplicated. Automatic terminal attempts are remembered in the same
+bounded RAM table until eviction/restart or a new observed version; failures do
+not start an automatic retry loop. Partial successes remain available.
+
+Existing original cache/Library/forwarding options and generation-specific
+certificate selection remain authoritative. Workers snapshot their selected
+identity and recheck Source, NoCloud, overlay identity, paths and permissions
+before fetching and publishing. They do not borrow a different box identity.
+Tonieplay never requests a TAF complement. Existing complete formats are reused;
+only an enabled, missing Library import is completed. No source assignment or
+cache preference is changed by the new endpoint or its worker.
+
+`getTagInfo.cacheState.download` provides optional `taf` and `v3` objects with
+`state` (`queued`, `running`, `complete`, `skipped`, `failed`) and an optional
+`reason`. Missing selected format and playable fallback are independent.
+`downloadBlockedReason` is present when a missing preferred format was checked;
+an empty string means no current blocker. Explicit NoCloud is not cleared when
+the user clears a Source.
+
+TAF Library backing uses a validated reference outside the content tree; see
+[TAP_PLAYLIST_BACKEND.md](TAP_PLAYLIST_BACKEND.md). V3 uses the existing
+`librarySource` backing and original TONIES names. Neither worker changes
+freshness confirmation, MQTT or the transparent DEV proxy.
+
+### Read-only original audio export
+
+`GET /api/content/native/<RUID>?overlay=<id>` returns only a complete local audio
+generation: `{contentVersion, chapters:[{index,url,size}]}`. Zero-based chapters
+are in manifest playback order. Their URLs end in `.opus` and pin the generation
+using `contentVersion`. RUID, overlay, version and index must still match when
+fetching each file. Missing/incomplete data returns 404, with no cloud fallback.
+Tonieplay is not an audio collection. The reader neither publishes runtime
+routes nor compacts files. File responses are uncached `audio/ogg` and support
+the existing HTTP range representation.
+
+The WebUI info dialog creates an audio-only ZIP from unchanged chapter bytes,
+using numbered sanitized names and exact-count titles or neutral chapter names.
+Assigned Library collections keep their existing Library file URLs. This is not
+the File Manager backup/export format: no rewritten `library-entry.json` is
+included, and any chapter fetch failure aborts the ZIP instead of claiming a
+partial success.
+
 `toniebox2.cacheContentV3` enables a physically separate cache for unmodified
 TONIES V3 manifests and every object referenced by `content[]`. It defaults to `false` and can be
 overridden per TB2 overlay. The existing local custom-content pipeline below

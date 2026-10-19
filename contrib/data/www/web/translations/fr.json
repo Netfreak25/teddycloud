@@ -1634,6 +1634,14 @@
                 "label": "Livraison OTA locale",
                 "description": "Envoyer les fichiers OTA locaux dans le répertoire du firmware"
             },
+            "cloud__cacheBothFormatsOnDownload": {
+                "label": "Mettre en cache les deux formats lors du téléchargement manuel",
+                "description": "Télécharger aussi le format TAF/V3 manquant, successivement, si TB1 et TB2 sont configurées. Les autorisations cloud, cache et bibliothèque restent applicables."
+            },
+            "cloud__cacheBothFormatsOnPlayback": {
+                "label": "Mettre en cache les deux formats lors du téléchargement par la box",
+                "description": "Après le téléchargement original complet par une box, télécharger le format manquant si TB1 et TB2 sont configurées. Aucun remplissage rétroactif ; les autorisations existantes restent applicables."
+            },
             "cloud__cacheContent": {
                 "label": "Mettre en cache le contenu",
                 "description": "Mettre en cache le contenu cloud sur le serveur local"
@@ -2997,6 +3005,40 @@
         "warningUseAtYourOwnRiskText": "Flasher ta Toniebox avec un firmware modifié annulera la garantie et peut rendre la box inutilisable. Suis attentivement les instructions et assure-toi de bien comprendre les risques encourus."
     },
     "tonies": {
+        "cacheDownload": {
+            "reasons": {
+                "private_source": "Une source locale est attribuée à ce Tonie.",
+                "nocloud": "L’accès au cloud est bloqué pour ce Tonie. Le contenu local reste disponible.",
+                "live_content": "Le contenu en direct n’est pas téléchargé dans le cache original.",
+                "missing_content_auth": "L’autorisation de téléchargement de ce Tonie manque.",
+                "invalid_content_metadata": "Les métadonnées de contenu enregistrées sont invalides.",
+                "taf_cache_disabled": "Le cache TAF est désactivé.",
+                "v3_cache_disabled": "Le cache V3 est désactivé.",
+                "boxine_forwarding_disabled": "Le transfert du contenu Boxine est désactivé.",
+                "tonies_forwarding_disabled": "Le transfert du contenu TONIES V3 est désactivé.",
+                "missing_tb1_certificates": "Les certificats client TB1 complets manquent.",
+                "missing_tb2_certificates": "Les certificats client TB2 complets manquent.",
+                "tonieplay_has_no_taf": "Tonieplay n’a pas de format TAF.",
+                "taf_not_available": "Boxine ne fournit aucun TAF pour ce Tonie.",
+                "policy_changed_or_disabled": "L’autorisation de téléchargement a été modifiée ou désactivée.",
+                "download_failed": "Le contenu n’a pas pu être téléchargé entièrement.",
+                "not_requested": "Ce format n’a pas été demandé.",
+                "queue_full": "La file de téléchargement est pleine. Réessayez plus tard.",
+                "worker_unavailable": "Le service de téléchargement est actuellement indisponible.",
+                "cache_request_rejected": "La demande de téléchargement a été refusée.",
+                "complete_native_audio_not_found": "Aucun contenu audio V3 local complet n’est disponible.",
+                "chapter_no_longer_available": "Ce chapitre local n’est plus disponible."
+            },
+            "download": "Télécharger le format original préféré",
+            "accepted": "Téléchargement accepté",
+            "acceptedDetails": "Les formats manquants autorisés seront téléchargés successivement. La carte du Tonie affiche la progression.",
+            "queued": "En attente",
+            "running": "Téléchargement",
+            "complete": "Complet",
+            "skipped": "Ignoré",
+            "failed": "Échec",
+            "noCloud": "L’accès au cloud est bloqué pour ce Tonie. Le contenu local reste disponible."
+        },
         "addNewCustomTonie": "Créer un nouveau modèle",
         "addNewCustomTonieHint": "Créez un nouveau modèle et assignez-le au tag actuel",
         "addNewCustomTonieModal": {
@@ -3350,6 +3392,7 @@
             "titleSelect": "Sélectionner une image"
         },
         "infoModal": {
+            "downloadNative": "Télécharger les chapitres audio natifs en ZIP",
             "download": "Télécharger TAF en *.ogg",
             "exists": "Existe:",
             "model": "Modèle:",

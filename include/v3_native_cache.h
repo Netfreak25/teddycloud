@@ -219,6 +219,12 @@ error_t v3_native_cache_import_active_library(const char *cache_root,
                                                char **library_source);
 
 /** Import only if the active snapshot still matches this completed version. */
+/** Read-only audio export; paths are owned, never publish/recover runtime routes. */
+error_t v3_native_cache_audio_snapshot(const char *cache_root,
+    const char *library_root, uint8_t overlay_id, const char *ruid,
+    uint32_t expected_version, uint32_t *version,
+    v3_native_library_collection_t *collection);
+
 error_t v3_native_cache_import_active_library_version(
     const char *cache_root,
     const char *library_root,
