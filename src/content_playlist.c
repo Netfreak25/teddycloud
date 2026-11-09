@@ -444,6 +444,15 @@ error_t content_playlist_save(settings_t *settings,
         return ERROR_OUT_OF_MEMORY;
     }
 
+    /* Do not publish a sidecar which the bounded reader cannot load later. */
+    if (osStrlen(serialized) > CONTENT_PLAYLIST_MAX_FILE_SIZE)
+    {
+        cJSON_free(serialized);
+        osFreeMem(temp_path);
+        osFreeMem(path);
+        return ERROR_INVALID_LENGTH;
+    }
+
     mutex_lock_id(path);
     FsFile *file = fsOpenFile(temp_path, FS_FILE_MODE_WRITE);
     error_t error = file != NULL ? fsWriteFile(file, serialized, osStrlen(serialized)) :

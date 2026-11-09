@@ -10,6 +10,18 @@ heterogeneous object model and this audio-oriented cache are documented in
 
 ## Native TONIES original-content cache
 
+### Browser-created native audio
+
+The browser encoder can import local audio directly as native Collections; see
+[BROWSER_ENCODER.md](BROWSER_ENCODER.md). These are custom Library contents, not
+TONIES original-cache generations. `library-entry.json` may additionally contain
+`title` and chapter `title` / `durationSeconds`. Existing catalog/Origin matching
+remains a fallback. Collection order and content hashing remain byte-based.
+The loader is bounded by its existing 1 MiB descriptor limit rather than the old
+TAF/TAP 100-chapter constant. Hashed chapter names retain `%02zu` minimum padding
+and now also resolve canonical indices 100 and above. This does not expand the
+separate legacy TAP/FFmpeg source-array limits or establish TB1 device acceptance.
+
 ### Manual and playback-driven complementary caching
 
 `cloud.cacheBothFormatsOnDownload` and `cloud.cacheBothFormatsOnPlayback` are

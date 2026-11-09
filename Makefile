@@ -593,6 +593,7 @@ $(OBJ_DIR)/%$(OBJ_EXT): %.c $(HEADERS) $(THIS_MAKEFILE) | $$(dir $$@)
 
 # WASM encoder build target
 .PHONY: wasm
+EMSDK_DIR ?= emsdk
 
 # Common sources for TAF encoder
 TAF_ENCODER_SOURCES = \
@@ -628,15 +629,13 @@ TAF_ENCODER_CFLAGS = \
 wasm:
 	$(QUIET)$(ECHO) '[ ${GREEN}WASM${NC} ] Building WebAssembly TAF encoder'
 	mkdir -p $(WEB_SRC_DIR)/public/wasm/
-	@if [ ! -f emsdk/emsdk_env.sh ]; then \
-		echo '[ ${RED}ERR${NC}  ] emsdk not found in emsdk/. Did you run git submodule update --init?'; \
+	@if [ ! -f "$(EMSDK_DIR)/emsdk_env.sh" ]; then \
+		echo '[ ${RED}ERR${NC}  ] Set EMSDK_DIR to an installed Emscripten SDK (verified: 4.0.23).'; \
 		exit 1; \
 	fi; \
-	if [ ! -d emsdk/upstream/emscripten ]; then \
-		echo '[ ${GREEN}WASM${NC} ] Installing emsdk latest...'; \
-		cd emsdk && ./emsdk install latest && ./emsdk activate latest && cd ..; \
-	fi; \
-	cd emsdk && . ./emsdk_env.sh >/dev/null 2>&1 && cd ..; \
+	encoder_build_dir=$$(pwd); \
+	cd "$(EMSDK_DIR)" && . ./emsdk_env.sh >/dev/null 2>&1 && cd "$$encoder_build_dir" || exit 1; \
+	command -v emcc >/dev/null || exit 1; \
 	echo '[ ${GREEN}WASM${NC} ] Compiling minimal TAF encoder...'; \
 	emcc \
 		$(TAF_ENCODER_SOURCES) \
@@ -644,22 +643,25 @@ wasm:
 		$(TAF_ENCODER_CFLAGS) \
 		-O3 \
 		-s WASM=1 \
-		-s EXPORTED_FUNCTIONS='["_taf_encoder_create","_taf_encoder_encode","_taf_encoder_new_chapter","_taf_encoder_finalize","_taf_encoder_get_buffer","_taf_encoder_get_size","_taf_encoder_free","_malloc","_free"]' \
+		-s EXPORTED_FUNCTIONS='["_taf_encoder_create","_opus_encoder_create_file","_taf_encoder_encode","_taf_encoder_new_chapter","_taf_encoder_finalize","_taf_encoder_get_buffer","_taf_encoder_get_size","_taf_encoder_get_error","_taf_encoder_free","_malloc","_free"]' \
 		-s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","getValue","setValue","HEAP16","HEAPU8"]' \
 		-s ALLOW_MEMORY_GROWTH=1 \
+		-s ABORTING_MALLOC=0 \
+		-s FILESYSTEM=0 \
 		-s INITIAL_MEMORY=33554432 \
 		-s MAXIMUM_MEMORY=2147483648 \
 		-s STACK_SIZE=1048576 \
 		-s STACK_OVERFLOW_CHECK=2 \
 		-s MODULARIZE=1 \
+		-s EXPORT_ES6=1 \
 		-s EXPORT_NAME='createTafEncoder' \
-		-s ENVIRONMENT='web' \
+		-s ENVIRONMENT='web,worker' \
 		-s ASSERTIONS=1 \
 		-s SAFE_HEAP=1 \
 		-DWASM_BUILD \
-		-o $(WEB_SRC_DIR)/public/wasm/taf_encoder.js
+		-o $(WEB_SRC_DIR)/public/wasm/audio_encoder.js
 	$(QUIET)$(ECHO) '[ ${GREEN}WASM${NC} ] Build complete'
-	$(QUIET)ls -lh $(WEB_SRC_DIR)/public/wasm/taf_encoder.*
+	$(QUIET)ls -lh $(WEB_SRC_DIR)/public/wasm/audio_encoder.*
 
 # Debugging
 # -g -gsource-map

@@ -15,6 +15,7 @@
 #include "os_port.h"
 #include "rand.h"
 #include "toniefile.h"
+#include "encoder_limits.h"
 
 #define V3_LOCAL_CONTENT_CACHE_DIR "v3-local"
 #define V3_LOCAL_CONTENT_GENERATIONS_DIR "generations"
@@ -23,7 +24,7 @@
 #define V3_LOCAL_CONTENT_OGG_HEADER_SIZE 27
 #define V3_LOCAL_CONTENT_OGG_MAX_SEGMENTS 255
 #define V3_LOCAL_CONTENT_OGG_MAX_PAGE_BODY (255 * 255)
-#define V3_LOCAL_CONTENT_DESCRIPTOR_MAX_SIZE (TONIEFILE_MAX_CHAPTERS * 1024 + 4096)
+#define V3_LOCAL_CONTENT_DESCRIPTOR_MAX_SIZE ENCODER_MAX_METADATA_BYTES
 #define V3_LOCAL_CONTENT_OGG_SERIAL_NAMESPACE 0x54430000U
 #define V3_LOCAL_CONTENT_TAP_OGG_SERIAL 0x54415031U
 #define V3_LOCAL_CONTENT_OPUS_HEAD_PRESKIP_OFFSET 10U
@@ -382,7 +383,7 @@ static error_t v3_local_validate_object(const char *cache_root,
                                         v3_local_content_chapter_t *chapter,
                                         const char *canonical_ruid)
 {
-    if (chapter == NULL || chapter->index >= TONIEFILE_MAX_CHAPTERS || chapter->file_size == 0)
+    if (chapter == NULL || chapter->index >= ENCODER_NATIVE_MAX_CHAPTERS || chapter->file_size == 0)
     {
         return ERROR_INVALID_FILE;
     }
@@ -999,7 +1000,7 @@ static error_t v3_local_publish_prepared(v3_local_prepared_chapter_t *prepared, 
 
 static error_t v3_local_validate_taf(const char *taf_path,
                                      const TonieboxAudioFileHeader *taf_header,
-                                     uint32_t chapter_starts[TONIEFILE_MAX_CHAPTERS],
+                                     uint32_t *chapter_starts,
                                      size_t *chapter_count)
 {
     if (taf_path == NULL || taf_header == NULL || chapter_starts == NULL ||
@@ -1024,7 +1025,7 @@ static error_t v3_local_validate_taf(const char *taf_path,
         chapter_starts[(*chapter_count)++] = 0;
         return NO_ERROR;
     }
-    if (taf_header->n_track_page_nums > TONIEFILE_MAX_CHAPTERS ||
+    if (taf_header->n_track_page_nums > ENCODER_TAF_MAX_CHAPTERS ||
         taf_header->track_page_nums == NULL || taf_header->track_page_nums[0] != 0)
     {
         return ERROR_INVALID_FILE;
@@ -1068,12 +1069,22 @@ static error_t v3_local_content_prepare_internal(const char *taf_path,
         return ERROR_INVALID_PARAMETER;
     }
 
-    uint32_t chapter_starts[TONIEFILE_MAX_CHAPTERS];
+    if (taf_header == NULL || taf_header->n_track_page_nums > ENCODER_TAF_MAX_CHAPTERS)
+    {
+        return ERROR_INVALID_FILE;
+    }
+    size_t capacity = taf_header->n_track_page_nums ? taf_header->n_track_page_nums : 1;
+    uint32_t *chapter_starts = osAllocMem(capacity * sizeof(*chapter_starts));
+    if (chapter_starts == NULL)
+    {
+        return ERROR_OUT_OF_MEMORY;
+    }
     size_t chapter_count = 0;
     error_t error = v3_local_validate_taf(taf_path, taf_header,
                                           chapter_starts, &chapter_count);
     if (error != NO_ERROR)
     {
+        osFreeMem(chapter_starts);
         osMemset(generation, 0, sizeof(*generation));
         return error;
     }
@@ -1081,6 +1092,7 @@ static error_t v3_local_content_prepare_internal(const char *taf_path,
     char *cache_dir = v3_local_format_alloc("%s%c%s", cache_root, PATH_SEPARATOR, V3_LOCAL_CONTENT_CACHE_DIR);
     if (cache_dir == NULL)
     {
+        osFreeMem(chapter_starts);
         osMemset(generation, 0, sizeof(*generation));
         return ERROR_OUT_OF_MEMORY;
     }
@@ -1196,6 +1208,7 @@ static error_t v3_local_content_prepare_internal(const char *taf_path,
 
     v3_local_headers_free(&headers);
     v3_local_prepared_free(prepared, chapter_count, TRUE);
+    osFreeMem(chapter_starts);
     osFreeMem(cache_dir);
     if (error != NO_ERROR)
     {
@@ -1268,7 +1281,7 @@ static error_t v3_local_validate_generation(const char *cache_root,
                                             const v3_local_content_generation_t *generation)
 {
     if (cache_root == NULL || cache_root[0] == '\0' || generation == NULL ||
-        generation->chapter_count == 0 || generation->chapter_count > TONIEFILE_MAX_CHAPTERS ||
+        generation->chapter_count == 0 || generation->chapter_count > ENCODER_NATIVE_MAX_CHAPTERS ||
         generation->chapters == NULL)
     {
         return ERROR_INVALID_PARAMETER;
@@ -1605,7 +1618,7 @@ static error_t v3_local_generation_from_json(const char *cache_root,
     }
 
     int chapter_count = cJSON_GetArraySize(chapters_json);
-    if (chapter_count <= 0 || chapter_count > TONIEFILE_MAX_CHAPTERS)
+    if (chapter_count <= 0 || chapter_count > ENCODER_NATIVE_MAX_CHAPTERS)
     {
         return ERROR_INVALID_FILE;
     }
@@ -1631,7 +1644,7 @@ static error_t v3_local_generation_from_json(const char *cache_root,
         uint32_t file_size = 0;
         v3_local_content_chapter_t *chapter = &generation->chapters[i];
         if (!cJSON_IsObject(entry) ||
-            !v3_local_json_size(index_json, TONIEFILE_MAX_CHAPTERS - 1, &index) || index != i ||
+            !v3_local_json_size(index_json, ENCODER_NATIVE_MAX_CHAPTERS - 1, &index) || index != i ||
             !cJSON_IsString(name_json) || name_json->valuestring == NULL ||
             osStrlen(name_json->valuestring) >= sizeof(chapter->name) ||
             !cJSON_IsString(sha_json) || sha_json->valuestring == NULL ||

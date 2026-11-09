@@ -60,6 +60,9 @@ typedef struct
     char sha256[V3_NATIVE_LIBRARY_HASH_HEX_SIZE];
     uint32_t file_size;
     char *path;
+    char *title;
+    double duration_seconds;
+    bool_t has_duration;
 } v3_native_library_collection_chapter_t;
 
 typedef struct
@@ -77,7 +80,20 @@ typedef struct
     size_t chapter_count;
     v3_native_library_origin_t *origins;
     size_t origin_count;
+    char *title;
 } v3_native_library_collection_t;
+
+/** Publish validated browser-encoded chapters from a private staging directory.
+ * No origin-cache entry or source assignment is created. Existing collections
+ * are immutable and are reused without changing their metadata. */
+error_t v3_native_library_publish_custom(
+    const char *library_root, const char *staging_dir,
+    const v3_native_library_collection_t *input,
+    char **library_source, bool_t *reused);
+
+/** Conservative serialized-entry preflight before any browser encoding. */
+bool_t v3_native_library_custom_metadata_fits(
+    const v3_native_library_collection_t *input);
 
 typedef struct
 {

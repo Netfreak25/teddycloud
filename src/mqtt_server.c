@@ -10,6 +10,7 @@
 #include "core/net.h"
 #include "core/socket.h"
 #include "error.h"
+#include "encoder_limits.h"
 #include "debug.h"
 #include "settings.h"
 #include "mqtt_server.h"
@@ -4383,7 +4384,7 @@ mqtt_delivery_result_t mqtt_server_publish_playback_for_overlay(uint8_t overlay_
 
 mqtt_delivery_result_t mqtt_server_publish_playback_position_for_overlay(uint8_t overlay_id, uint32_t chapter, uint32_t position_ms)
 {
-    if (chapter >= TONIEFILE_MAX_CHAPTERS)
+    if (chapter >= ENCODER_NATIVE_MAX_CHAPTERS)
     {
         return mqtt_delivery_result(MQTT_DELIVERY_FAILED, ERROR_INVALID_PARAMETER);
     }

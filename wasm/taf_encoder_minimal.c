@@ -1,589 +1,464 @@
 /**
- * @file taf_encoder_minimal.c
- * @brief Minimal standalone TAF encoder for WebAssembly
- * 
- * This is a clean-room implementation extracting only the core encoding logic
- * from toniefile.c, with no dependencies on cyclone, server helpers, or file I/O.
- * 
- * Uses memory buffers instead of files for WASM compatibility.
+ * Bounded browser encoder. A synchronous seekable sink writes to OPFS; encoded
+ * output never accumulates in WASM. Native Opus uses one fresh context per file.
  */
-
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdint.h>
+#include <limits.h>
 #include <stdbool.h>
-
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #ifdef WASM_BUILD
 #include <emscripten.h>
+EM_JS(int, taf_encoder_sink_write, (uint32_t offset, const uint8_t *data, size_t length), {
+    try {
+        const write = Module["tafWrite"];
+        return typeof write === "function" ? write(offset, data, length) : -1;
+    } catch (_) { return -1; }
+});
 #else
 #define EMSCRIPTEN_KEEPALIVE
+extern int taf_encoder_sink_write(uint32_t offset, const uint8_t *data, size_t length);
 #endif
-
-// Opus and OGG includes
-#include "opus.h"
+#include "encoder_limits.h"
 #include "ogg/ogg.h"
-
-// Standalone SHA1 for TAF validation
+#include "opus.h"
+#include "proto/toniebox.pb.taf-header.pb-c.h"
 #include "sha1_standalone.h"
 
-// Protobuf for TAF header
-#include "proto/toniebox.pb.taf-header.pb-c.h"
+#define ENCODER_SAMPLE_RATE 48000
+#define ENCODER_CHANNELS 2
+#define ENCODER_FRAME_SAMPLES 2880
+#define ENCODER_SHORTEST_FRAME 120
+#define ENCODER_DEFAULT_KBPS 96
+#define ENCODER_PACKET_MARGIN 64
+#define ENCODER_OGG_HEADER_BYTES 27
+#define ENCODER_COMMENT_BYTES 436
+#define ENCODER_INITIAL_CHAPTERS 16U
 
-// Constants from toniefile.h
-#define OPUS_FRAME_SIZE_MS OPUS_FRAMESIZE_60_MS
-#define OPUS_SAMPLING_RATE 48000
-#define OPUS_FRAME_SIZE (OPUS_SAMPLING_RATE * 60 / 1000) /* 2880 samples: 60ms at 48kHz */
-#define OPUS_CHANNELS 2
-#define OPUS_PACKET_MINSIZE 64
+enum {
+    ENCODER_OK, ENCODER_MEMORY_ERROR, ENCODER_SINK_ERROR,
+    ENCODER_HEADER_ERROR, ENCODER_CODEC_ERROR, ENCODER_STATE_ERROR,
+    ENCODER_SIZE_ERROR
+};
 
-#define TONIEFILE_FRAME_SIZE 4096
-#define TONIEFILE_MAX_CHAPTERS 100
-#define OGG_HEADER_LENGTH 27
-
-// Encoder context
-typedef struct {
-    // Opus encoder
+typedef struct taf_encoder_t {
     OpusEncoder *enc;
-    
-    // OGG stream
     ogg_stream_state os;
-    
-    // TAF header
+    bool ogg_initialized, native_opus, finalized;
+    int error;
     TonieboxAudioFileHeader taf;
-    
-    // SHA1 for audio data
+    size_t chapter_capacity;
     Sha1Context sha1;
-    
-    // Audio frame buffer
-    int16_t audio_frame[OPUS_FRAME_SIZE * OPUS_CHANNELS];
-    int audio_frame_used;
-    
-    // Output buffer (memory-based)
-    uint8_t *output_buffer;
-    size_t output_size;
-    size_t output_capacity;
-    
-    // Tracking
-    uint64_t ogg_granule_position;
-    uint64_t ogg_packet_count;
-    uint32_t taf_block_num;
-    size_t audio_length;
-    
-    // Bitrate
-    int bitrate;
+    int16_t pcm[ENCODER_FRAME_SAMPLES * ENCODER_CHANNELS];
+    int pcm_used;
+    uint8_t pending_packet[ENCODER_TAF_HEADER_SIZE];
+    int pending_length, pending_capacity;
+    uint64_t pending_granule, input_samples, encoded_samples, chapter_padding;
+    uint64_t chapter_input_start, packet_count;
+    uint32_t output_size;
+    int lookahead;
 } taf_encoder_t;
 
-// Forward declaration (defined at end of file) so error paths in
-// taf_encoder_create() can fully clean up before returning NULL.
 void taf_encoder_free(taf_encoder_t *ctx);
 
-// Helper: Write to memory buffer
-static int buffer_write(taf_encoder_t *ctx, const void *data, size_t length) {
-    size_t required = ctx->output_size + length;
-    
-    // Grow buffer if needed
-    if (required > ctx->output_capacity) {
-        size_t new_capacity = ctx->output_capacity * 2;
-        if (new_capacity < required) {
-            new_capacity = required;
-        }
-        
-        uint8_t *new_buffer = (uint8_t *)realloc(ctx->output_buffer, new_capacity);
-        if (!new_buffer) {
+static int encoder_fail(taf_encoder_t *ctx, int error)
+{
+    if (ctx != NULL && ctx->error == ENCODER_OK)
+        ctx->error = error;
+    return -1;
+}
+
+static bool encoder_ready(const taf_encoder_t *ctx)
+{
+    return ctx != NULL && ctx->error == ENCODER_OK && !ctx->finalized;
+}
+
+static int encoder_write_at(taf_encoder_t *ctx, uint32_t offset, const void *data, size_t length)
+{
+    uint32_t maximum = ctx->native_opus ? ENCODER_MAX_FILE_BYTES : ENCODER_MAX_TAF_UPLOAD_BYTES;
+    if (length > maximum || offset > maximum - length)
+        return encoder_fail(ctx, ENCODER_SIZE_ERROR);
+    if (taf_encoder_sink_write(offset, data, length) != (int)length)
+        return encoder_fail(ctx, ENCODER_SINK_ERROR);
+    return 0;
+}
+
+static int encoder_append(taf_encoder_t *ctx, const void *data, size_t length)
+{
+    if (encoder_write_at(ctx, ctx->output_size, data, length) != 0)
+        return -1;
+    if (!ctx->native_opus)
+        sha1Update(&ctx->sha1, data, length);
+    ctx->output_size += (uint32_t)length;
+    return 0;
+}
+
+static int encoder_pages(taf_encoder_t *ctx, bool flush)
+{
+    ogg_page page;
+    while (flush ? ogg_stream_flush(&ctx->os, &page) : ogg_stream_pageout(&ctx->os, &page)) {
+        if (encoder_append(ctx, page.header, (size_t)page.header_len) != 0 ||
+            encoder_append(ctx, page.body, (size_t)page.body_len) != 0)
             return -1;
-        }
-        
-        ctx->output_buffer = new_buffer;
-        ctx->output_capacity = new_capacity;
     }
-    
-    // Write data
-    memcpy(ctx->output_buffer + ctx->output_size, data, length);
-    ctx->output_size += length;
-    
-    // Update SHA1 hash
-    sha1Update(&ctx->sha1, (const uint8_t *)data, length);
-    ctx->audio_length += length;
-    
     return 0;
 }
 
-// Helper: Seek in memory buffer
-static int buffer_seek(taf_encoder_t *ctx, size_t offset) {
-    if (offset > ctx->output_size) {
-        return -1;
+/** Reserve the worst-case final bookkeeping sizes, not their current values. */
+static bool encoder_header_fits(const taf_encoder_t *ctx)
+{
+    uint8_t digest[SHA1_DIGEST_SIZE] = {0};
+    TonieboxAudioFileHeader header = ctx->taf;
+    header.sha1_hash.data = digest;
+    header.sha1_hash.len = sizeof(digest);
+    header.num_bytes = ENCODER_MAX_TAF_UPLOAD_BYTES - ENCODER_TAF_HEADER_SIZE;
+    header.has_ogg_granule_position = header.has_ogg_packet_count = true;
+    header.has_taf_block_num = header.has_pageno = true;
+    header.ogg_granule_position = header.ogg_packet_count = UINT64_MAX;
+    header.taf_block_num = header.pageno = UINT64_MAX;
+    header._fill.len = 0;
+    header._fill.data = NULL;
+    return toniebox_audio_file_header__get_packed_size(&header) <= ENCODER_TAF_PROTO_BYTES;
+}
+
+static int encoder_add_chapter(taf_encoder_t *ctx)
+{
+    if (ctx->taf.n_track_page_nums >= ENCODER_TAF_MAX_CHAPTERS)
+        return encoder_fail(ctx, ENCODER_HEADER_ERROR);
+    if (ctx->taf.n_track_page_nums == ctx->chapter_capacity) {
+        size_t capacity = ctx->chapter_capacity ? ctx->chapter_capacity * 2 : ENCODER_INITIAL_CHAPTERS;
+        if (capacity > ENCODER_TAF_MAX_CHAPTERS)
+            capacity = ENCODER_TAF_MAX_CHAPTERS;
+        uint32_t *chapters = realloc(ctx->taf.track_page_nums, capacity * sizeof(*chapters));
+        if (chapters == NULL)
+            return encoder_fail(ctx, ENCODER_MEMORY_ERROR);
+        ctx->taf.track_page_nums = chapters;
+        ctx->chapter_capacity = capacity;
     }
-    // For memory buffer, we just track position
-    // Actual seeking is done by writing at specific offsets
+    ctx->taf.track_page_nums[ctx->taf.n_track_page_nums++] =
+        (ctx->output_size - ENCODER_TAF_HEADER_SIZE) / ENCODER_TAF_HEADER_SIZE;
+    if (!encoder_header_fits(ctx))
+        return encoder_fail(ctx, ENCODER_HEADER_ERROR);
     return 0;
 }
 
-// Helper: Write at specific offset
-static int buffer_write_at(taf_encoder_t *ctx, size_t offset, const void *data, size_t length) {
-    if (offset + length > ctx->output_capacity) {
-        return -1;
-    }
-    memcpy(ctx->output_buffer + offset, data, length);
+static void put_u32_le(uint8_t *dst, uint32_t value)
+{
+    for (unsigned i = 0; i < 4; i++)
+        dst[i] = (uint8_t)(value >> (i * 8));
+}
+
+static int encoder_headers(taf_encoder_t *ctx)
+{
+    uint8_t head[] = {'O','p','u','s','H','e','a','d',1,ENCODER_CHANNELS,
+                      0,0,0x80,0xbb,0,0,0,0,0};
+    head[10] = (uint8_t)ctx->lookahead;
+    head[11] = (uint8_t)(ctx->lookahead >> 8);
+    uint8_t tags[ENCODER_COMMENT_BYTES] = {0};
+    const char vendor[] = "teddyCloud WASM";
+    const char comment[] = "encoder=teddyCloud WASM TAF Encoder";
+    memcpy(tags, "OpusTags", 8);
+    size_t pos = 8;
+    put_u32_le(tags + pos, sizeof(vendor) - 1);
+    pos += 4;
+    memcpy(tags + pos, vendor, sizeof(vendor) - 1);
+    pos += sizeof(vendor) - 1;
+    put_u32_le(tags + pos, 1);
+    pos += 4;
+    put_u32_le(tags + pos, sizeof(comment) - 1);
+    pos += 4;
+    memcpy(tags + pos, comment, sizeof(comment) - 1);
+    ogg_packet packet = {0};
+    packet.packet = head;
+    packet.bytes = sizeof(head);
+    packet.b_o_s = 1;
+    packet.packetno = (ogg_int64_t)ctx->packet_count++;
+    if (ogg_stream_packetin(&ctx->os, &packet) != 0 || encoder_pages(ctx, true) != 0)
+        return encoder_fail(ctx, ENCODER_CODEC_ERROR);
+    packet.packet = tags;
+    packet.bytes = sizeof(tags);
+    packet.b_o_s = 0;
+    packet.packetno = (ogg_int64_t)ctx->packet_count++;
+    if (ogg_stream_packetin(&ctx->os, &packet) != 0 || encoder_pages(ctx, true) != 0)
+        return encoder_fail(ctx, ENCODER_CODEC_ERROR);
     return 0;
 }
 
-// Helper: Add comment to OGG
-static void add_comment(uint8_t *buffer, size_t *pos, const char *comment) {
-    uint32_t len = strlen(comment);
-    memcpy(&buffer[*pos], &len, sizeof(uint32_t));
-    *pos += sizeof(uint32_t);
-    memcpy(&buffer[*pos], comment, len);
-    *pos += len;
-}
-
-// Helper: Encode TAF header using protobuf
-static size_t encode_taf_header(uint8_t *buffer, size_t buffer_size, TonieboxAudioFileHeader *header) {
-    return toniebox_audio_file_header__pack(header, buffer);
-}
-
-/**
- * Create TAF encoder
- * @param audio_id Audio ID for the TAF file
- * @param bitrate Bitrate in kbps (e.g., 96 for 96kbps)
- * @return Encoder context or NULL on error
- */
-EMSCRIPTEN_KEEPALIVE
-taf_encoder_t *taf_encoder_create(uint32_t audio_id, int bitrate) {
-    printf("taf_encoder_create: audio_id=%u, bitrate=%d\n", audio_id, bitrate);
-    int err;
-    
-    taf_encoder_t *ctx = (taf_encoder_t *)calloc(1, sizeof(taf_encoder_t));
-    if (!ctx) {
+static taf_encoder_t *encoder_create(uint32_t audio_id, int bitrate_kbps, bool native)
+{
+    taf_encoder_t *ctx = calloc(1, sizeof(*ctx));
+    if (ctx == NULL)
         return NULL;
-    }
-    
-    // Explicitly zero the structure
-    memset(ctx, 0, sizeof(taf_encoder_t));
-    
-    ctx->bitrate = bitrate > 0 ? bitrate : 96; // Default 96kbps
-    
-    // Allocate output buffer (start with 10MB)
-    ctx->output_capacity = 10 * 1024 * 1024;
-    ctx->output_buffer = (uint8_t *)malloc(ctx->output_capacity);
-    if (!ctx->output_buffer) {
-        free(ctx);
-        return NULL;
-    }
-    
-    // Initialize TAF header
+    ctx->native_opus = native;
     toniebox_audio_file_header__init(&ctx->taf);
     ctx->taf.audio_id = audio_id;
-    ctx->taf.num_bytes = 0; // Will be updated on close
-    ctx->taf.n_track_page_nums = 0;
-    ctx->taf.track_page_nums = (uint32_t *)calloc(TONIEFILE_MAX_CHAPTERS, sizeof(uint32_t));
-    ctx->taf.sha1_hash.data = NULL;  // Will be allocated in finalize
-    ctx->taf.sha1_hash.len = 0;
-    
-    // Initialize SHA1
     sha1Init(&ctx->sha1);
-    
-    // Initialize Opus encoder
-    ctx->enc = opus_encoder_create(OPUS_SAMPLING_RATE, OPUS_CHANNELS, OPUS_APPLICATION_AUDIO, &err);
-    if (err != OPUS_OK) {
-        free(ctx->taf.track_page_nums);
-        free(ctx->output_buffer);
-        free(ctx);
-        return NULL;
+    int error = OPUS_OK;
+    ctx->enc = opus_encoder_create(ENCODER_SAMPLE_RATE, ENCODER_CHANNELS, OPUS_APPLICATION_AUDIO, &error);
+    if (ctx->enc == NULL || error != OPUS_OK)
+        goto failed;
+    if (bitrate_kbps <= 0)
+        bitrate_kbps = ENCODER_DEFAULT_KBPS;
+    if (bitrate_kbps > INT_MAX / 1000 ||
+        opus_encoder_ctl(ctx->enc, OPUS_SET_BITRATE(bitrate_kbps * 1000)) != OPUS_OK ||
+        opus_encoder_ctl(ctx->enc, OPUS_SET_VBR(1)) != OPUS_OK ||
+        opus_encoder_ctl(ctx->enc, OPUS_SET_COMPLEXITY(10)) != OPUS_OK ||
+        opus_encoder_ctl(ctx->enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC)) != OPUS_OK ||
+        opus_encoder_ctl(ctx->enc, OPUS_SET_LSB_DEPTH(16)) != OPUS_OK ||
+        opus_encoder_ctl(ctx->enc, OPUS_SET_EXPERT_FRAME_DURATION(OPUS_FRAMESIZE_ARG)) != OPUS_OK ||
+        opus_encoder_ctl(ctx->enc, OPUS_GET_LOOKAHEAD(&ctx->lookahead)) != OPUS_OK ||
+        ctx->lookahead < 0 || ctx->lookahead > UINT16_MAX)
+        goto failed;
+    if (ogg_stream_init(&ctx->os, (int)audio_id) != 0)
+        goto failed;
+    ctx->ogg_initialized = true;
+    if (!native) {
+        uint8_t header[ENCODER_TAF_HEADER_SIZE] = {0};
+        if (encoder_write_at(ctx, 0, header, sizeof(header)) != 0)
+            goto failed;
+        ctx->output_size = sizeof(header);
+        if (encoder_add_chapter(ctx) != 0)
+            goto failed;
     }
-    
-    opus_encoder_ctl(ctx->enc, OPUS_SET_BITRATE(ctx->bitrate * 1000));
-    opus_encoder_ctl(ctx->enc, OPUS_SET_VBR(1));
-    opus_encoder_ctl(ctx->enc, OPUS_SET_COMPLEXITY(10));
-    opus_encoder_ctl(ctx->enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
-    opus_encoder_ctl(ctx->enc, OPUS_SET_LSB_DEPTH(16));
-    opus_encoder_ctl(ctx->enc, OPUS_SET_EXPERT_FRAME_DURATION(OPUS_FRAME_SIZE_MS));
-    
-    // Initialize OGG stream
-    ogg_stream_init(&ctx->os, audio_id);
-    
-    // Reserve first 4KB (TONIEFILE_FRAME_SIZE) for TAF header
-    // This matches toniefile.c which starts writing at file_pos = TONIEFILE_FRAME_SIZE
-    // Audio data starts at offset 4096, and SHA1 is calculated over audio only
-    ctx->output_size = TONIEFILE_FRAME_SIZE;
-    memset(ctx->output_buffer, 0, TONIEFILE_FRAME_SIZE);
-    
-    // Create Opus header packet
-    uint8_t header_data[] = {
-        'O', 'p', 'u', 's', 'H', 'e', 'a', 'd',  // "OpusHead"
-        1,                                         // Version
-        OPUS_CHANNELS,                             // Channel count
-        0x38, 0x01,                                // Pre-skip
-        OPUS_SAMPLING_RATE & 0xFF, OPUS_SAMPLING_RATE >> 8, 0x00, 0x00,  // Sample rate
-        0, 0,                                      // Output gain
-        0                                          // Channel mapping family
-    };
-    
-    // Create comment packet
-    uint8_t comment_data[0x1B4];
-    size_t comment_pos = 0;
-    memset(comment_data, '0', sizeof(comment_data));
-    strcpy((char *)&comment_data[comment_pos], "OpusTags");
-    comment_pos += 8;
-    
-    add_comment(comment_data, &comment_pos, "teddyCloud WASM");
-    
-    int comments = 1;
-    memcpy(&comment_data[comment_pos], &comments, sizeof(uint32_t));
-    comment_pos += sizeof(uint32_t);
-    
-    add_comment(comment_data, &comment_pos, "encoder=teddyCloud WASM TAF Encoder");
-    
-    // Add padding
-    int remain = sizeof(comment_data) - comment_pos - 4;
-    memcpy(&comment_data[comment_pos], &remain, sizeof(uint32_t));
-    comment_pos += sizeof(uint32_t);
-    memcpy(&comment_data[comment_pos], "pad=", 4);
-    
-    // Create OGG packets
-    ogg_packet header_packet;
-    ogg_packet comment_packet;
-    
-    header_packet.packet = header_data;
-    header_packet.bytes = sizeof(header_data);
-    header_packet.b_o_s = 1;
-    header_packet.e_o_s = 0;
-    header_packet.granulepos = 0;
-    header_packet.packetno = ctx->ogg_packet_count++;
-    
-    comment_packet.packet = comment_data;
-    comment_packet.bytes = sizeof(comment_data);
-    comment_packet.b_o_s = 0;
-    comment_packet.e_o_s = 0;
-    comment_packet.granulepos = 0;
-    comment_packet.packetno = ctx->ogg_packet_count++;
-    
-    ogg_stream_packetin(&ctx->os, &header_packet);
-    ogg_stream_packetin(&ctx->os, &comment_packet);
-    
-    // Flush header pages
-    ogg_page og;
-    while (ogg_stream_flush(&ctx->os, &og)) {
-        if (buffer_write(ctx, og.header, og.header_len) != 0 ||
-            buffer_write(ctx, og.body, og.body_len) != 0) {
-            taf_encoder_free(ctx);
-            return NULL;
-        }
-    }
-    
-    // Add first chapter at start
-    ctx->taf.track_page_nums[ctx->taf.n_track_page_nums++] = ctx->taf_block_num;
-    
+    if (encoder_headers(ctx) != 0)
+        goto failed;
     return ctx;
+failed:
+    taf_encoder_free(ctx);
+    return NULL;
 }
 
-/**
- * Encode PCM samples
- * @param ctx Encoder context
- * @param samples PCM samples (interleaved stereo, 16-bit)
- * @param num_samples Number of samples PER CHANNEL
- * @return 0 on success, -1 on error
- */
 EMSCRIPTEN_KEEPALIVE
-int taf_encoder_encode(taf_encoder_t *ctx, int16_t *samples, int num_samples) {
-    //printf("taf_encoder_encode: ctx=%p, samples=%p, num_samples=%d\n", ctx, samples, num_samples);
-    if (!ctx || !samples) {
-        return -1;
-    }
-    
-    int samples_processed = 0;
-    
-    while (samples_processed < num_samples) {
-        // Copy samples to frame buffer
-        int samples_to_copy = OPUS_FRAME_SIZE - ctx->audio_frame_used;
-        int samples_remaining = num_samples - samples_processed;
-        if (samples_to_copy > samples_remaining) {
-            samples_to_copy = samples_remaining;
-        }
-        
-        for (int i = 0; i < samples_to_copy; i++) {
-            ctx->audio_frame[(ctx->audio_frame_used + i) * 2] = samples[(samples_processed + i) * 2];
-            ctx->audio_frame[(ctx->audio_frame_used + i) * 2 + 1] = samples[(samples_processed + i) * 2 + 1];
-        }
-        
-        ctx->audio_frame_used += samples_to_copy;
-        samples_processed += samples_to_copy;
-        
-        // Frame full? Encode it
-        if (ctx->audio_frame_used >= OPUS_FRAME_SIZE) {
-#define OPUS_PACKET_PAD 64
-
-            // Calculate available space in current block
-            int page_used = (ctx->output_size % TONIEFILE_FRAME_SIZE) + OGG_HEADER_LENGTH +
-                           ctx->os.lacing_fill - ctx->os.lacing_returned +
-                           ctx->os.body_fill - ctx->os.body_returned;
-            int page_remain = TONIEFILE_FRAME_SIZE - page_used;
-            
-            int frame_payload = (page_remain / 256) * 255 + (page_remain % 256) - 1;
-            int reconstructed = (frame_payload / 255) + 1 + frame_payload;
-            
-            /* when due to segment sizes we would end up with a 1 byte gap, make sure that the next run will have at least 64 byte.
-             * reason why this could happen is that "adding one byte" would require one segment more and thus occupies two byte more.
-             * if this would happen, just reduce the calculated free space such that there is room for another segment.
-             */
-            bool frame_payload_minified = false;
-            if (page_remain != reconstructed && frame_payload > OPUS_PACKET_MINSIZE) {
-                frame_payload -= OPUS_PACKET_MINSIZE;
-                frame_payload_minified = true;
-            }
-
-            
-            // Ensure minimum packet size
-            if (frame_payload < OPUS_PACKET_MINSIZE - 1) {
-                // Not enough space for even a minimal packet.
-                // Force flush the current page to finish the block.
-                //printf("taf_encoder_encode: Page full (remain=%d), forcing flush\n", page_remain);
-                ogg_page og;
-                if (ogg_stream_flush(&ctx->os, &og)) {
-                    if (buffer_write(ctx, og.header, og.header_len) != 0 ||
-                        buffer_write(ctx, og.body, og.body_len) != 0) {
-                        return -1;
-                    }
-                    ctx->taf_block_num++;
-                    
-                    // Recalculate
-                    page_used = (ctx->output_size % TONIEFILE_FRAME_SIZE) + OGG_HEADER_LENGTH +
-                           ctx->os.lacing_fill - ctx->os.lacing_returned +
-                           ctx->os.body_fill - ctx->os.body_returned;
-                    page_remain = TONIEFILE_FRAME_SIZE - page_used;
-                    frame_payload = (page_remain / 256) * 255 + (page_remain % 256) - 1;
-                    //printf("taf_encoder_encode: Flushed. New page_remain=%d\n", page_remain);
-                }
-                
-                if (frame_payload < OPUS_PACKET_MINSIZE - 1) {
-                    return -1;
-                }
-            }
-            
-            // Encode Opus frame
-            //printf("taf_encoder_encode: Encoding frame...\n");
-            unsigned char output_frame[TONIEFILE_FRAME_SIZE];
-            //printf("taf_encoder_encode: Calling opus_encode (payload=%d)\n", frame_payload);
-            int frame_len = opus_encode(ctx->enc, ctx->audio_frame, OPUS_FRAME_SIZE,
-                                       output_frame, frame_payload);
-            
-            if (frame_len <= 0) {
-                return -1;
-            }
-            
-            /* we did not exactly hit the destination size and are close to block size. pad packet */
-            if (frame_payload - frame_len < OPUS_PACKET_PAD) {
-                int target_length = frame_payload;
-                int ret = opus_packet_pad(output_frame, frame_len, target_length);
-                if (ret < 0) {
-                    return -1;
-                }
-                frame_len = target_length;
-            }
-            
-            // Update granule position
-            ctx->ogg_granule_position += OPUS_FRAME_SIZE;
-            
-            // Create OGG packet
-            ogg_packet op;
-            op.packet = output_frame;
-            op.bytes = frame_len;
-            op.b_o_s = 0;
-            op.e_o_s = 0;
-            op.granulepos = ctx->ogg_granule_position;
-            op.packetno = ctx->ogg_packet_count++;
-            
-            int ret = ogg_stream_packetin(&ctx->os, &op);
-            if (ret != 0) {
-            }
-            
-            // Write OGG pages
-            ogg_page og;
-            while (ogg_stream_pageout(&ctx->os, &og)) {
-                if (buffer_write(ctx, og.header, og.header_len) != 0 ||
-                    buffer_write(ctx, og.body, og.body_len) != 0) {
-                    return -1;
-                }
-                ctx->taf_block_num++;
-            }
-            
-            // Reset frame buffer
-            ctx->audio_frame_used = 0;
-        }
-    }
-    
-    return 0;
+taf_encoder_t *taf_encoder_create(uint32_t audio_id, int bitrate_kbps)
+{
+    return encoder_create(audio_id, bitrate_kbps, false);
 }
 
-/**
- * Add a new chapter marker
- * @param ctx Encoder context
- * @return 0 on success, -1 on error
- */
+/** One complete independently decodable Ogg/Opus chapter. */
 EMSCRIPTEN_KEEPALIVE
-int taf_encoder_new_chapter(taf_encoder_t *ctx) {
-    if (!ctx || ctx->taf.n_track_page_nums >= TONIEFILE_MAX_CHAPTERS - 1) {
-        return -1;
-    }
-    
-    ctx->taf.track_page_nums[ctx->taf.n_track_page_nums++] = ctx->taf_block_num;
-    return 0;
+taf_encoder_t *opus_encoder_create_file(uint32_t audio_id, int bitrate_kbps)
+{
+    return encoder_create(audio_id, bitrate_kbps, true);
 }
 
-/**
- * Finalize encoding and write TAF header
- * @param ctx Encoder context
- * @return 0 on success, -1 on error
- */
-EMSCRIPTEN_KEEPALIVE
-int taf_encoder_finalize(taf_encoder_t *ctx) {
-    //printf("taf_encoder_finalize: ctx=%p\n", ctx);
-    if (!ctx) {
-        return -1;
+/* One pending packet allows chapter padding/EOS to be decided before writing. */
+static int encoder_submit_packet(taf_encoder_t *ctx, bool chapter_end, bool eos, uint64_t granule)
+{
+    if (ctx->pending_length == 0)
+        return 0;
+    int length = ctx->pending_length;
+    if (!ctx->native_opus && !eos &&
+        (chapter_end || ctx->pending_capacity - length < ENCODER_PACKET_MARGIN)) {
+        if (opus_packet_pad(ctx->pending_packet, length, ctx->pending_capacity) != OPUS_OK)
+            return encoder_fail(ctx, ENCODER_CODEC_ERROR);
+        length = ctx->pending_capacity;
     }
-    
-    // Flush any remaining OGG pages
-    ogg_page og;
-    while (ogg_stream_flush(&ctx->os, &og)) {
-        if (buffer_write(ctx, og.header, og.header_len) != 0 ||
-            buffer_write(ctx, og.body, og.body_len) != 0) {
+    ogg_packet packet = {0};
+    packet.packet = ctx->pending_packet;
+    packet.bytes = length;
+    packet.e_o_s = eos;
+    packet.granulepos = (ogg_int64_t)granule;
+    packet.packetno = (ogg_int64_t)ctx->packet_count++;
+    if (ogg_stream_packetin(&ctx->os, &packet) != 0)
+        return encoder_fail(ctx, ENCODER_CODEC_ERROR);
+    ctx->pending_length = 0;
+    return encoder_pages(ctx, chapter_end || eos);
+}
+
+static int encoder_packet_capacity(taf_encoder_t *ctx, bool eos)
+{
+    if (ctx->native_opus)
+        return sizeof(ctx->pending_packet);
+    int page_used = (ctx->output_size % ENCODER_TAF_HEADER_SIZE) + ENCODER_OGG_HEADER_BYTES +
+                    ctx->os.lacing_fill - ctx->os.lacing_returned +
+                    ctx->os.body_fill - ctx->os.body_returned;
+    int remaining = ENCODER_TAF_HEADER_SIZE - page_used;
+    int capacity = (remaining / 256) * 255 + remaining % 256 - 1;
+    int reconstructed = capacity / 255 + 1 + capacity;
+    if (remaining != reconstructed && capacity > ENCODER_PACKET_MARGIN)
+        capacity -= ENCODER_PACKET_MARGIN;
+    /* A complete TAF must not look like an unfinished block-aligned stream. */
+    if (eos)
+        capacity -= ENCODER_PACKET_MARGIN;
+    return capacity;
+}
+
+static int encoder_frame(taf_encoder_t *ctx, int frames, bool eos, uint64_t final_granule)
+{
+    if (encoder_submit_packet(ctx, false, false, ctx->pending_granule) != 0)
+        return -1;
+    int capacity = encoder_packet_capacity(ctx, eos);
+    if (capacity < ENCODER_PACKET_MARGIN - 1) {
+        if (encoder_pages(ctx, true) != 0)
             return -1;
-        }
+        capacity = encoder_packet_capacity(ctx, eos);
     }
-    
-    // Ensure total file size is NOT a multiple of 4096
-    // If it is, add a silent OGG page. This matches 'teddy' behavior.
-    if (ctx->output_size % 4096 == 0) {
-        //printf("taf_encoder_finalize: Output aligned to 4096, adding silence page\n");
-        int16_t silence[OPUS_FRAME_SIZE * OPUS_CHANNELS];
-        memset(silence, 0, sizeof(silence));
-        unsigned char output_frame[TONIEFILE_FRAME_SIZE];
-        
-        int frame_len = opus_encode(ctx->enc, silence, OPUS_FRAME_SIZE, output_frame, sizeof(output_frame));
-        
-        if (frame_len > 0) {
-            ogg_packet op;
-            op.packet = output_frame;
-            op.bytes = frame_len;
-            op.b_o_s = 0;
-            op.e_o_s = 1; // Mark as EOS
-            
-            ctx->ogg_granule_position += OPUS_FRAME_SIZE;
-            op.granulepos = ctx->ogg_granule_position;
-            op.packetno = ctx->ogg_packet_count++;
-            
-            ogg_stream_packetin(&ctx->os, &op);
+    if (capacity < ENCODER_PACKET_MARGIN - 1 || capacity > (int)sizeof(ctx->pending_packet))
+        return encoder_fail(ctx, ENCODER_CODEC_ERROR);
+    int length = opus_encode(ctx->enc, ctx->pcm, frames, ctx->pending_packet, capacity);
+    if (length <= 0)
+        return encoder_fail(ctx, ENCODER_CODEC_ERROR);
+    ctx->encoded_samples += (uint64_t)frames;
+    ctx->pending_granule = eos ? final_granule : ctx->encoded_samples;
+    ctx->pending_length = length;
+    ctx->pending_capacity = capacity;
+    ctx->pcm_used = 0;
+    return eos ? encoder_submit_packet(ctx, false, true, final_granule) : 0;
+}
 
-            while (ogg_stream_flush(&ctx->os, &og)) {
-                if (buffer_write(ctx, og.header, og.header_len) != 0 ||
-                    buffer_write(ctx, og.body, og.body_len) != 0) {
-                    return -1;
-                }
-            }
-        }
+EMSCRIPTEN_KEEPALIVE
+int taf_encoder_encode(taf_encoder_t *ctx, const int16_t *samples, int num_samples)
+{
+    if (!encoder_ready(ctx) || samples == NULL || num_samples < 0)
+        return encoder_fail(ctx, ENCODER_STATE_ERROR);
+    int offset = 0;
+    while (offset < num_samples) {
+        int count = ENCODER_FRAME_SAMPLES - ctx->pcm_used;
+        if (count > num_samples - offset)
+            count = num_samples - offset;
+        memcpy(ctx->pcm + ctx->pcm_used * ENCODER_CHANNELS,
+               samples + offset * ENCODER_CHANNELS,
+               (size_t)count * ENCODER_CHANNELS * sizeof(*samples));
+        ctx->pcm_used += count;
+        ctx->input_samples += (uint64_t)count;
+        offset += count;
+        if (ctx->pcm_used == ENCODER_FRAME_SAMPLES &&
+            encoder_frame(ctx, ENCODER_FRAME_SAMPLES, false, 0) != 0)
+            return -1;
     }
-    
-    // Finalize SHA1 - use stack allocation
-    uint8_t sha1_hash[SHA1_DIGEST_SIZE];
-    sha1Final(&ctx->sha1, sha1_hash);
-    
-    // Update TAF header - point to stack buffer temporarily for encoding
-    ctx->taf.sha1_hash.data = sha1_hash;
-    ctx->taf.sha1_hash.len = SHA1_DIGEST_SIZE;
-    ctx->taf.num_bytes = ctx->audio_length;
-    ctx->taf.ogg_granule_position = ctx->ogg_granule_position;
-    ctx->taf.ogg_packet_count = ctx->ogg_packet_count;
-    ctx->taf.taf_block_num = ctx->taf_block_num;
-    ctx->taf.pageno = ctx->os.pageno;
-    ctx->taf.has_ogg_granule_position = true;
-    ctx->taf.has_ogg_packet_count = true;
-    ctx->taf.has_taf_block_num = true;
-    ctx->taf.has_pageno = true;
-
-    uint16_t proto_frame_size = TONIEFILE_FRAME_SIZE - 4;
-    ctx->taf._fill.len = proto_frame_size;
-    ctx->taf._fill.data = malloc(ctx->taf._fill.len);
-    memset(ctx->taf._fill.data, 0, ctx->taf._fill.len);
-
-    size_t data_size = toniebox_audio_file_header__get_packed_size(&ctx->taf);
-    ctx->taf._fill.len = ctx->taf._fill.len  + (proto_frame_size - data_size);
-    data_size = toniebox_audio_file_header__get_packed_size(&ctx->taf);
-    if (data_size == proto_frame_size + 1) {
-        ctx->taf._fill.len--;
-    }
-    
-    // Encode TAF header
-    uint8_t header_buffer[TONIEFILE_FRAME_SIZE];
-    memset(header_buffer, 0, sizeof(header_buffer));
-    uint32_t proto_size = (uint32_t)encode_taf_header(header_buffer, sizeof(header_buffer), &ctx->taf);
-    
-    // Clear the pointer after encoding (it was pointing to stack)
-    ctx->taf.sha1_hash.data = NULL;
-    ctx->taf.sha1_hash.len = 0;
-
-    free(ctx->taf._fill.data);
-    ctx->taf._fill.data = NULL;
-    
-    // Write header size (big-endian)
-    uint8_t proto_be[4];
-    proto_be[0] = proto_size >> 24;
-    proto_be[1] = proto_size >> 16;
-    proto_be[2] = proto_size >> 8;
-    proto_be[3] = proto_size;
-    
-    if (buffer_write_at(ctx, 0, proto_be, sizeof(proto_be)) != 0 ||
-        buffer_write_at(ctx, 4, header_buffer, proto_size) != 0) {
-        return -1;
-    }
-    
-    //printf("taf_encoder_finalize: done\n");
     return 0;
 }
 
-/**
- * Get pointer to encoded TAF data
- * @param ctx Encoder context
- * @return Pointer to TAF data in WASM memory
- */
-EMSCRIPTEN_KEEPALIVE
-uint8_t *taf_encoder_get_buffer(taf_encoder_t *ctx) {
-    return ctx ? ctx->output_buffer : NULL;
+static int encoder_tail_frames(int samples)
+{
+    const int sizes[] = {120, 240, 480, 960, 1920, 2880};
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++)
+        if (samples <= sizes[i])
+            return sizes[i];
+    return ENCODER_FRAME_SAMPLES;
 }
 
-/**
- * Get size of encoded TAF data
- * @param ctx Encoder context
- * @return Size in bytes
- */
 EMSCRIPTEN_KEEPALIVE
-uint32_t taf_encoder_get_size(taf_encoder_t *ctx) {
-    return ctx ? (uint32_t)ctx->output_size : 0;
-}
-
-/**
- * Free encoder and all resources
- * @param ctx Encoder context
- */
-EMSCRIPTEN_KEEPALIVE
-void taf_encoder_free(taf_encoder_t *ctx) {
-    if (ctx) {
-        //printf("taf_encoder_free: ctx=%p\n", ctx);
-        if (ctx->enc) {
-            //printf("taf_encoder_destroy: freeing enc\n");
-            opus_encoder_destroy(ctx->enc);
-        }
-        //printf("taf_encoder_destroy: clearing os\n");
-        ogg_stream_clear(&ctx->os);
-        if (ctx->taf.track_page_nums) {
-            //printf("taf_encoder_destroy: freeing taf.track_page_nums\n");
-            free(ctx->taf.track_page_nums);
-        }
-        if (ctx->output_buffer) {
-            //printf("taf_encoder_destroy: freeing output_buffer\n");
-            free(ctx->output_buffer);
-        }
-        //printf("taf_encoder_destroy: freeing ctx\n");
-        free(ctx);
-        ctx = NULL;
+int taf_encoder_new_chapter(taf_encoder_t *ctx)
+{
+    if (!encoder_ready(ctx) || ctx->native_opus || ctx->input_samples == ctx->chapter_input_start)
+        return encoder_fail(ctx, ENCODER_STATE_ERROR);
+    if (ctx->pcm_used > 0) {
+        int frames = encoder_tail_frames(ctx->pcm_used);
+        ctx->chapter_padding += (uint64_t)(frames - ctx->pcm_used);
+        memset(ctx->pcm + ctx->pcm_used * ENCODER_CHANNELS, 0,
+               (size_t)(frames - ctx->pcm_used) * ENCODER_CHANNELS * sizeof(int16_t));
+        if (encoder_frame(ctx, frames, false, 0) != 0)
+            return -1;
     }
+    if (encoder_submit_packet(ctx, true, false, ctx->pending_granule) != 0)
+        return -1;
+    /* A lacing-size discontinuity can leave a small slot. A 2.5 ms silent frame
+     * fills it; original PCM is never discarded. Chapter padding stays <60ms. */
+    if (ctx->output_size % ENCODER_TAF_HEADER_SIZE != 0) {
+        memset(ctx->pcm, 0, ENCODER_SHORTEST_FRAME * ENCODER_CHANNELS * sizeof(int16_t));
+        ctx->chapter_padding += ENCODER_SHORTEST_FRAME;
+        if (encoder_frame(ctx, ENCODER_SHORTEST_FRAME, false, 0) != 0 ||
+            encoder_submit_packet(ctx, true, false, ctx->pending_granule) != 0)
+            return -1;
+    }
+    if (ctx->output_size % ENCODER_TAF_HEADER_SIZE != 0)
+        return encoder_fail(ctx, ENCODER_CODEC_ERROR);
+    ctx->chapter_input_start = ctx->input_samples;
+    return encoder_add_chapter(ctx);
+}
+
+static int encoder_taf_header(taf_encoder_t *ctx, uint64_t final_granule)
+{
+    uint8_t digest[SHA1_DIGEST_SIZE];
+    uint8_t padding[ENCODER_TAF_PROTO_BYTES] = {0};
+    uint8_t output[ENCODER_TAF_HEADER_SIZE] = {0};
+    sha1Final(&ctx->sha1, digest);
+    TonieboxAudioFileHeader header = ctx->taf;
+    header.sha1_hash.data = digest;
+    header.sha1_hash.len = sizeof(digest);
+    header.num_bytes = ctx->output_size - ENCODER_TAF_HEADER_SIZE;
+    header.has_ogg_granule_position = header.has_ogg_packet_count = true;
+    header.has_taf_block_num = header.has_pageno = true;
+    header.ogg_granule_position = final_granule;
+    header.ogg_packet_count = ctx->packet_count;
+    header.taf_block_num = header.num_bytes / ENCODER_TAF_HEADER_SIZE;
+    header.pageno = ctx->os.pageno;
+    header._fill.data = padding;
+    header._fill.len = 0;
+    size_t base = toniebox_audio_file_header__get_packed_size(&header);
+    if (base > ENCODER_TAF_PROTO_BYTES)
+        return encoder_fail(ctx, ENCODER_HEADER_ERROR);
+    header._fill.len = ENCODER_TAF_PROTO_BYTES - base;
+    size_t packed = toniebox_audio_file_header__get_packed_size(&header);
+    while (packed > ENCODER_TAF_PROTO_BYTES && header._fill.len > 0) {
+        header._fill.len--;
+        packed = toniebox_audio_file_header__get_packed_size(&header);
+    }
+    if (packed > ENCODER_TAF_PROTO_BYTES)
+        return encoder_fail(ctx, ENCODER_HEADER_ERROR);
+    output[0] = (uint8_t)(packed >> 24);
+    output[1] = (uint8_t)(packed >> 16);
+    output[2] = (uint8_t)(packed >> 8);
+    output[3] = (uint8_t)packed;
+    if (toniebox_audio_file_header__pack(&header, output + 4) != packed)
+        return encoder_fail(ctx, ENCODER_HEADER_ERROR);
+    return encoder_write_at(ctx, 0, output, sizeof(output));
+}
+
+EMSCRIPTEN_KEEPALIVE
+int taf_encoder_finalize(taf_encoder_t *ctx)
+{
+    if (!encoder_ready(ctx) || ctx->input_samples == ctx->chapter_input_start)
+        return encoder_fail(ctx, ENCODER_STATE_ERROR);
+    uint64_t final_granule = ctx->input_samples + ctx->chapter_padding + (uint64_t)ctx->lookahead;
+    while (ctx->encoded_samples < final_granule) {
+        uint64_t remaining = final_granule - ctx->encoded_samples;
+        int frames = encoder_tail_frames(remaining > ENCODER_FRAME_SAMPLES
+                                             ? ENCODER_FRAME_SAMPLES : (int)remaining);
+        bool eos = ctx->encoded_samples + (uint64_t)frames >= final_granule;
+        if (ctx->pcm_used > frames)
+            return encoder_fail(ctx, ENCODER_STATE_ERROR);
+        memset(ctx->pcm + ctx->pcm_used * ENCODER_CHANNELS, 0,
+               (size_t)(frames - ctx->pcm_used) * ENCODER_CHANNELS * sizeof(int16_t));
+        if (encoder_frame(ctx, frames, eos, final_granule) != 0)
+            return -1;
+    }
+    if (!ctx->native_opus && encoder_taf_header(ctx, final_granule) != 0)
+        return -1;
+    ctx->finalized = true;
+    return 0;
+}
+
+/** ABI compatibility only: this implementation deliberately has no RAM output. */
+EMSCRIPTEN_KEEPALIVE
+uint8_t *taf_encoder_get_buffer(taf_encoder_t *ctx)
+{
+    (void)ctx;
+    return NULL;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t taf_encoder_get_size(taf_encoder_t *ctx)
+{
+    return ctx ? ctx->output_size : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int taf_encoder_get_error(taf_encoder_t *ctx)
+{
+    return ctx ? ctx->error : ENCODER_STATE_ERROR;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void taf_encoder_free(taf_encoder_t *ctx)
+{
+    if (ctx == NULL)
+        return;
+    if (ctx->enc != NULL)
+        opus_encoder_destroy(ctx->enc);
+    if (ctx->ogg_initialized)
+        ogg_stream_clear(&ctx->os);
+    free(ctx->taf.track_page_nums);
+    free(ctx);
 }

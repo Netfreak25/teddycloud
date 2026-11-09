@@ -6,6 +6,30 @@ Display metadata for directly assigned custom TAF files is separate from this TB
 
 ## Implementation overview
 
+### Disk-backed browser encoding (separate from TAP source limits)
+
+See [BROWSER_ENCODER.md](BROWSER_ENCODER.md) for the format selector, preflight,
+limits, import endpoints and verification boundary. Existing TAP/FFmpeg source
+arrays and shuffle behavior are unchanged.
+
+Changes by file:
+
+- `wasm/taf_encoder_minimal.c`: bounded PCM/output processing, checked streaming
+  sink, dynamic TAF header markers and independently finalized native Opus streams.
+- `include/encoder_limits.h`: shared transport/header/descriptor bounds, distinct
+  from the existing TAP source-array capacity.
+- `src/taf_upload.c`, `src/handler_api.c`, `src/server_helpers.c`: strict opt-in
+  multipart completion and temporary TAF validation before atomic replacement;
+  other multipart callers retain their existing behavior.
+- `src/v3_local_content.c`, `src/handler_cloud.c`: dynamic TAF chapter snapshots and
+  canonical multi-digit hashed chapter URLs, retaining legacy two-digit names.
+- `src/mqtt_server.c` and the playback API: permit larger chapter indices using
+  the reader's bound without changing control permissions or message handling.
+- `src/content_playlist.c`: reject oversized sidecars before publishing them.
+- `src/encoder_api.c`, `src/v3_native_cache.c`, `src/server.c`: isolated staged
+  native imports and additive content titles/durations, not TAP generation.
+- `Makefile`: worker-compatible JS/WASM build, shipped together with the WebUI.
+
 ### Original TAF Library backing and dual-format downloads
 
 Original downloads can retain their RUID/source preference while importing audio

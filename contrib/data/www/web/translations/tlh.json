@@ -427,6 +427,34 @@
         }
     },
     "tonies": {
+        "encoder": {
+            "outputFormat": "De' Segh",
+            "memoryError": "encoder qawHaq yapbe'. De' naQbe' ngeHbe'. teywI' mach yIlo' pagh latlh tabs yISoQmoH.",
+            "storageError": "ru' teywI' polmeH Qagh pagh browser qawHaq buy'. De' naQbe' ngeHbe'.",
+            "headerError": "TAF header-Daq 'ay' index tInqu'. native TB2 Collection yIlo' pagh TAFmey yIwav.",
+            "encoderVersionError": "WebUI encoder script, WASM je rapbe'. cha' teywI'mey yIchu'moH; yIlaDqa'.",
+            "headerWarning": "'ay'mey law' law' TAF header qawHaq puS puS. indexna' poj encoder; 'ay' teqbe'.",
+            "outputLimitWarning": "De' noH tIn law' server teywI' vuS tIn puS. teywI' yImachmoH pagh native 'ay'mey yIlo'. De' noH neH.",
+            "tafFormat": "TAF (TB1 / TB2)",
+            "nativeFormat": "Ogg/Opus native Collection (TB2)",
+            "nativeBrowserRequired": "browser-Daq native Collection chenmoH. SeghvamvaD server encoder lo'laHbe'. TAF DawIvqa'chugh wIvHomlIj ngo' lo'qa'.",
+            "nativeDestination": "Library-Daq wa' native Collection pol. Hoch teywI' 'ay' pol; Tonie mung choHbe'.",
+            "nativeCreated": "native Collection polta'. TonievaD yIngu'.",
+            "uploadAudioText": "QoQ teywI'mey yIwIv pagh naDev yIlan. 'ay'mey patlh yIngu'.",
+            "browserUnavailable": "HTTPS pagh localhost, worker, OPFS je poQ. Chrome lo'. tInqu'bogh qawHaq choHwI' lo'be'.",
+            "extendedTafWarning": "99 'ay'mey law' law': 'ay' teqbe', tay'moHbe'. TB1 'ay' SeHlaHghach wI'Ipbe'. TB2vaD native Collection wIchup.",
+            "preflightRunning": "poH, browser qawHaq je wIpoj…",
+            "preflightTitle": "choHpa'",
+            "preflightEstimate": "poH Sov: {{minutes}} tup · De' noH: {{output}} · stereo teywI' tInqu' qawHaq: {{memory}}",
+            "preflightUnknown": "{{count}} teywI' poH Sovbe'. De' noH-Daq qawHaqchaj tu'lu'be'.",
+            "storageWarning": "browser qawHaq yapbe'law'. choHpa' De' yIteq pagh teywI'mey yIpuSmoH.",
+            "decodeWarning": "teywI' nI' qawHaq law' poQ. 'ay'mey mach lo'lu'chugh QaQ law'.",
+            "preflightDisclaimer": "De' noH neH. VBR, decoder, latlh tabs je qawHaq law' poQlaH. Qaghchugh polmeH mIw, mev; teywI' naQbe' ngeHbe'.",
+            "metadataTooLarge": "'ay' pongmey De' tIn law' server vuS tIn puS.",
+            "cancel": "choH yImev",
+            "cancelled": "choH mevta'",
+            "cancelledDetails": "native Collection naQbe' muchbe'. ru' teywI'mey teq."
+        },
         "cacheDownload": {
             "reasons": {
                 "private_source": "Tonie-vaD Daqvam Hal wIvlu'.",

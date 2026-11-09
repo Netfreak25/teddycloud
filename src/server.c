@@ -41,6 +41,7 @@
 #include "tb2_mqtt_passthrough.h"
 #include "tb2_ota_cache.h"
 #include "original_content_api.h"
+#include "encoder_api.h"
 #include "original_content_cache.h"
 #include "toniebox_state.h"       // for get_toniebox_state, get_toniebox_s...
 #include "toniebox_state_type.h"  // for toniebox_state_box_t, toniebox_sta...
@@ -170,6 +171,9 @@ request_type_t request_paths[] = {
     {REQ_POST, "/api/fileMove", SERTY_WEB, &handleApiFileMove},
     {REQ_POST, "/api/dirDelete", SERTY_WEB, &handleApiDirectoryDelete},
     {REQ_POST, "/api/library/native/delete", SERTY_WEB, &handleApiNativeLibraryDelete},
+    {REQ_GET, "/api/encoder/capabilities", SERTY_WEB, &handleApiEncoderCapabilities},
+    {REQ_ANY, "/api/library/native/import/", SERTY_WEB, &handleApiNativeImportOperation},
+    {REQ_POST, "/api/library/native/import", SERTY_WEB, &handleApiNativeImportStart},
     {REQ_POST, "/api/dirCreate", SERTY_WEB, &handleApiDirectoryCreate},
     {REQ_POST, "/api/uploadCert", SERTY_WEB, &handleApiUploadCert},
     {REQ_GET, "/api/getFile/ca.der", SERTY_WEB, &handleApiGetCaDer},
@@ -1161,6 +1165,7 @@ void server_init(bool test)
     }
 
     pcaplog_open();
+    encoder_uploads_init();
 
     err = httpServerStart(&http_context);
     if (err != NO_ERROR)

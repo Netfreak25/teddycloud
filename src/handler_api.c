@@ -23,6 +23,8 @@
 #include "returncodes.h"
 #include "cJSON.h"
 #include "toniefile.h"
+#include "encoder_limits.h"
+#include "taf_upload.h"
 #include "toniesJson.h"
 #include "fs_ext.h"
 #include "os_ext.h"
@@ -1157,12 +1159,58 @@ static bool_t api_is_native_collection_detail_path(
            hash[V3_NATIVE_LIBRARY_HASH_HEX_LENGTH] == '/';
 }
 
+/* Imported titles are content metadata, never tag/model identity. */
+static void api_native_collection_metadata(const v3_native_library_collection_t *collection,
+                                            const toniesJson_item_t *catalog, cJSON *target,
+                                            bool_t fallback_titles)
+{
+    if (target == NULL)
+        return;
+    const char *title = collection->title && collection->title[0] ? collection->title :
+                        (catalog && catalog->title ? catalog->title : "");
+    cJSON_DeleteItemFromObjectCaseSensitive(target, "title");
+    cJSON_AddStringToObject(target, "title", title);
+    cJSON_DeleteItemFromObjectCaseSensitive(target, "tracks");
+    cJSON_DeleteItemFromObjectCaseSensitive(target, "durations");
+    cJSON *tracks = cJSON_AddArrayToObject(target, "tracks");
+    cJSON *durations = cJSON_AddArrayToObject(target, "durations");
+    bool_t exact_catalog = catalog && catalog->tracks &&
+                           (size_t)catalog->tracks_count == collection->chapter_count;
+    bool_t all_durations = TRUE;
+    bool_t all_titles = TRUE;
+    for (size_t i = 0; i < collection->chapter_count; i++)
+        all_durations = all_durations && collection->chapters[i].has_duration;
+    for (size_t i = 0; i < collection->chapter_count; i++)
+    {
+        char fallback[32];
+        osSnprintf(fallback, sizeof(fallback), "Chapter %u", (unsigned int)(i + 1));
+        const char *track = collection->chapters[i].title;
+        if (!track || !track[0])
+            track = exact_catalog ? catalog->tracks[i] : NULL;
+        all_titles = all_titles && track && track[0];
+        cJSON_AddItemToArray(tracks, cJSON_CreateString(track && track[0] ? track : fallback));
+        if (all_durations)
+            cJSON_AddItemToArray(durations, cJSON_CreateNumber(collection->chapters[i].duration_seconds));
+    }
+    if (!fallback_titles && !all_titles)
+    {
+        cJSON_DeleteItemFromObjectCaseSensitive(target, "tracks");
+        cJSON_AddArrayToObject(target, "tracks");
+    }
+}
+
 static void api_add_native_collection_tonie_info_json(
     const v3_native_library_collection_t *collection,
     toniesJson_item_t *item,
     cJSON *parent)
 {
     addToniesJsonInfoJson(item, NULL, parent);
+    if (collection->title != NULL)
+    {
+        api_native_collection_metadata(collection, item,
+                                       cJSON_GetObjectItemCaseSensitive(parent, "tonieInfo"), FALSE);
+        return;
+    }
     if (item == NULL || item->tracks == NULL ||
         (size_t)item->tracks_count == collection->chapter_count)
     {
@@ -1251,7 +1299,8 @@ error_t handleApiFileIndexV2(HttpConnection *connection, const char_t *uri, cons
             continue;
         }
         if (!osStrcmp(special, "library") &&
-            !osStrcmp(entry.name, V3_NATIVE_LIBRARY_STAGING_DIR))
+            (!osStrcmp(entry.name, V3_NATIVE_LIBRARY_STAGING_DIR) ||
+             !osStrcmp(entry.name, ENCODER_UPLOAD_DIRECTORY)))
         {
             continue;
         }
@@ -1301,6 +1350,8 @@ error_t handleApiFileIndexV2(HttpConnection *connection, const char_t *uri, cons
                 cJSON_AddNumberToObject(native, "chapterCount",
                                        collection.chapter_count);
                 cJSON_AddStringToObject(native, "format", "ogg-opus");
+                api_native_collection_metadata(&collection,
+                    api_native_collection_source_metadata(&collection), native, FALSE);
                 char *manifest_path = custom_asprintf(
                     "by/contentHash/%s/library-entry.json",
                     collection.content_hash);
@@ -1325,6 +1376,10 @@ error_t handleApiFileIndexV2(HttpConnection *connection, const char_t *uri, cons
                                            chapter->sha256);
                     cJSON_AddNumberToObject(chapter_json, "fileSize",
                                            chapter->file_size);
+                    if (chapter->title != NULL)
+                        cJSON_AddStringToObject(chapter_json, "title", chapter->title);
+                    if (chapter->has_duration)
+                        cJSON_AddNumberToObject(chapter_json, "durationSeconds", chapter->duration_seconds);
                     char *chapter_path = custom_asprintf(
                         "by/contentHash/%s/chapters/teddycloud_%s_%02" PRIuSIZE
                         ".opus",
@@ -3238,34 +3293,24 @@ error_t handleApiTafUpload(HttpConnection *connection, const char_t *uri, const 
             TRACE_INFO("Filename '%s' already exists, overwriting\r\n", filename);
         }
 
-        multipart_cbr_t cbr;
-        file_save_ctx ctx;
-
-        osMemset(&cbr, 0x00, sizeof(cbr));
-        osMemset(&ctx, 0x00, sizeof(ctx));
-
-        cbr.multipart_start = &file_save_start;
-        cbr.multipart_add = &file_save_add;
-        cbr.multipart_end = &file_save_end;
-
-        ctx.root_path = pathAbsolute;
-        ctx.overlay = overlay;
-
-        switch (multipart_handle(connection, &cbr, &ctx))
+        switch (taf_upload_receive(connection, filename))
         {
         case NO_ERROR:
-            if (!isValidTaf(filename, true))
-            {
-                TRACE_ERROR("Uploaded TAF file '%s' failed validation\r\n", filename);
-                statusCode = 500;
-                osSnprintf(message, sizeof(message), "TAF validation failed");
-                fsDeleteFile(filename);
-                break;
-            }
             statusCode = 200;
             osSnprintf(message, sizeof(message), "OK");
             break;
+        case ERROR_INVALID_LENGTH:
+            connection->response.keepAlive = false;
+            statusCode = 413;
+            osSnprintf(message, sizeof(message), "TAF exceeds the upload size limit");
+            break;
+        case ERROR_INVALID_FILE:
+            connection->response.keepAlive = false;
+            statusCode = 422;
+            osSnprintf(message, sizeof(message), "Incomplete or invalid TAF; existing file retained");
+            break;
         default:
+            connection->response.keepAlive = false;
             statusCode = 500;
             osSnprintf(message, sizeof(message), "Upload failed");
             break;
@@ -5029,7 +5074,7 @@ error_t handleApiBoxPlayback(HttpConnection *connection, const char_t *uri, cons
         uint32_t position_ms = 0;
         action_valid = api_get_json_uint32(json, "chapter", &chapter) &&
                        api_get_json_uint32(json, "ms", &position_ms) &&
-                       chapter < TONIEFILE_MAX_CHAPTERS;
+                       chapter < ENCODER_NATIVE_MAX_CHAPTERS;
         if (action_valid)
         {
             delivery = mqtt_server_publish_playback_position_for_overlay(overlay_id, chapter, position_ms);
@@ -6627,6 +6672,8 @@ static void api_add_native_collection_playlist(cJSON *json_entry,
     }
     api_add_native_playlist(json_entry, source_item, collection.chapter_count,
                             FALSE, 0);
+    api_native_collection_metadata(&collection, source_item,
+                                   cJSON_GetObjectItemCaseSensitive(json_entry, "playlist"), TRUE);
     v3_native_library_collection_free(&collection);
 }
 

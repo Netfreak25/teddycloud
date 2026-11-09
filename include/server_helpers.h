@@ -15,6 +15,8 @@ typedef struct
 } multipart_cbr_t;
 
 error_t multipart_handle(HttpConnection *connection, multipart_cbr_t *cbr, void *multipart_ctx);
+/* Require a terminating boundary and propagate completion/write failures. */
+error_t multipart_handle_strict(HttpConnection *connection, multipart_cbr_t *cbr, void *multipart_ctx);
 
 int urldecode(char *dest, size_t dest_max, const char *src);
 bool queryGet(const char *query, const char *key, char *data, size_t data_len);

@@ -19,6 +19,7 @@
 #include "mutex_manager.h"
 
 #include "toniefile.h"
+#include "encoder_limits.h"
 #include "toniesJson.h"
 #include "tonie_audio_playlist_internal.h"
 #include "tb2_client_identity.h"
@@ -3826,14 +3827,34 @@ static bool_t v3_local_parse_chapter_request(const char *uri, v3_local_chapter_r
     }
 
     size_t name_length = osStrlen(name);
-    if (name_length == V3_LOCAL_CHAPTER_HASHED_NAME_LENGTH)
+    if (name_length >= V3_LOCAL_CHAPTER_HASHED_NAME_LENGTH && name_length < V3_LOCAL_CONTENT_NAME_SIZE)
     {
         const size_t hash_offset = V3_LOCAL_CHAPTER_PREFIX_LENGTH;
         const size_t index_offset = hash_offset + V3_LOCAL_CHAPTER_HASH_PREFIX_LENGTH + 1;
-        const size_t ruid_offset = index_offset + 3;
+        const char *separator = strchr(name + index_offset, '_');
+        if (separator == NULL)
+        {
+            return FALSE;
+        }
+        size_t digits = (size_t)(separator - name) - index_offset;
+        if (digits < 2 || (digits > 2 && name[index_offset] == '0'))
+        {
+            return FALSE;
+        }
+        size_t index = 0;
+        for (size_t i = 0; i < digits; i++)
+        {
+            unsigned char digit = (unsigned char)name[index_offset + i];
+            if (!isdigit(digit) || index > (ENCODER_NATIVE_MAX_CHAPTERS - 1U - (digit - '0')) / 10U)
+            {
+                return FALSE;
+            }
+            index = index * 10U + (digit - '0');
+        }
+        const size_t ruid_offset = index_offset + digits + 1;
         const size_t suffix_offset = ruid_offset + V3_LOCAL_CONTENT_RUID_HEX_LENGTH;
 
-        if (name[index_offset - 1] != '_' || name[index_offset + 2] != '_' ||
+        if (name_length != suffix_offset + 5 || name[index_offset - 1] != '_' ||
             osStrcmp(name + suffix_offset, ".opus") != 0 ||
             !v3_local_is_hex_string(name + hash_offset, V3_LOCAL_CHAPTER_HASH_PREFIX_LENGTH, TRUE) ||
             !isdigit((unsigned char)name[index_offset]) ||
@@ -3844,8 +3865,7 @@ static bool_t v3_local_parse_chapter_request(const char *uri, v3_local_chapter_r
         }
 
         request->format = V3_LOCAL_CHAPTER_HASHED;
-        request->chapter_index = (size_t)(name[index_offset] - '0') * 10U +
-                                 (size_t)(name[index_offset + 1] - '0');
+        request->chapter_index = index;
         request->ruid_uri_offset = V3_CHAPTER_URI_PREFIX_LENGTH + ruid_offset;
         osMemcpy(request->hash_prefix, name + hash_offset, V3_LOCAL_CHAPTER_HASH_PREFIX_LENGTH);
         request->hash_prefix[V3_LOCAL_CHAPTER_HASH_PREFIX_LENGTH] = '\0';

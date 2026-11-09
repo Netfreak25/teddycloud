@@ -14,6 +14,55 @@ WEB = ROOT / "teddycloud_web"
 
 
 class ContentPlaylistContractTests(unittest.TestCase):
+    def test_native_import_metadata_priority_runtime(self):
+        start = self.api.index("static void api_native_collection_metadata(")
+        end = self.api.index("\n}", start) + 2
+        fixture = r'''
+#include <assert.h>
+#include <string.h>
+#include "core/net.h"
+#include "v3_native_cache.h"
+#include "toniesJson.h"
+#include "cJSON.h"
+/* HELPER */
+int main(void) {
+    char *catalog_tracks[] = {"Catalog one", "Catalog two"};
+    toniesJson_item_t catalog = {.title="Catalog", .tracks=catalog_tracks, .tracks_count=2};
+    v3_native_library_collection_chapter_t chapters[2] = {
+        {.title="Local one", .duration_seconds=1.125, .has_duration=TRUE},
+        {.title="", .duration_seconds=2.5, .has_duration=TRUE}
+    };
+    v3_native_library_collection_t collection = {.title="My book", .chapter_count=2, .chapters=chapters};
+    cJSON *result = cJSON_CreateObject();
+    api_native_collection_metadata(&collection, &catalog, result, TRUE);
+    assert(!strcmp(cJSON_GetObjectItem(result,"title")->valuestring,"My book"));
+    cJSON *tracks = cJSON_GetObjectItem(result,"tracks");
+    assert(!strcmp(cJSON_GetArrayItem(tracks,0)->valuestring,"Local one"));
+    assert(!strcmp(cJSON_GetArrayItem(tracks,1)->valuestring,"Catalog two"));
+    assert(cJSON_GetArrayItem(cJSON_GetObjectItem(result,"durations"),1)->valuedouble==2.5);
+    chapters[1].has_duration=FALSE;
+    catalog.tracks_count=1;
+    api_native_collection_metadata(&collection, &catalog, result, TRUE);
+    assert(cJSON_GetArraySize(cJSON_GetObjectItem(result,"durations"))==0);
+    assert(!strcmp(cJSON_GetArrayItem(cJSON_GetObjectItem(result,"tracks"),1)->valuestring,"Chapter 2"));
+    api_native_collection_metadata(&collection, &catalog, result, FALSE);
+    assert(cJSON_GetArraySize(cJSON_GetObjectItem(result,"tracks"))==0);
+    cJSON_Delete(result);
+    puts("PASS: imported native metadata priority, exact catalog count and durations");
+}
+'''.replace('/* HELPER */', self.api[start:end])
+        includes = ["include", "include/protobuf-c", "src/proto", "src/cyclone/common",
+                    "src/cyclone/cyclone_tcp", "cyclone/common", "cyclone/cyclone_ssl",
+                    "cyclone/cyclone_tcp", "cyclone/cyclone_crypto", "cJSON"]
+        with tempfile.TemporaryDirectory(prefix="tc-native-metadata-") as directory:
+            source = Path(directory) / "metadata.c"
+            executable = Path(directory) / "metadata"
+            source.write_text(fixture, encoding="utf-8")
+            subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", "-DGPL_LICENSE_TERMS_ACCEPTED",
+                            *["-I" + path for path in includes], str(source), "cJSON/cJSON.c",
+                            "-o", str(executable)], cwd=ROOT, check=True)
+            subprocess.run([str(executable)], check=True)
+
     @classmethod
     def setUpClass(cls):
         cls.playlist = (ROOT / "src/content_playlist.c").read_text(encoding="utf-8")

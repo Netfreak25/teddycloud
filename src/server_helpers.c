@@ -329,13 +329,20 @@ error_t multipart_get_field(const char *buffer, size_t buffer_size, const char *
     return NO_ERROR;
 }
 
-error_t multipart_handle(HttpConnection *connection, multipart_cbr_t *cbr, void *multipart_ctx)
+static error_t multipart_handle_internal(HttpConnection *connection, multipart_cbr_t *cbr, void *multipart_ctx, bool strict)
 {
     char buffer[2 * BUFFER_SIZE];
     char form_name[256];
     char form_filename[256];
     eMultipartState state = PARSE_HEADER;
     char *boundary = connection->request.boundary;
+    if (strict && (!boundary || !boundary[0] || osStrlen(boundary) + 6 > SAVE_SIZE))
+    {
+        return ERROR_INVALID_SYNTAX;
+    }
+    char strict_boundary[SAVE_SIZE + 1];
+    if (strict)
+        osSnprintf(strict_boundary, sizeof(strict_boundary), "\r\n--%s", boundary);
 
     size_t leftover = 0;
     bool fetch = true;
@@ -353,6 +360,10 @@ error_t multipart_handle(HttpConnection *connection, multipart_cbr_t *cbr, void 
         payload_size = leftover;
         if (fetch)
         {
+            if (strict && leftover >= DATA_SIZE)
+            {
+                return ERROR_INVALID_SYNTAX;
+            }
             size_t packet_size;
             error_t error = httpReceive(connection, &buffer[leftover], DATA_SIZE - leftover, &packet_size, SOCKET_FLAG_DONT_WAIT);
             if (error != NO_ERROR)
@@ -419,7 +430,7 @@ error_t multipart_handle(HttpConnection *connection, multipart_cbr_t *cbr, void 
             if (osMemcmp(buffer, "\r\n", 2))
             {
                 TRACE_DEBUG("No valid multipart\r\n");
-                return NO_ERROR;
+                return strict ? ERROR_INVALID_SYNTAX : NO_ERROR;
             }
 
             if (multipart_get_field(buffer, payload_size, "name", form_name, sizeof(form_name)) != NO_ERROR)
@@ -449,10 +460,11 @@ error_t multipart_handle(HttpConnection *connection, multipart_cbr_t *cbr, void 
                 break;
             }
 
-            if (cbr->multipart_start(multipart_ctx, form_name, form_filename) != NO_ERROR)
+            error_t start_error = cbr->multipart_start(multipart_ctx, form_name, form_filename);
+            if (start_error != NO_ERROR)
             {
                 TRACE_ERROR("multipart_start failed\r\n");
-                return ERROR_INVALID_PATH;
+                return strict ? start_error : ERROR_INVALID_PATH;
             }
 
             state = PARSE_BODY;
@@ -469,17 +481,43 @@ error_t multipart_handle(HttpConnection *connection, multipart_cbr_t *cbr, void 
                 break;
             }
 
-            int data_end = find_string(buffer, payload_size, 0, boundary);
+            int data_end = -1;
+            if (strict)
+            {
+                /* Bare boundary text is valid binary data. A delimiter includes
+                 * its CRLF-- prefix and either CRLF or the closing -- suffix. */
+                size_t search = 0;
+                int candidate;
+                while ((candidate = find_string(buffer, payload_size, search, strict_boundary)) >= 0)
+                {
+                    size_t suffix = (size_t)candidate + osStrlen(strict_boundary);
+                    if (suffix + 2U > (size_t)payload_size)
+                        break; /* Keep the complete candidate in the tail buffer. */
+                    if (!osMemcmp(buffer + suffix, "--", 2) || !osMemcmp(buffer + suffix, "\r\n", 2))
+                    {
+                        data_end = candidate + 4;
+                        break;
+                    }
+                    search = (size_t)candidate + 1U;
+                }
+            }
+            else
+                data_end = find_string(buffer, payload_size, 0, boundary);
 
             if (data_end >= 0)
             {
                 /* We've found a boundary, let's finish up the current file, but skip the "--\r\n" */
-                if (cbr->multipart_add(multipart_ctx, (uint8_t *)buffer, data_end - 4) != NO_ERROR)
+                error_t add_error = cbr->multipart_add(multipart_ctx, (uint8_t *)buffer, data_end - 4);
+                if (add_error != NO_ERROR)
                 {
                     TRACE_ERROR("multipart_add failed\r\n");
-                    return ERROR_FAILURE;
+                    return strict ? add_error : ERROR_FAILURE;
                 }
-                cbr->multipart_end(multipart_ctx);
+                error_t end_error = cbr->multipart_end(multipart_ctx);
+                if (strict && end_error != NO_ERROR)
+                {
+                    return end_error;
+                }
 
                 TRACE_INFO("Received file '%s'\r\n", form_filename);
 
@@ -502,10 +540,11 @@ error_t multipart_handle(HttpConnection *connection, multipart_cbr_t *cbr, void 
                 {
                     save_start = payload_size - SAVE_SIZE;
                     save_end = payload_size;
-                    if (cbr->multipart_add(multipart_ctx, buffer, payload_size - SAVE_SIZE) != NO_ERROR)
+                    error_t add_error = cbr->multipart_add(multipart_ctx, buffer, payload_size - SAVE_SIZE);
+                    if (add_error != NO_ERROR)
                     {
                         TRACE_ERROR("multipart_add failed\r\n");
-                        return ERROR_FAILURE;
+                        return strict ? add_error : ERROR_FAILURE;
                     }
                 }
             }
@@ -520,7 +559,17 @@ error_t multipart_handle(HttpConnection *connection, multipart_cbr_t *cbr, void 
         }
     } while (payload_size > 0);
 
-    return NO_ERROR;
+    return strict ? ERROR_INVALID_SYNTAX : NO_ERROR;
+}
+
+error_t multipart_handle(HttpConnection *connection, multipart_cbr_t *cbr, void *multipart_ctx)
+{
+    return multipart_handle_internal(connection, cbr, multipart_ctx, false);
+}
+
+error_t multipart_handle_strict(HttpConnection *connection, multipart_cbr_t *cbr, void *multipart_ctx)
+{
+    return multipart_handle_internal(connection, cbr, multipart_ctx, true);
 }
 
 /**

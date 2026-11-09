@@ -4,6 +4,8 @@
 from pathlib import Path
 import re
 import unittest
+import subprocess
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -372,6 +374,55 @@ class Tb2V3LocalContentContractTests(unittest.TestCase):
         source_guard = prepare.index("!source_change_pending")
         self.assertLess(source_guard, next_version)
         self.assertNotIn("freshness_cache_add_uid", prepare)
+
+    def test_large_chapter_urls_execute_production_parser(self):
+        parser = self.cloud[self.cloud.index('#define V3_CHAPTER_URI_PREFIX '):
+                            self.cloud.index('static bool_t v3_local_hashed_uid_add(')]
+        fixture = r'''
+#include <assert.h>
+#include <ctype.h>
+#include <stdio.h>
+#include <string.h>
+#include "encoder_limits.h"
+#define TRUE 1
+#define FALSE 0
+typedef int bool_t;
+#define osStrlen strlen
+#define osStrncmp strncmp
+#define osStrcmp strcmp
+#define osMemset memset
+#define osMemcpy memcpy
+#define V3_LOCAL_CONTENT_NAME_SIZE 96
+#define V3_LOCAL_CONTENT_RUID_SIZE 17
+#define V3_LOCAL_CONTENT_RUID_HEX_LENGTH 16
+/* PARSER */
+int main(void) {
+    const size_t indexes[] = {0, 9, 99, 100, 101, 113, 114, 4091};
+    char uri[160];
+    v3_local_chapter_request_t request;
+    for (size_t i = 0; i < sizeof(indexes) / sizeof(*indexes); i++) {
+        snprintf(uri, sizeof(uri), "/v3/chapter/teddycloud_0123456789abcdef0123_%02zu_0123456789abcdef.opus", indexes[i]);
+        assert(v3_local_parse_chapter_request(uri, &request));
+        assert(request.chapter_index == indexes[i]);
+        assert(!strcmp(request.ruid, "0123456789ABCDEF"));
+    }
+    const char *bad[] = {"001", "-1", "1", "99999999999999999999", "524288", "1x0"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        snprintf(uri, sizeof(uri), "/v3/chapter/teddycloud_0123456789abcdef0123_%s_0123456789abcdef.opus", bad[i]);
+        assert(!v3_local_parse_chapter_request(uri, &request));
+    }
+    assert(v3_local_parse_chapter_request("/v3/chapter/teddycloud_99_0123456789abcdef", &request));
+    assert(!v3_local_parse_chapter_request("/v3/chapter/teddycloud_0123456789abcdef0123_114_0123456789abcdef.opus/extra", &request));
+    puts("PASS: production chapter URL parser (100/101/114 and malformed indexes)");
+}
+'''.replace('/* PARSER */', parser)
+        with tempfile.TemporaryDirectory(prefix="tc-chapter-parser-") as directory:
+            source = Path(directory) / "parser.c"
+            executable = Path(directory) / "parser"
+            source.write_text(fixture, encoding="utf-8")
+            subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "include"), str(source), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
 
 
 if __name__ == "__main__":

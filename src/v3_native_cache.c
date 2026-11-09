@@ -3,8 +3,10 @@
 #include "v3_native_cache.h"
 
 #include <ctype.h>
+#include <float.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +18,7 @@
 #include "mutex_manager.h"
 #include "settings.h"
 #include "toniefile.h"
+#include "encoder_limits.h"
 
 #define V3_NATIVE_CACHE_DIR "v3-native"
 #define V3_NATIVE_CACHE_META_LIMIT (1024U * 1024U)
@@ -2735,10 +2738,12 @@ void v3_native_library_collection_free(
         for (size_t i = 0; i < collection->chapter_count; i++)
         {
             osFreeMem(collection->chapters[i].path);
+            osFreeMem(collection->chapters[i].title);
         }
     }
     osFreeMem(collection->chapters);
     osFreeMem(collection->origins);
+    osFreeMem(collection->title);
     osMemset(collection, 0, sizeof(*collection));
 }
 
@@ -2807,6 +2812,168 @@ static uint32_t v3_native_library_audio_id(const char *content_hash)
     return value == 0 ? 1U : value;
 }
 
+/** Same immutable chapter layout as imported originals, without invented origins. */
+static char *v3_native_custom_entry_json(
+    const v3_native_library_collection_t *input,
+    const v3_native_library_chapter_t *chapters, const char *content_hash)
+{
+    static const char placeholder_hash[] =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    cJSON *root = cJSON_CreateObject();
+    cJSON *array = NULL;
+    if (root == NULL ||
+        cJSON_AddNumberToObject(root, "schemaVersion", V3_NATIVE_LIBRARY_SCHEMA) == NULL ||
+        cJSON_AddStringToObject(root, "origin", "custom") == NULL ||
+        cJSON_AddStringToObject(root, "boxGeneration", "tb2") == NULL ||
+        cJSON_AddStringToObject(root, "format", "ogg-opus") == NULL ||
+        cJSON_AddStringToObject(root, "contentHash", content_hash) == NULL ||
+        cJSON_AddStringToObject(root, "title", input->title != NULL ? input->title : "") == NULL ||
+        cJSON_AddArrayToObject(root, "origins") == NULL ||
+        (array = cJSON_AddArrayToObject(root, "chapters")) == NULL)
+    {
+        cJSON_Delete(root);
+        return NULL;
+    }
+    for (size_t i = 0; i < input->chapter_count; i++)
+    {
+        const char *hash = chapters != NULL ? chapters[i].sha256_hex : placeholder_hash;
+        char *path = v3_native_format("chapters/teddycloud_%s_%02" PRIuSIZE ".opus", hash, i);
+        char *name = v3_native_format("chapter-%" PRIuSIZE ".opus", i);
+        cJSON *entry = cJSON_CreateObject();
+        bool_t valid = entry != NULL && path != NULL && name != NULL &&
+            cJSON_AddNumberToObject(entry, "index", i) != NULL &&
+            cJSON_AddStringToObject(entry, "originalName", name) != NULL &&
+            cJSON_AddStringToObject(entry, "sha256", hash) != NULL &&
+            cJSON_AddNumberToObject(entry, "fileSize", chapters != NULL ? chapters[i].file_size : ENCODER_MAX_FILE_BYTES) != NULL &&
+            cJSON_AddStringToObject(entry, "path", path) != NULL &&
+            cJSON_AddStringToObject(entry, "title", input->chapters[i].title != NULL ? input->chapters[i].title : "") != NULL &&
+            cJSON_AddNumberToObject(entry, "durationSeconds", chapters != NULL ? input->chapters[i].duration_seconds : DBL_MAX) != NULL;
+        osFreeMem(path);
+        osFreeMem(name);
+        if (!valid || !cJSON_AddItemToArray(array, entry))
+        {
+            cJSON_Delete(entry);
+            cJSON_Delete(root);
+            return NULL;
+        }
+    }
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json;
+}
+
+bool_t v3_native_library_custom_metadata_fits(
+    const v3_native_library_collection_t *input)
+{
+    /* Every chapter needs at least a 64-byte hash and the hash-bearing path;
+     * reject impossible counts before constructing the preview document. */
+    if (input == NULL || input->chapters == NULL || input->chapter_count == 0 ||
+        input->chapter_count > ENCODER_MAX_METADATA_BYTES / (2U * V3_NATIVE_LIBRARY_HASH_HEX_LENGTH))
+        return FALSE;
+    char *preview = v3_native_custom_entry_json(input, NULL,
+        "0000000000000000000000000000000000000000000000000000000000000000");
+    bool_t fits = preview != NULL && osStrlen(preview) <= ENCODER_MAX_METADATA_BYTES;
+    cJSON_free(preview);
+    return fits;
+}
+
+error_t v3_native_library_publish_custom(
+    const char *library_root, const char *staging_dir,
+    const v3_native_library_collection_t *input,
+    char **library_source, bool_t *reused)
+{
+    if (library_root == NULL || staging_dir == NULL || library_source == NULL ||
+        reused == NULL || !v3_native_library_custom_metadata_fits(input))
+        return ERROR_INVALID_PARAMETER;
+    *library_source = NULL;
+    *reused = FALSE;
+    v3_native_library_chapter_t *chapters = osAllocMem(input->chapter_count * sizeof(*chapters));
+    if (chapters == NULL)
+        return ERROR_OUT_OF_MEMORY;
+    osMemset(chapters, 0, input->chapter_count * sizeof(*chapters));
+    error_t error = NO_ERROR;
+    Sha256Context context;
+    sha256Init(&context);
+    sha256Update(&context, V3_NATIVE_LIBRARY_HASH_DOMAIN, sizeof(V3_NATIVE_LIBRARY_HASH_DOMAIN) - 1U);
+    v3_native_library_hash_u32(&context, (uint32_t)input->chapter_count);
+    for (size_t i = 0; i < input->chapter_count && error == NO_ERROR; i++)
+    {
+        error = v3_native_library_hash_file(input->chapters[i].path,
+            chapters[i].sha256, &chapters[i].file_size);
+        if (error == NO_ERROR && chapters[i].file_size != input->chapters[i].file_size)
+            error = ERROR_INVALID_FILE;
+        if (error == NO_ERROR)
+        {
+            v3_native_library_digest_to_hex(chapters[i].sha256, chapters[i].sha256_hex);
+            v3_native_library_hash_u32(&context, (uint32_t)i);
+            v3_native_library_hash_u32(&context, chapters[i].file_size);
+            sha256Update(&context, chapters[i].sha256, SHA256_DIGEST_SIZE);
+        }
+    }
+    uint8_t digest[SHA256_DIGEST_SIZE];
+    char content_hash[V3_NATIVE_LIBRARY_HASH_HEX_SIZE];
+    sha256Final(&context, digest);
+    v3_native_library_digest_to_hex(digest, content_hash);
+    char *parent = v3_native_format("%s%cby%ccontentHash", library_root, PATH_SEPARATOR, PATH_SEPARATOR);
+    char *target = parent != NULL ? v3_native_format("%s%c%s", parent, PATH_SEPARATOR, content_hash) : NULL;
+    char *source = v3_native_format("lib://by/contentHash/%s/library-entry.json", content_hash);
+    char *entry_path = v3_native_format("%s%clibrary-entry.json", staging_dir, PATH_SEPARATOR);
+    char *json = error == NO_ERROR ? v3_native_custom_entry_json(input, chapters, content_hash) : NULL;
+    if (error == NO_ERROR && (parent == NULL || target == NULL || source == NULL || entry_path == NULL || json == NULL))
+        error = ERROR_OUT_OF_MEMORY;
+    if (error == NO_ERROR && osStrlen(json) > ENCODER_MAX_METADATA_BYTES)
+        error = ERROR_INVALID_FILE;
+    /* All network work has finished. Renames and publication share the existing
+     * library lock; a concurrent delete/import cannot replace this collection. */
+    mutex_lock(MUTEX_V3_NATIVE_LIBRARY);
+    if (error == NO_ERROR && fsDirExists(target))
+    {
+        v3_native_library_collection_t existing;
+        error = v3_native_library_collection_load(library_root, source, TRUE, &existing);
+        if (error == NO_ERROR)
+        {
+            bool_t same = existing.chapter_count == input->chapter_count;
+            for (size_t i = 0; same && i < existing.chapter_count; i++)
+                same = existing.chapters[i].file_size == chapters[i].file_size &&
+                       !osStrcmp(existing.chapters[i].sha256, chapters[i].sha256_hex);
+            v3_native_library_collection_free(&existing);
+            if (!same)
+                error = ERROR_INVALID_FILE;
+            else
+                *reused = TRUE;
+        }
+    }
+    if (error == NO_ERROR && !*reused)
+    {
+        error = v3_native_ensure_dir(parent);
+        for (size_t i = 0; i < input->chapter_count && error == NO_ERROR; i++)
+        {
+            char *name = v3_native_library_chapter_name(&chapters[i], i);
+            char *destination = name != NULL ? v3_native_format("%s%cchapters%c%s", staging_dir, PATH_SEPARATOR, PATH_SEPARATOR, name) : NULL;
+            error = destination != NULL ? fsRenameFile(input->chapters[i].path, destination) : ERROR_OUT_OF_MEMORY;
+            osFreeMem(destination);
+            osFreeMem(name);
+        }
+        if (error == NO_ERROR)
+            error = v3_native_write_atomic(entry_path, json, osStrlen(json));
+        if (error == NO_ERROR)
+            error = fsRenameFile(staging_dir, target);
+    }
+    mutex_unlock(MUTEX_V3_NATIVE_LIBRARY);
+    if (error == NO_ERROR)
+    {
+        *library_source = source;
+        source = NULL;
+    }
+    osFreeMem(chapters);
+    osFreeMem(parent);
+    osFreeMem(target);
+    osFreeMem(source);
+    osFreeMem(entry_path);
+    cJSON_free(json);
+    return error;
+}
+
 bool_t v3_native_library_source_audio_id(const char *source,
                                          uint32_t *audio_id)
 {
@@ -2849,10 +3016,14 @@ error_t v3_native_library_collection_load(
                            : NULL;
     uint8_t *entry_data = NULL;
     size_t entry_length = 0;
+    uint32_t entry_size = 0;
     error_t error = collection_dir == NULL || entry_path == NULL
                         ? ERROR_OUT_OF_MEMORY
-                        : v3_native_read_file(entry_path, &entry_data,
-                                              &entry_length);
+                        : fsGetFileSize(entry_path, &entry_size);
+    if (error == NO_ERROR && (entry_size == 0 || entry_size > ENCODER_MAX_METADATA_BYTES))
+        error = ERROR_INVALID_FILE;
+    if (error == NO_ERROR)
+        error = v3_native_read_file(entry_path, &entry_data, &entry_length);
     if (error != NO_ERROR)
     {
         goto cleanup;
@@ -2885,13 +3056,25 @@ error_t v3_native_library_collection_load(
                    v3_native_library_json_string_equals(
                        cJSON_GetObjectItemCaseSensitive(root, "contentHash"),
                        collection->content_hash) &&
-                   chapter_count > 0 && chapter_count <= TONIEFILE_MAX_SOURCES &&
+                   chapter_count > 0 && (size_t)chapter_count <= ENCODER_NATIVE_MAX_CHAPTERS &&
                    origin_count >= 0;
     if (!valid)
     {
         cJSON_Delete(root);
         error = ERROR_INVALID_FILE;
         goto cleanup;
+    }
+
+    cJSON *title = cJSON_GetObjectItemCaseSensitive(root, "title");
+    if (cJSON_IsString(title) && title->valuestring != NULL)
+    {
+        collection->title = strdup(title->valuestring);
+        if (collection->title == NULL)
+        {
+            cJSON_Delete(root);
+            error = ERROR_OUT_OF_MEMORY;
+            goto cleanup;
+        }
     }
 
     collection->chapters = osAllocMem(
@@ -3035,6 +3218,23 @@ error_t v3_native_library_collection_load(
                  original_name->valuestring);
         osStrcpy(collection->chapters[i].sha256, sha256->valuestring);
         collection->chapters[i].path = chapter_path;
+        cJSON *chapter_title = cJSON_GetObjectItemCaseSensitive(item, "title");
+        cJSON *duration = cJSON_GetObjectItemCaseSensitive(item, "durationSeconds");
+        if (cJSON_IsString(chapter_title) && chapter_title->valuestring != NULL)
+        {
+            collection->chapters[i].title = strdup(chapter_title->valuestring);
+            if (collection->chapters[i].title == NULL)
+            {
+                error = ERROR_OUT_OF_MEMORY;
+                break;
+            }
+        }
+        if (cJSON_IsNumber(duration) && isfinite(duration->valuedouble) &&
+            duration->valuedouble >= 0)
+        {
+            collection->chapters[i].duration_seconds = duration->valuedouble;
+            collection->chapters[i].has_duration = TRUE;
+        }
     }
     cJSON_Delete(root);
 
