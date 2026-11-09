@@ -52,6 +52,11 @@ unsigned mqtt_debug_test_count(const char *stage);
 const cJSON *mqtt_debug_test_last(const char *stage);
 
 settings_t *get_settings(void) { return &settings; }
+void tb2_mqtt_upstream_confirm_session(tb2_mqtt_upstream_worker_t *worker, uint64_t epoch)
+{
+    (void)worker;
+    assert(epoch != 0);
+}
 void osAcquireMutex(OsMutex *mutex) { assert(pthread_mutex_lock(mutex) == 0); }
 void osReleaseMutex(OsMutex *mutex) { assert(pthread_mutex_unlock(mutex) == 0); }
 void httpPrepareHeader(HttpConnection *connection, const void *type, size_t length)
@@ -184,7 +189,6 @@ static void initialize(void)
     session.box_settings = &settings;
     session.owner = 17;
     atomic_init(&session.box_write_error, NO_ERROR);
-    atomic_init(&session.upstream_failed, FALSE);
     atomic_init(&session.capture_failed, FALSE);
     tls.state = TLS_STATE_APPLICATION_DATA;
     tls.version = TLS_VERSION_1_2;
@@ -451,53 +455,68 @@ static void expect_status(const char *state, const char *error)
     assert(strcmp(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(last_status, "error_code")), error) == 0);
 }
 
-static void test_coupled_status_error_origin(void)
+static void set_cloud_connected(tb2_mqtt_passthrough_session_t *connection)
+{
+    connection->cloud_phase = TB2_MQTT_CLOUD_READY;
+    connection->epoch = 1;
+    tb2_mqtt_runtime_update(connection);
+}
+
+static void test_independent_status_error_origin(void)
 {
     initialize();
     settings.mqtt_client_upstream.enabled = true;
     memset(&mqtt_passthrough_status, 0, sizeof(mqtt_passthrough_status));
     assert(pthread_mutex_init(&mqtt_passthrough_status.mutex, NULL) == 0);
-    const char *local_reasons[] = {"box_write_failed", "stream_failed", "disabled", "client_replaced"};
-    for (size_t i = 0; i < arraysize(local_reasons); i++) {
-        session.status_connected = false;
+    assert(pthread_mutex_init(&session.io_mutex, NULL) == 0);
+    const error_t local_errors[] = {ERROR_WRITE_FAILED, ERROR_END_OF_STREAM, NO_ERROR};
+    for (size_t i = 0; i < arraysize(local_errors); i++) {
+        session.runtime_cloud = false;
+        session.box_write_error = local_errors[i];
         tb2_mqtt_status_start();
         expect_status("connecting", "");
-        tb2_mqtt_status_connected(&session);
-        tb2_mqtt_status_connected(&session);
-        assert(mqtt_passthrough_status.connected_sessions == 1);
+        set_cloud_connected(&session);
+        set_cloud_connected(&session);
+        assert(mqtt_passthrough_status.upstream_sessions == 1);
         expect_status("connected", "");
-        tb2_mqtt_status_finish(&session, local_reasons[i]);
+        tb2_mqtt_status_finish(&session);
         expect_status("ready", "");
     }
     tb2_mqtt_passthrough_session_t second = {0};
-    atomic_init(&second.upstream_failed, false);
     atomic_init(&second.capture_failed, false);
-    session.status_connected = false;
+    assert(pthread_mutex_init(&second.io_mutex, NULL) == 0);
+    session.runtime_cloud = false;
     tb2_mqtt_status_start();
-    tb2_mqtt_status_connected(&session);
+    set_cloud_connected(&session);
     tb2_mqtt_status_start();
     expect_status("connected", "");
-    second.upstream_failed = true;
-    tb2_mqtt_status_finish(&second, "stream_failed");
+    strcpy(second.upstream_error, "upstream_stream_failed");
+    tb2_mqtt_runtime_update(&second);
     expect_status("connected", "");
     assert(strcmp(mqtt_passthrough_status.error_code, "upstream_stream_failed") == 0);
-    tb2_mqtt_status_finish(&session, "stream_failed");
+    tb2_mqtt_status_finish(&second);
+    expect_status("connected", "");
+    tb2_mqtt_status_finish(&session);
     expect_status("ready", "");
 
-    session.status_connected = false;
+    session.runtime_cloud = false;
+    session.cloud_phase = TB2_MQTT_CLOUD_DOWN;
     tb2_mqtt_status_start();
-    session.upstream_failed = true;
-    tb2_mqtt_status_finish(&session, "stream_failed");
+    strcpy(session.upstream_error, "upstream_stream_failed");
+    tb2_mqtt_runtime_update(&session);
     expect_status("error", "upstream_stream_failed");
-    session.upstream_failed = false;
-    tb2_mqtt_status_start();
     session.capture_failed = true;
-    tb2_mqtt_status_finish(&session, "stream_failed");
+    strcpy(session.upstream_error, "capture_write_failed");
+    tb2_mqtt_runtime_update(&session);
     expect_status("error", "capture_write_failed");
     settings.mqtt_client_upstream.enabled = false;
     expect_status("disabled", "");
     settings.mqtt_client_upstream.enabled = true;
     expect_status("error", "capture_write_failed");
+    tb2_mqtt_status_finish(&session);
+    expect_status("ready", "");
+    assert(pthread_mutex_destroy(&second.io_mutex) == 0);
+    assert(pthread_mutex_destroy(&session.io_mutex) == 0);
     assert(pthread_mutex_destroy(&mqtt_passthrough_status.mutex) == 0);
     cJSON_Delete(last_status); last_status = NULL;
 }
@@ -511,7 +530,7 @@ int main(void)
     test_native_nonblocking_callbacks();
     test_control_output_deadline_and_closed_state();
     test_native_socket_failure_evidence();
-    test_coupled_status_error_origin();
+    test_independent_status_error_origin();
     puts("TB2 box write runtime: cross-tick vendor records, native nonblocking callbacks, raw progress and sticky errors passed");
     return 0;
 }

@@ -2,6 +2,7 @@
 """Focused guardrails for replacing stale authenticated TB2 MQTT sessions."""
 
 from pathlib import Path
+import re
 import unittest
 
 
@@ -12,6 +13,26 @@ class Tb2MqttSessionReplacementContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mqtt = (ROOT / "src" / "mqtt_server.c").read_text(encoding="utf-8")
+        cls.proxy = (ROOT / "src" / "tb2_mqtt_passthrough.c").read_text(encoding="utf-8")
+
+    def test_packet_aware_takeover_waits_for_completed_connack(self):
+        def function(name):
+            match = re.search(r"static error_t " + name + r"\([^;]*?\n\{[\s\S]*?\n\}", self.proxy)
+            self.assertIsNotNone(match, name)
+            return match.group()
+
+        accept = function("tb2_mqtt_accept_connect")
+        self.assertIn("saved->pending_owner = session->owner", accept)
+        self.assertNotIn("tb2_mqtt_box_terminal", accept)
+        self.assertNotIn("tb2_mqtt_box_writes_cancel", accept)
+        pump = function("tb2_mqtt_box_write_pump")
+        write = pump.index("tb2_mqtt_tls_write_step")
+        finish = pump.index("tb2_mqtt_finish_connect")
+        self.assertLess(write, pump.index("if (error) break;", write))
+        self.assertLess(pump.index("osReleaseMutex", write), finish)
+        complete = function("tb2_mqtt_finish_connect")
+        self.assertLess(complete.index("tb2_mqtt_restore_subscriptions"), complete.index("tb2_mqtt_box_terminal"))
+        self.assertLess(complete.index("tb2_mqtt_box_terminal"), complete.index("session->established = session->connack_sent = TRUE"))
 
     def test_replacement_matches_overlay_and_canonical_box_id(self):
         helper = self.mqtt[

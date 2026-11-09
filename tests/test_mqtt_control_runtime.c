@@ -37,6 +37,7 @@ static uint32_t monotonic_now;
 
 bool_t tb2_mqtt_passthrough_is_established(const tb2_mqtt_passthrough_session_t *session)
 { assert(session); return relay_established; }
+bool_t tb2_mqtt_passthrough_is_enabled(void) { return TRUE; }
 static bool_t mqtt_monotonic_ms(uint32_t *value)
 { *value = monotonic_now; return monotonic_valid; }
 

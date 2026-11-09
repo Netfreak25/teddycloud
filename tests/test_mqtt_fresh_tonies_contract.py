@@ -138,9 +138,17 @@ class MqttFreshToniesContractTests(unittest.TestCase):
         )
         self.assertIn("TB2_MQTT_CONTROL_LOCAL_PUBACK", observer)
         self.assertIn("mqtt_handle_fresh_tonies_puback", observer)
-        self.assertIn("TB2_MQTT_CONTROL_UNSUBSCRIBE", observer)
-        self.assertIn("mqtt_apply_subscription_packet", observer)
+        self.assertIn("TB2_MQTT_CONTROL_SUBSCRIBE", observer)
+        self.assertEqual(observer.count("mqtt_server_publish_fresh_tonies"), 1)
+        self.assertNotIn("mqtt_apply_subscription_packet", observer)
         self.assertNotIn("suback", observer.lower())
+        apply = self.server_function(
+            "static error_t mqtt_passthrough_subscription_apply_locked",
+            "static error_t mqtt_passthrough_subscription_apply(",
+        )
+        self.assertIn("bool_t unsubscribe", apply)
+        self.assertIn("conn->subscription_count = proposed_count", apply)
+        self.assertNotIn("mqtt_server_publish_fresh_tonies", apply)
 
     def test_active_playback_never_holds_freshness(self):
         freshness = self.server_function(

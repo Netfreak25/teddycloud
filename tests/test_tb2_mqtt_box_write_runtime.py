@@ -26,7 +26,7 @@ def main():
     production = functions(source)
     required = {"tb2_mqtt_tls_write_step", "tb2_mqtt_passthrough_box_write_error",
                 "tb2_mqtt_box_send", "tb2_mqtt_box_receive", "tb2_mqtt_box_control_step",
-                "tb2_mqtt_status_start", "tb2_mqtt_status_connected", "tb2_mqtt_status_finish",
+                "tb2_mqtt_status_start", "tb2_mqtt_runtime_update", "tb2_mqtt_status_finish",
                 "tb2_mqtt_status_attempt_failed", "tb2_mqtt_passthrough_write_status"}
     selected = set()
     while required:
