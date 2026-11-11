@@ -11,6 +11,7 @@
 #include "handler.h"
 #include "handler_api.h"
 #include "handler_cloud.h"
+#include "https_send_diag.h"
 #include "http/http_client.h"
 
 #include "mqtt.h"
@@ -5991,10 +5992,23 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
                    chapter->file_size);
         connection->response.keepAlive = true;
         connection->response.contentType = "audio/ogg";
+        https_send_diag_t send_diag;
+        https_send_diag_begin(&send_diag, connection->socket);
+        char peer[sizeof("ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255")];
+        TRACE_INFO("HTTPS chapter begin transfer=%" PRIu64 " box=%s peer=%s:%u ruid=%s chapter=%" PRIuSIZE
+                   " file_bytes=%" PRIu32 " range_start=%" PRIu32 " range_end=%" PRIu32 " range_size=%" PRIu32 "\r\n",
+                   send_diag.id, client_ctx->settings->commonName,
+                   ipAddrToString(&connection->socket->remoteIpAddr, peer),
+                   (unsigned)connection->socket->remotePort, request.ruid, chapter->index,
+                   chapter->file_size, connection->request.Range.start,
+                   connection->request.Range.end, connection->request.Range.size);
         error = httpSendResponseStreamUnsafe(connection,
                                              uri,
                                              chapter->path,
                                              false);
+        https_send_diag_end(&send_diag, error, connection->response.statusCode,
+                            connection->response.contentLength,
+                            connection->tlsContext != NULL ? (int)connection->tlsContext->state : -1);
         if (error == NO_ERROR)
         {
             freshness_clear_cache_after_content_request(client_ctx,

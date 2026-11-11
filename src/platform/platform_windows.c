@@ -11,6 +11,7 @@
 #include <time.h>
 
 #include "platform.h"
+#include "https_send_diag.h"
 #include "tls.h"
 #include "core/net.h"
 #include "core/ethernet.h"
@@ -263,8 +264,15 @@ error_t socketSend(Socket *socket, const void *data, size_t length,
         return NO_ERROR;
     }
 
-    // Send data
+    // Keep the existing errno-based return mapping; Winsock is diagnostic only.
+    int saved_errno = errno;
+    int saved_wsa_error = WSAGetLastError();
+    uint64_t send_started = https_send_diag_before(socket);
+    errno = saved_errno;
+    WSASetLastError(saved_wsa_error);
     n = send(socket->descriptor, data, length, 0);
+    int send_errno = errno;
+    int send_wsa_error = WSAGetLastError();
 
     // Check return value
     if (n > 0)
@@ -290,6 +298,9 @@ error_t socketSend(Socket *socket, const void *data, size_t length,
         }
     }
 
+    https_send_diag_after(socket, length, n, n < 0 ? send_wsa_error : 0, send_started);
+    errno = send_errno;
+    WSASetLastError(send_wsa_error);
     return error;
 }
 

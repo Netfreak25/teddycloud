@@ -6,6 +6,45 @@ Display metadata for directly assigned custom TAF files is separate from this TB
 
 ## Implementation overview
 
+### Local V3 chapter HTTPS send diagnostics
+
+Assigned native collections and TAF-derived V3 chapters emit paired `HTTPS chapter
+begin` / `HTTPS chapter end` records. A process-local atomic transfer ID correlates
+box identity, peer, RUID, zero-based chapter, file size and parsed Range values with
+the response status/length, TLS state and final internal error. It is independent
+of the older HTTP open-request counter, whose values can be reused.
+
+The end record reports positive bytes accepted by `send()`, call/short-write
+counts, last requested/returned length, last/maximum call duration, elapsed time
+and age of the last progress. These **wire bytes include HTTP/TLS overhead** and
+are neither an audio byte offset nor proof of delivery to the box. Durations use
+monotonic time; `-1` means unavailable (or no progress yet). Response length is the
+configured length, not evidence that the body was sent completely.
+
+`native_kind=errno` (Linux) or `winsock` (Windows), `native_valid` and `native_error`
+describe the last send call, captured before clocks/logging can change the native
+error. A zero-byte return or a failure outside `send()` does not invent a native
+error. One begin/end pair is emitted, with no per-buffer logs or payload capture.
+
+Changes by file:
+
+- `include/https_send_diag.h`, `src/https_send_diag.c`: small stack-owned,
+  thread-local observation bound to one socket; no registry, worker or queue.
+  Counters are accumulated in memory and the context is removed before end logging.
+- `src/platform/platform_linux.c`, `src/platform/platform_windows.c`: observe the
+  existing `send()` once, retaining its error state and original return mapping.
+  No socket flags, timeout, retry or connection lifetime changes.
+- `src/handler_cloud.c`: bracket only the existing synchronous local V3 chapter
+  send, including its errors; content selection and freshness handling are unchanged.
+- `tests/test_https_send_diag_runtime.py`, `tests/test_https_send_diag_runtime.c`:
+  controlled transport/clock checks exercise the production observation and sender.
+
+Cyclone and the transparent HTTPS DEV monitor are unchanged. Box log messages
+such as `tns_download_manager: Aborting download` remain diagnostic observations,
+not cancellation commands. Correlate their embedded and reception times with these
+records; neither a native socket error nor a successful write alone identifies
+whether a failure originated in firmware, WLAN or the server.
+
 ### Disk-backed browser encoding (separate from TAP source limits)
 
 See [BROWSER_ENCODER.md](BROWSER_ENCODER.md) for the format selector, preflight,

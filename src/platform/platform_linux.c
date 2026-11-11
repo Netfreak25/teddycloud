@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 
 #include "platform.h"
+#include "https_send_diag.h"
 #include "tls.h"
 #include "core/net.h"
 #include "core/ethernet.h"
@@ -214,8 +215,12 @@ error_t socketSend(Socket *socket, const void *data, size_t length,
         return NO_ERROR;
     }
 
-    // Send data
+    // Observe this call only when a local chapter response owns the socket.
+    int saved_errno = errno;
+    uint64_t send_started = https_send_diag_before(socket);
+    errno = saved_errno;
     n = send(socket->descriptor, data, length, MSG_NOSIGNAL);
+    int send_errno = errno;
 
     // Check return value
     if (n > 0)
@@ -241,6 +246,8 @@ error_t socketSend(Socket *socket, const void *data, size_t length,
         }
     }
 
+    https_send_diag_after(socket, length, n, n < 0 ? send_errno : 0, send_started);
+    errno = send_errno;
     return error;
 }
 
