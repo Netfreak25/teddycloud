@@ -3006,7 +3006,22 @@
     },
     "tonies": {
         "cacheDownload": {
+            "refreshV3": "Actualiser le contenu V3 depuis TONIES",
+            "refreshGroupHint": "Actualise le contenu original pour toutes les TB2 de ce groupe. La version existante reste disponible jusqu'à la fin du téléchargement.",
+            "refreshSaveFirst": "Enregistrez d'abord la source ou le format original modifié.",
+            "refreshBusy": "Un téléchargement est déjà en cours pour ce Tonie.",
+            "rejected": "Non accepté",
             "reasons": {
+                "refresh_status_unavailable": "Le statut de la tâche n'est plus disponible. Le résultat est inconnu ; aucun nouveau téléchargement n'est lancé automatiquement.",
+                "invalid_refresh": "Demande d'actualisation V3 invalide.",
+                "no_tb2_in_group": "Ce groupe de contenu ne contient aucune TB2.",
+                "refresh_not_accepted": "Aucune TB2 n'a accepté l'actualisation.",
+                "download_busy": "Un autre téléchargement est déjà en cours pour cette box et ce Tonie.",
+                "target_changed": "L'affectation de la box ou le dossier de contenu a changé.",
+                "already_queued": "L'actualisation est déjà en attente.",
+                "unchanged": "Déjà à jour",
+                "updated": "Actualisé",
+                "downloaded": "Téléchargé",
                 "private_source": "Une source locale est attribuée à ce Tonie.",
                 "nocloud": "L’accès au cloud est bloqué pour ce Tonie. Le contenu local reste disponible.",
                 "live_content": "Le contenu en direct n’est pas téléchargé dans le cache original.",

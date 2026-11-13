@@ -89,6 +89,25 @@ error_t handleApiOriginalCache(HttpConnection *connection, const char *uri,
     if (!original_api_overlay(query, ctx) ||
         !tb2_ruid_canonicalize(uri + strlen(ORIGINAL_CACHE_API), ruid))
         return original_api_error(connection, 400, "invalid_ruid_or_overlay");
+    char refresh[8];
+    if (!original_api_query(query, "refresh", refresh, sizeof(refresh)) ||
+        (refresh[0] && strcmp(refresh, "v3")))
+        return original_api_error(connection, 400, "invalid_refresh");
+    if (refresh[0])
+    {
+        cJSON *json = cJSON_CreateObject();
+        cJSON *targets = cJSON_AddArrayToObject(json, "targets");
+        if (!targets) { cJSON_Delete(json); return ERROR_OUT_OF_MEMORY; }
+        error_t error = original_content_cache_refresh_group(ctx->settings, ruid, targets);
+        cJSON_AddBoolToObject(json, "ok", error == NO_ERROR);
+        if (error)
+            cJSON_AddStringToObject(json, "error", error == ERROR_OUT_OF_MEMORY
+                ? "out_of_memory" : cJSON_GetArraySize(targets)
+                ? "refresh_not_accepted" : "no_tb2_in_group");
+        uint_t status = error == NO_ERROR ? 202 :
+            error == ERROR_OUT_OF_RESOURCES || error == ERROR_OUT_OF_MEMORY ? 503 : 409;
+        return original_api_json(connection, status, json);
+    }
     original_cache_format_t preferred = original_content_cache_preferred(ctx->settings, ruid);
     const char *reason = NULL;
     error_t error = original_content_cache_submit(ctx->settings, ruid,

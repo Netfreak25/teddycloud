@@ -718,6 +718,29 @@ static bool_t v3_native_route_is_tonieplay(const v3_native_route_t *route)
                                          route->chapter_count));
 }
 
+error_t v3_native_cache_manifests_same_content(
+    const uint8_t *previous, size_t previous_length,
+    const uint8_t *current, size_t current_length, bool_t *same)
+{
+    if (same == NULL)
+        return ERROR_INVALID_PARAMETER;
+    *same = FALSE;
+    if (previous == NULL || current == NULL || previous_length == 0 || current_length == 0 ||
+        previous_length > V3_NATIVE_CACHE_META_LIMIT || current_length > V3_NATIVE_CACHE_META_LIMIT)
+        return ERROR_INVALID_PARAMETER;
+    v3_native_route_t before = {0}, after = {0};
+    error_t error = v3_native_parse_manifest(previous, previous_length,
+        &before.version, before.content_type, &before.chapters, &before.chapter_count);
+    if (error == NO_ERROR)
+        error = v3_native_parse_manifest(current, current_length,
+            &after.version, after.content_type, &after.chapters, &after.chapter_count);
+    if (error == NO_ERROR)
+        *same = v3_native_routes_same_content(&before, &after);
+    v3_native_route_clear(&before);
+    v3_native_route_clear(&after);
+    return error;
+}
+
 static char *v3_native_generation_dir(const char *cache_root,
                                       const char *state,
                                       uint8_t overlay_id,

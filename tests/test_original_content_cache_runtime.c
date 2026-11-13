@@ -7,21 +7,43 @@
 #include <string.h>
 #define TRACE_LEVEL 0
 #include "../src/original_content_cache.c"
+#include "../src/original_content_api.c"
 
 static settings_t settings[MAX_OVERLAYS];
 static OsMutex locks[MUTEX_LAST];
 static atomic_uint calls;
 static unsigned order[64];
 static bool library_flags[64];
+static uint8_t owners[64];
+static bool refresh_flags[64];
 static atomic_bool adapter_wait;
 static error_t adapter_error[ORIGINAL_CACHE_FORMAT_COUNT];
 static bool local_complete[ORIGINAL_CACHE_FORMAT_COUNT];
 static const char *test_ruid = "8194F21C500304E0";
 static const char *auth_hex = "0102030405060708010203040506070801020304050607080102030405060708";
 static const char *cache_preference = "auto";
+static const char *refresh_result = "unchanged";
+static cJSON *http_result;
 
 settings_t *get_settings(void) { return &settings[0]; }
 settings_t *get_settings_id(uint8_t index) { assert(index < MAX_OVERLAYS); return &settings[index]; }
+uint8_t get_overlay_id(const char *owner)
+{
+    for (unsigned i = 1; i < MAX_OVERLAYS; i++)
+        if (same_text(settings[i].internal.overlayUniqueId, owner)) return (uint8_t)i;
+    return 0;
+}
+void httpPrepareHeader(HttpConnection *connection, const void *type, size_t length)
+{ (void)connection; (void)type; (void)length; }
+error_t httpWriteResponse(HttpConnection *connection, void *data, size_t size, bool_t release)
+{
+    (void)connection;
+    cJSON_Delete(http_result);
+    http_result = cJSON_ParseWithLength(data, size);
+    assert(http_result);
+    if (release) free(data);
+    return NO_ERROR;
+}
 void mutex_lock(mutex_id_t id) { osAcquireMutex(&locks[id]); }
 void mutex_unlock(mutex_id_t id) { osReleaseMutex(&locks[id]); }
 const settings_cert_t *tb2_client_identity_resolve(settings_t *value, const char **source)
@@ -57,13 +79,22 @@ error_t original_content_cache_materialize(original_content_cache_job_t *job,
     assert(index < 64);
     order[index] = format;
     library_flags[index] = library;
+    owners[index] = job->settings.internal.overlayNumber;
+    refresh_flags[index] = job->refresh_v3;
     assert(job->settings.cloud.remote_hostname != settings[1].cloud.remote_hostname);
     assert(!strcmp(job->settings.cloud.remote_hostname, "boxine.test"));
     assert(job->tb1_identity.key != settings[1].internal.client_tb1.key);
     assert(!strcmp(job->tb1_identity.key, "key"));
     assert(job->auth[0] == 1 && job->auth[31] == 8);
+    if (job->refresh_v3)
+    {
+        assert(format == ORIGINAL_CACHE_V3 && !job->both_formats && !job->automatic);
+        const settings_cert_t *identity = &settings[owners[index]].internal.client_tb2;
+        assert(job->tb2_identity.key != identity->key);
+        assert(!strcmp(job->tb2_identity.key, identity->key));
+    }
     while (atomic_load(&adapter_wait)) osDelayTask(1);
-    *reason = adapter_error[format] ? "transport_failure" : NULL;
+    *reason = adapter_error[format] ? "transport_failure" : job->refresh_v3 ? refresh_result : NULL;
     return adapter_error[format];
 }
 
@@ -276,12 +307,187 @@ static void worker_tests(void)
     puts("PASS worker: preferred first, serial formats, partial success, per-format library flags, no automatic retry, shutdown");
 }
 
+static void configure_refresh_group(void)
+{
+    for (unsigned i = 2; i <= 6; i++)
+    {
+        settings[i] = settings[1];
+        settings[i].internal.overlayNumber = (uint8_t)i;
+        settings[i].toniebox.boxGeneration = GENERATION_TB2;
+    }
+    settings[2].internal.overlayUniqueId = "box-b";
+    settings[2].boxName = "Blue";
+    settings[2].internal.client_tb2.key = "blue-key";
+    settings[3].internal.overlayUniqueId = "box-c";
+    settings[3].boxName = "Green";
+    settings[3].internal.client_tb2.key = "green-key";
+    settings[4].internal.overlayUniqueId = "tb1";
+    settings[4].toniebox.boxGeneration = GENERATION_TB1;
+    settings[5].internal.overlayUniqueId = "other-group";
+    settings[5].internal.contentdirfull = "other-content";
+    settings[6].internal.overlayUniqueId = "unused";
+    settings[6].internal.config_used = false;
+}
+
+static void discard_queued_jobs(void)
+{
+    for (unsigned i = 0; i < ORIGINAL_CONTENT_CACHE_CAPACITY; i++)
+        free_job(original_cache.records[i].job);
+    memset(original_cache.records, 0, sizeof(original_cache.records));
+}
+
+static const cJSON *target_at(const cJSON *targets, int index, const char *owner, bool accepted)
+{
+    const cJSON *target = cJSON_GetArrayItem(targets, index);
+    assert(target);
+    assert(!strcmp(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(target, "overlay")), owner));
+    assert(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(target, "accepted")) == accepted);
+    assert(!strcmp(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(target, "state")),
+                   accepted ? "queued" : "rejected"));
+    return target;
+}
+
+static void assert_reason(const cJSON *item, const char *reason)
+{
+    assert(!strcmp(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(item, "reason")), reason));
+}
+
+static void refresh_group_tests(void)
+{
+    configure_refresh_group();
+    assert(osCreateEvent(&original_cache.wake)); original_cache.ready = true;
+    cJSON *targets = cJSON_CreateArray();
+    assert(!original_content_cache_refresh_group(&settings[1], test_ruid, targets));
+    assert(cJSON_GetArraySize(targets) == 2 && pending_count() == 2);
+    target_at(targets, 0, "box-b", true); target_at(targets, 1, "box-c", true);
+    for (unsigned i = 0; i < 2; i++)
+    {
+        const original_content_cache_job_t *job = original_cache.records[i].job;
+        assert(job->refresh_v3 && job->preferred == ORIGINAL_CACHE_V3 && !job->both_formats);
+        assert(job->settings.internal.overlayNumber == i + 2);
+        assert(!strcmp(job->tb2_identity.key, i ? "green-key" : "blue-key"));
+    }
+    cJSON_Delete(targets);
+    targets = cJSON_CreateArray();
+    assert(!original_content_cache_refresh_group(&settings[1], test_ruid, targets));
+    assert(pending_count() == 2);
+    assert_reason(target_at(targets, 0, "box-b", true), "already_queued");
+    cJSON_Delete(targets);
+    const char *reason = NULL;
+    /* A V3-only refresh cannot satisfy a concurrent normal TAF/both-formats job. */
+    assert(original_content_cache_submit(&settings[2], test_ruid, ORIGINAL_CACHE_TAF,
+        false, 0, &reason) == ERROR_IN_PROGRESS);
+    assert(!strcmp(reason, "download_busy") && pending_count() == 2);
+    discard_queued_jobs();
+
+    assert(!original_content_cache_submit(&settings[2], test_ruid, ORIGINAL_CACHE_TAF, false, 0, &reason));
+    targets = cJSON_CreateArray();
+    assert(!original_content_cache_refresh_group(&settings[1], test_ruid, targets));
+    assert_reason(target_at(targets, 0, "box-b", false), "download_busy");
+    target_at(targets, 1, "box-c", true);
+    assert(!original_cache.records[0].job->refresh_v3 && original_cache.records[0].job->both_formats);
+    cJSON_Delete(targets); discard_queued_jobs();
+
+    /* A complete old cache must not waive permissions for the cloud recheck. */
+    local_complete[ORIGINAL_CACHE_V3] = true;
+    settings[2].cloud.enableV3Chapter = false;
+    settings[3].internal.client_tb2.key = NULL;
+    targets = cJSON_CreateArray();
+    assert(original_content_cache_refresh_group(&settings[1], test_ruid, targets) == ERROR_ACCESS_DENIED);
+    assert_reason(target_at(targets, 0, "box-b", false), "tonies_forwarding_disabled");
+    assert_reason(target_at(targets, 1, "box-c", false), "missing_tb2_certificates");
+    assert(!pending_count()); cJSON_Delete(targets);
+    settings[2].cloud.enableV3Chapter = true; settings[3].internal.client_tb2.key = "green-key";
+    write_policy(test_ruid, "lib://private.taf", false, auth_hex);
+    targets = cJSON_CreateArray();
+    assert(original_content_cache_refresh_group(&settings[1], test_ruid, targets) == ERROR_ACCESS_DENIED);
+    assert_reason(target_at(targets, 0, "box-b", false), "private_source");
+    assert_reason(target_at(targets, 1, "box-c", false), "private_source");
+    cJSON_Delete(targets);
+    puts("PASS refresh group: TB2-only root scope, owned identities, V3-only, dedup/busy, no cache policy bypass");
+}
+
+static uint_t call_cache_api(const char *query)
+{
+    HttpConnection connection = {0};
+    client_ctx_t ctx = {0};
+    char uri[64]; snprintf(uri, sizeof(uri), "/api/content/cache/%s", test_ruid);
+    assert(handleApiOriginalCache(&connection, uri, query, &ctx) == NO_ERROR);
+    return connection.response.statusCode;
+}
+
+static void refresh_api_tests(void)
+{
+    configure_refresh_group();
+    assert(osCreateEvent(&original_cache.wake)); original_cache.ready = true;
+    assert(call_cache_api("overlay=box-a") == 202);
+    assert(pending_count() == 1 && original_cache.records[0].job->both_formats);
+    assert(!original_cache.records[0].job->refresh_v3);
+    discard_queued_jobs();
+    assert(call_cache_api("overlay=box-a&refresh=taf") == 400 && !pending_count());
+    assert(call_cache_api("overlay=box-a&refresh=v3&refresh=v3") == 400 && !pending_count());
+    assert(call_cache_api("overlay=unknown&refresh=v3") == 400 && !pending_count());
+    settings[3].cloud.enableV3ContentMeta = false;
+    assert(call_cache_api("overlay=box-a&refresh=v3") == 202);
+    const cJSON *targets = cJSON_GetObjectItemCaseSensitive(http_result, "targets");
+    assert(cJSON_GetArraySize(targets) == 2);
+    target_at(targets, 0, "box-b", true);
+    assert_reason(target_at(targets, 1, "box-c", false), "tonies_forwarding_disabled");
+    discard_queued_jobs();
+    settings[2].cloud.enableV3ContentMeta = false;
+    assert(call_cache_api("overlay=box-a&refresh=v3") == 409 && !pending_count());
+    assert(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(http_result, "ok")));
+    assert(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(http_result, "targets")) == 2);
+    settings[2].cloud.enableV3ContentMeta = true; settings[3].cloud.enableV3ContentMeta = true;
+    original_cache.ready = false;
+    assert(call_cache_api("overlay=box-a&refresh=v3") == 503 && !pending_count());
+    cJSON_Delete(http_result); http_result = NULL;
+    puts("PASS refresh API: legacy POST, exact mode/overlay, partial 202, all-rejected 409 and unavailable 503");
+}
+
+static void refresh_worker_tests(void)
+{
+    configure_refresh_group();
+    original_content_cache_init(); assert(original_cache.ready);
+    const char *results[] = {"unchanged", "updated", "downloaded"};
+    for (unsigned pass = 0; pass < 4; pass++)
+    {
+        refresh_result = results[pass % 3];
+        adapter_error[ORIGINAL_CACHE_V3] = pass == 3 ? ERROR_TIMEOUT : NO_ERROR;
+        cJSON *targets = cJSON_CreateArray();
+        assert(!original_content_cache_refresh_group(&settings[1], test_ruid, targets));
+        cJSON_Delete(targets); wait_idle();
+        assert(atomic_load(&calls) == (pass + 1) * 2);
+        for (unsigned box = 2; box <= 3; box++)
+        {
+            cJSON *state = cJSON_CreateObject();
+            original_content_cache_add_status(state, &settings[box], test_ruid);
+            const cJSON *download = cJSON_GetObjectItemCaseSensitive(state, "download");
+            const cJSON *v3 = cJSON_GetObjectItemCaseSensitive(download, "v3");
+            assert(!strcmp(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(v3, "state")),
+                           pass == 3 ? "failed" : "complete"));
+            assert_reason(v3, pass == 3 ? "transport_failure" : refresh_result);
+            assert_reason(cJSON_GetObjectItemCaseSensitive(download, "taf"), "not_requested");
+            cJSON_Delete(state);
+        }
+    }
+    for (unsigned i = 0; i < 8; i++)
+        assert(order[i] == ORIGINAL_CACHE_V3 && refresh_flags[i] && owners[i] == 2 + i % 2);
+    osDelayTask(30);
+    assert(atomic_load(&calls) == 8 && !pending_count());
+    original_content_cache_deinit();
+    puts("PASS refresh worker: serial own-box V3-only jobs, honest outcomes/failures, no automatic follow-up");
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2); setup();
     if (!strcmp(argv[1], "queue")) queue_tests();
     else if (!strcmp(argv[1], "policy")) policy_tests();
     else if (!strcmp(argv[1], "worker")) worker_tests();
+    else if (!strcmp(argv[1], "refresh-group")) refresh_group_tests();
+    else if (!strcmp(argv[1], "refresh-api")) refresh_api_tests();
+    else if (!strcmp(argv[1], "refresh-worker")) refresh_worker_tests();
     else assert(!"unknown case");
     return 0;
 }

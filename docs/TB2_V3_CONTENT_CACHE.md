@@ -59,6 +59,43 @@ TAF Library backing uses a validated reference outside the content tree; see
 `librarySource` backing and original TONIES names. Neither worker changes
 freshness confirmation, MQTT or the transparent DEV proxy.
 
+### Explicit manual V3 refresh
+
+The Tonie editor's **V3 content refresh** button is an explicit operation, not a
+periodic cloud check. `POST /api/content/cache/<RUID>?overlay=<id>&refresh=v3`
+selects configured TB2 overlays sharing the selected overlay's effective content
+directory. Each target uses its own identity and permissions, irrespective of
+whether the box is online. Requests without `refresh` retain their existing
+behavior. No TAF complement is scheduled, even when dual-format caching is enabled.
+
+The existing serial worker fetches one current TONIES manifest per admitted
+target. It compares a detached snapshot of the prior active manifest using the
+cache's existing content identity: version, ordered objects, names, sizes and
+types. Auth-only changes are not new audio. Complete unchanged objects cause no
+chapter requests; a new or missing generation uses the existing staged download
+and optional Library import, without changing Source or NoCloud. Same-version
+content contradictions remain errors, including after a restart. Old complete
+generations and shared Library files are not deleted before a refresh.
+
+The response contains `targets` with `overlay`, `boxName`, `accepted`, `state`
+and an optional `reason`. HTTP 202 means at least one admitted or already-running
+refresh, not successful completion; other targets may be rejected. A normal
+download already running for the same box/tag returns `download_busy` rather than
+being mistaken for a refresh. No rejected job is automatically retried.
+
+Completion remains in `cacheState.download.v3`: `complete` with `unchanged`,
+`updated` or `downloaded` distinguishes an unchanged valid cache, a changed cloud
+generation and an initially missing cache. A failed cloud check or Library import
+remains a failure, even when the old cache is usable. The WebUI polls only local
+TC status for admitted, running targets while the editor is open. Closing it does
+not cancel an admitted job. Neither polling nor opening the editor contacts TONIES.
+
+Implementation is limited to the existing original-content API/worker/transfer
+modules, the V3 downloader and the cache's manifest comparison helper. The legacy
+direct-download path is not reused because it may assign a Library Source.
+The operation updates TC storage, not the box's current playback or Freshness
+confirmation rules.
+
 ### Read-only original audio export
 
 `GET /api/content/native/<RUID>?overlay=<id>` returns only a complete local audio

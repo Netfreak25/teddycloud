@@ -456,7 +456,22 @@
             "cancelledDetails": "native Collection naQbe' muchbe'. ru' teywI'mey teq."
         },
         "cacheDownload": {
+            "refreshV3": "TONIESvo' V3 De' chu' yItlhap",
+            "refreshGroupHint": "De' ghomvam Hoch TB2vaD De' motlh chu' tlhap. tlhapta'pa', De' ngo' lulo'laH.",
+            "refreshSaveFirst": "mung pagh De' Segh DachoHpu'bogh yIpol.",
+            "refreshBusy": "tonievam De' tlhaplI'lu'.",
+            "rejected": "lajbe'lu'",
             "reasons": {
+                "refresh_status_unavailable": "Qu' Dotlh tu'lu'be'choH. mIwvam ghu' Sovbe'lu'; De' tlhapqa'be'lu'.",
+                "invalid_refresh": "lughbe' V3 chu'moHmeH tlhob.",
+                "no_tb2_in_group": "De' ghomvamDaq TB2 tu'lu'be'.",
+                "refresh_not_accepted": "chu'moHmeH tlhob lajbe' Hoch TB2.",
+                "download_busy": "boxvam tonievam je De' latlh tlhaplI'lu'.",
+                "target_changed": "box De' lanmeH Daq choHlu'.",
+                "already_queued": "chu'moHmeH loSlI'.",
+                "unchanged": "chu'qu' De'",
+                "updated": "chu'moHta'",
+                "downloaded": "tlhapta'",
                 "private_source": "Tonie-vaD Daqvam Hal wIvlu'.",
                 "nocloud": "Tonie-vaD cloud naw' botlu'. De' DaqvamDaq polbogh lo'laH.",
                 "live_content": "Live De' cacheDaq tlhapbe'.",

@@ -35,6 +35,10 @@ def main():
             callbacks.append(function.group())
         fixture = fixture.replace("/* HANDLER_AUTH_AND_POLICY_FUNCTIONS */", helpers)
         fixture = fixture.replace("/* HANDLER_CHAPTER_CALLBACKS */", "\n\n".join(callbacks))
+        refresh = re.search(r"^error_t original_content_download_v3\([^;]*?\n\{[\s\S]*?^\}",
+                            handler, re.M)
+        assert refresh is not None
+        fixture = fixture.replace("/* HANDLER_ORIGINAL_DOWNLOAD */", refresh.group())
         generated = Path(directory) / "routes.c"
         generated.write_text(fixture, encoding="utf-8")
         sources[0] = str(generated)

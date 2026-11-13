@@ -28,6 +28,8 @@ typedef struct
     uint8_t auth[TONIE_AUTH_TOKEN_LENGTH];
     bool automatic;
     bool both_formats;
+    bool refresh_v3;
+    const char *refresh_result; /* Static outcome, set only after a successful cloud check. */
     original_cache_format_t preferred;
     uint32_t observed_version;
 } original_content_cache_job_t;
@@ -45,6 +47,12 @@ bool original_content_cache_playback_enabled(void);
 error_t original_content_cache_submit(settings_t *settings, const char *ruid,
     original_cache_format_t preferred, bool automatic, uint32_t observed_version,
     const char **reason);
+
+/** Explicit V3-only refresh for configured TB2s sharing this content root.
+ * Appends owned per-box admission results to targets; NO_ERROR means at least
+ * one accepted job, never that any download has already completed. */
+error_t original_content_cache_refresh_group(settings_t *settings,
+    const char *ruid, cJSON *targets);
 
 /** Read the per-tag original preference without repairing/writing metadata.
  * Missing/invalid preference falls back to the existing generation default. */

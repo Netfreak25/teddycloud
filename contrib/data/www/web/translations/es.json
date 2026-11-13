@@ -3006,7 +3006,22 @@
     },
     "tonies": {
         "cacheDownload": {
+            "refreshV3": "Actualizar el contenido V3 desde TONIES",
+            "refreshGroupHint": "Actualiza el contenido original para todas las TB2 de este grupo. La versión existente sigue disponible hasta que termine la descarga.",
+            "refreshSaveFirst": "Guarda primero los cambios de fuente o formato original.",
+            "refreshBusy": "Ya hay una descarga en curso para este Tonie.",
+            "rejected": "No aceptado",
             "reasons": {
+                "refresh_status_unavailable": "El estado de la tarea ya no está disponible. Se desconoce el resultado; no se inicia otra descarga automáticamente.",
+                "invalid_refresh": "Solicitud de actualización V3 no válida.",
+                "no_tb2_in_group": "Este grupo de contenido no contiene ninguna TB2.",
+                "refresh_not_accepted": "Ninguna TB2 ha aceptado la actualización.",
+                "download_busy": "Ya hay otra descarga en curso para esta box y este Tonie.",
+                "target_changed": "Ha cambiado la asignación de la box o el directorio de contenido.",
+                "already_queued": "La actualización ya está en cola.",
+                "unchanged": "Ya está actualizado",
+                "updated": "Actualizado",
+                "downloaded": "Descargado",
                 "private_source": "Este Tonie tiene una fuente local asignada.",
                 "nocloud": "El acceso a la nube está bloqueado para este Tonie. El contenido local sigue disponible.",
                 "live_content": "El contenido en directo no se descarga en la caché original.",

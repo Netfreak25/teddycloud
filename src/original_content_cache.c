@@ -342,6 +342,7 @@ static bool check_current_job(const original_content_cache_job_t *job,
     original_policy_t policy;
     const settings_t *snapshot = &job->settings;
     bool allowed = live->internal.config_used &&
+        (!job->refresh_v3 || live->toniebox.boxGeneration == GENERATION_TB2) &&
         same_text(live->internal.overlayUniqueId, job->owner) &&
         same_text(live->internal.contentdirfull, snapshot->internal.contentdirfull) &&
         same_text(live->internal.librarydirfull, snapshot->internal.librarydirfull) &&
@@ -468,8 +469,9 @@ static void original_worker(void *unused)
     }
 }
 
-error_t original_content_cache_submit(settings_t *settings, const char *ruid,
+static error_t submit_original_job(settings_t *settings, const char *ruid,
     original_cache_format_t preferred, bool automatic, uint32_t observed_version,
+    bool refresh_v3, const char *expected_owner, const char *expected_root,
     const char **reason)
 {
     if (reason) *reason = NULL;
@@ -479,7 +481,7 @@ error_t original_content_cache_submit(settings_t *settings, const char *ruid,
         return ERROR_INVALID_PARAMETER;
     mutex_lock(MUTEX_SETTINGS);
     bool mixed = mixed_boxes();
-    bool both = mixed && (automatic ? get_settings()->cloud.cacheBothFormatsOnPlayback :
+    bool both = !refresh_v3 && mixed && (automatic ? get_settings()->cloud.cacheBothFormatsOnPlayback :
         get_settings()->cloud.cacheBothFormatsOnDownload);
     if (automatic && !both)
     {
@@ -488,11 +490,15 @@ error_t original_content_cache_submit(settings_t *settings, const char *ruid,
         return ERROR_ABORTED;
     }
     original_policy_t policy;
-    const char *blocked = read_policy(settings, ruid, &policy);
+    const char *blocked = refresh_v3 &&
+        (!settings->internal.config_used || settings->toniebox.boxGeneration != GENERATION_TB2 ||
+         !same_text(settings->internal.overlayUniqueId, expected_owner) ||
+         !same_text(settings->internal.contentdirfull, expected_root))
+        ? "target_changed" : read_policy(settings, ruid, &policy);
     if (!blocked && !automatic && !both)
     {
         blocked = format_policy(settings, preferred);
-        if (blocked && complete_local_cache(settings, ruid, preferred)) blocked = NULL;
+        if (blocked && !refresh_v3 && complete_local_cache(settings, ruid, preferred)) blocked = NULL;
     }
     original_content_cache_job_t *job = blocked ? NULL : copy_job(settings, ruid, &policy);
     mutex_unlock(MUTEX_SETTINGS);
@@ -503,6 +509,7 @@ error_t original_content_cache_submit(settings_t *settings, const char *ruid,
     }
     job->automatic = automatic;
     job->both_formats = both;
+    job->refresh_v3 = refresh_v3;
     job->preferred = preferred;
     job->observed_version = observed_version;
     mutex_lock(MUTEX_ORIGINAL_CONTENT_CACHE);
@@ -517,6 +524,13 @@ error_t original_content_cache_submit(settings_t *settings, const char *ruid,
     {
         original_record_t *record = &original_cache.records[i];
         if (!record->valid || strcmp(record->owner, job->owner) || strcmp(record->ruid, job->ruid)) continue;
+        if (record->job && record->job->refresh_v3 != refresh_v3)
+        {
+            mutex_unlock(MUTEX_ORIGINAL_CONTENT_CACHE);
+            free_job(job);
+            if (reason) *reason = "download_busy";
+            return ERROR_IN_PROGRESS;
+        }
         if (record->job || (automatic && record->observed_version == observed_version &&
             record->observed_format == preferred))
         {
@@ -559,6 +573,66 @@ error_t original_content_cache_submit(settings_t *settings, const char *ruid,
     mutex_unlock(MUTEX_ORIGINAL_CONTENT_CACHE);
     osSetEvent(&original_cache.wake);
     return NO_ERROR;
+}
+
+error_t original_content_cache_submit(settings_t *settings, const char *ruid,
+    original_cache_format_t preferred, bool automatic, uint32_t observed_version,
+    const char **reason)
+{
+    return submit_original_job(settings, ruid, preferred, automatic, observed_version,
+                               false, NULL, NULL, reason);
+}
+
+error_t original_content_cache_refresh_group(settings_t *settings,
+    const char *ruid, cJSON *targets)
+{
+    if (!settings || !cJSON_IsArray(targets) || cJSON_GetArraySize(targets))
+        return ERROR_INVALID_PARAMETER;
+    uint8_t ids[MAX_OVERLAYS];
+    size_t count = 0;
+    /* Copy identities/names before admission; submit rechecks both identity and
+     * group under SETTINGS. Never nest that lock or keep option pointers across it. */
+    mutex_lock(MUTEX_SETTINGS);
+    char *root = settings->internal.contentdirfull
+        ? strdup(settings->internal.contentdirfull) : NULL;
+    error_t error = root ? NO_ERROR : ERROR_OUT_OF_MEMORY;
+    for (unsigned i = 1; !error && i < MAX_OVERLAYS; i++)
+    {
+        settings_t *box = get_settings_id(i);
+        if (!box->internal.config_used || box->toniebox.boxGeneration != GENERATION_TB2 ||
+            !same_text(root, box->internal.contentdirfull) || !box->internal.overlayUniqueId)
+            continue;
+        cJSON *target = cJSON_CreateObject();
+        if (!target || !cJSON_AddStringToObject(target, "overlay", box->internal.overlayUniqueId) ||
+            !cJSON_AddStringToObject(target, "boxName", box->boxName ? box->boxName : box->internal.overlayUniqueId) ||
+            !cJSON_AddItemToArray(targets, target))
+        {
+            cJSON_Delete(target);
+            error = ERROR_OUT_OF_MEMORY;
+            break;
+        }
+        ids[count++] = (uint8_t)i;
+    }
+    mutex_unlock(MUTEX_SETTINGS);
+    if (error) { free(root); return error; }
+    size_t accepted = 0, index = 0;
+    error_t rejection = ERROR_ACCESS_DENIED;
+    cJSON *target;
+    cJSON_ArrayForEach(target, targets)
+    {
+        const char *owner = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(target, "overlay"));
+        const char *reason = NULL;
+        error = submit_original_job(get_settings_id(ids[index++]), ruid,
+            ORIGINAL_CACHE_V3, false, 0, true, owner, root, &reason);
+        cJSON_AddBoolToObject(target, "accepted", error == NO_ERROR);
+        cJSON_AddStringToObject(target, "state", error == NO_ERROR ? "queued" : "rejected");
+        if (reason) cJSON_AddStringToObject(target, "reason", reason);
+        if (!error) accepted++;
+        else if (error == ERROR_OUT_OF_RESOURCES || error == ERROR_OUT_OF_MEMORY)
+            rejection = error;
+    }
+    free(root);
+    return accepted ? NO_ERROR : rejection;
 }
 
 void original_content_cache_add_status(cJSON *cache_state, const settings_t *settings,

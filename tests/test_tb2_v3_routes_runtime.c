@@ -173,6 +173,84 @@ static void complete_generation(const char *ruid, uint32_t version, const char *
     assert(v3_native_cache_active_version(TEST_CACHE, TEST_OVERLAY, ruid, NULL));
 }
 
+static unsigned refresh_requests;
+static const char *refresh_scenario;
+/* Control only the network/download boundary; use the real cache snapshots and
+ * identity comparison in the production job wrapper below. */
+static error_t v3_content_download_run(HttpConnection *connection, const char *ruid,
+    const contentJson_t *content, client_ctx_t *client,
+    const original_content_cache_job_t *job, uint32_t *completed_version)
+{
+    assert(connection == NULL && !strcmp(ruid, CONTENT_RUID));
+    assert(!*content->source && client->settings == &job->settings && job->refresh_v3);
+    refresh_requests++;
+    if (!strcmp(refresh_scenario, "failure"))
+        return ERROR_TIMEOUT;
+    if (!strcmp(refresh_scenario, "unchanged"))
+    {
+        v3_native_cache_meta_capture_t meta;
+        v3_native_cache_meta_capture_init(&meta, TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY, ruid);
+        meta_body_auth(&meta, 7, "original.opus", NULL, "new-auth");
+        assert(v3_native_cache_meta_capture_finish(&meta) == NO_ERROR);
+        v3_native_cache_download_plan_t plan;
+        assert(v3_native_cache_download_plan_from_meta(&meta, &plan) == NO_ERROR);
+        v3_native_cache_meta_capture_abort(&meta);
+        v3_native_cache_chapter_capture_t capture;
+        char *path = NULL;
+        /* This is the same cache decision used before a chapter GET in the
+         * actual download runner. Auth-only refresh must reuse the object. */
+        assert(v3_native_cache_chapter_prepare_plan(TEST_CACHE, TEST_LIBRARY, &plan,
+            plan.objects[0].name, &capture, &path) == V3_NATIVE_CHAPTER_SERVE);
+        assert(path && fsFileExists(path));
+        free(path);
+        v3_native_cache_chapter_abort(&capture);
+        v3_native_cache_download_plan_free(&plan);
+        *completed_version = 7;
+    }
+    else
+    {
+        complete_generation(ruid, 8, "updated.opus");
+        *completed_version = 8;
+    }
+    if (!strcmp(refresh_scenario, "race"))
+        complete_generation(ruid, 9, "concurrent.opus");
+    return NO_ERROR;
+}
+
+/* HANDLER_ORIGINAL_DOWNLOAD */
+
+static void check_refresh_result(const char *scenario, const char *result)
+{
+    refresh_scenario = scenario;
+    original_content_cache_job_t job = {0};
+    job.refresh_v3 = true;
+    job.settings.internal.cachedirfull = TEST_CACHE;
+    job.settings.internal.librarydirfull = TEST_LIBRARY;
+    job.settings.internal.overlayNumber = TEST_OVERLAY;
+    strcpy(job.ruid, CONTENT_RUID);
+    strcpy(job.upstream_ruid, CONTENT_RUID);
+    if (strcmp(scenario, "downloaded"))
+        complete_generation(CONTENT_RUID, 7, "original.opus");
+    error_t error = original_content_download_v3(&job);
+    assert(original_content_download_v3(NULL) == ERROR_INVALID_PARAMETER);
+    assert(refresh_requests == 1);
+    if (result != NULL)
+        assert(error == NO_ERROR && job.refresh_result && !strcmp(job.refresh_result, result));
+    else
+    {
+        assert(error != NO_ERROR && job.refresh_result == NULL);
+        uint32_t active = 0;
+        assert(v3_native_cache_active_version(TEST_CACHE, TEST_OVERLAY, CONTENT_RUID, &active));
+        assert(active == (!strcmp(scenario, "failure") ? 7U : 9U));
+    }
+}
+
+static void test_refresh_unchanged(void) { check_refresh_result("unchanged", "unchanged"); }
+static void test_refresh_updated(void) { check_refresh_result("updated", "updated"); }
+static void test_refresh_downloaded(void) { check_refresh_result("downloaded", "downloaded"); }
+static void test_refresh_failure(void) { check_refresh_result("failure", NULL); }
+static void test_refresh_race(void) { check_refresh_result("race", NULL); }
+
 static void test_interleaved_content_and_system_manifest(void)
 {
     manifest(CONTENT_RUID, 7, "original.opus", NULL, FALSE);
@@ -1057,6 +1135,9 @@ static void test_auth_refresh_still_rejects_content_changes(void)
         }
         char *raw = cJSON_PrintUnformatted(root);
         assert(raw != NULL);
+        bool_t same = TRUE;
+        assert(v3_native_cache_manifests_same_content((uint8_t *)original, strlen(original),
+            (uint8_t *)raw, strlen(raw), &same) == NO_ERROR && !same);
         v3_native_cache_meta_capture_t meta;
         v3_native_cache_meta_capture_init(&meta, TEST_CACHE, TEST_LIBRARY,
                                            TEST_OVERLAY, CONTENT_RUID);
@@ -1272,6 +1353,11 @@ static void write_test_file(const char *path, const char *text);
 
 static void seed_restart(const char *scenario)
 {
+    if (!strcmp(scenario, "restart-refresh-identity"))
+    {
+        complete_generation(CONTENT_RUID, 7, "original.opus");
+        return;
+    }
     if (!strcmp(scenario, "restart-auth"))
     {
         const char *ruids[] = {CONTENT_RUID, SYSTEM_RUID};
@@ -1333,6 +1419,22 @@ static void seed_restart(const char *scenario)
     if (!strcmp(scenario, "restart-complete-staging") || !strcmp(scenario, "restart-staged-marker") ||
         !strcmp(scenario, "restart-complete-no-cache"))
         write_test_file(TEST_CACHE "/v3-native/staging/5/" CONTENT_RUID "/7/chapters/second.opus", "OggS");
+}
+
+static void test_restart_refresh_identity(void)
+{
+    v3_native_cache_meta_capture_t meta;
+    v3_native_cache_meta_capture_init(&meta, TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY, CONTENT_RUID);
+    meta_body(&meta, 7, "changed.opus", NULL);
+    assert(v3_native_cache_meta_capture_finish(&meta) == ERROR_INVALID_FILE);
+    v3_native_cache_meta_capture_abort(&meta);
+    uint8_t *manifest_data = NULL;
+    size_t length = 0;
+    uint32_t version = 0;
+    assert(v3_native_cache_read_active_manifest(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+        CONTENT_RUID, &manifest_data, &length, &version) == NO_ERROR);
+    assert(version == 7 && strstr((const char *)manifest_data, "original.opus"));
+    free(manifest_data);
 }
 
 static v3_native_cache_chapter_action_t restart_prepare(
@@ -1755,6 +1857,12 @@ static void test_audio_snapshot_readonly_and_rejections(void)
 int main(int argc, char **argv)
 {
     struct { const char *name; void (*run)(void); } cases[] = {
+        {"refresh-unchanged", test_refresh_unchanged},
+        {"refresh-updated", test_refresh_updated},
+        {"refresh-downloaded", test_refresh_downloaded},
+        {"refresh-failure", test_refresh_failure},
+        {"refresh-race", test_refresh_race},
+        {"restart-refresh-identity", test_restart_refresh_identity},
         {"interleaved", test_interleaved_content_and_system_manifest},
         {"audio-snapshot-backing", test_audio_snapshot_cache_and_library},
         {"audio-snapshot-readonly", test_audio_snapshot_readonly_and_rejections},

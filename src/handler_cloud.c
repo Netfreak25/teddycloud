@@ -5054,8 +5054,11 @@ static error_t v3_manual_download_assign_library_source(
 static error_t v3_content_download_run(HttpConnection *connection, const char *ruid,
                                      const contentJson_t *content,
                                      client_ctx_t *client_ctx,
-                                     const original_content_cache_job_t *job)
+                                     const original_content_cache_job_t *job,
+                                     uint32_t *completed_version)
 {
+    if (completed_version != NULL)
+        *completed_version = 0;
     char canonical_ruid[TB2_RUID_SIZE];
     settings_t *settings = client_ctx != NULL ? client_ctx->settings : NULL;
     if (settings == NULL)
@@ -5341,8 +5344,13 @@ static error_t v3_content_download_run(HttpConnection *connection, const char *r
 
     /* Jobs import through the cache adapter, never assign a private source. */
     if (job != NULL)
-        return original_content_cache_job_allowed(job, ORIGINAL_CACHE_V3)
-                   ? NO_ERROR : ERROR_ABORTED;
+    {
+        if (!original_content_cache_job_allowed(job, ORIGINAL_CACHE_V3))
+            return ERROR_ABORTED;
+        if (completed_version != NULL)
+            *completed_version = version;
+        return NO_ERROR;
+    }
 
     if (tonieplay)
     {
@@ -5471,13 +5479,33 @@ error_t handleCloudContentDownloadV3(HttpConnection *connection, const char *rui
 {
     if (connection == NULL)
         return ERROR_INVALID_PARAMETER;
-    return v3_content_download_run(connection, ruid, content, client_ctx, NULL);
+    return v3_content_download_run(connection, ruid, content, client_ctx, NULL, NULL);
 }
 
 error_t original_content_download_v3(original_content_cache_job_t *job)
 {
+    if (job == NULL)
+        return ERROR_INVALID_PARAMETER;
+    job->refresh_result = NULL;
     if (!original_content_cache_job_allowed(job, ORIGINAL_CACHE_V3))
         return ERROR_ACCESS_DENIED;
+    uint8_t *previous = NULL;
+    size_t previous_length = 0;
+    uint32_t previous_version = 0;
+    if (job->refresh_v3)
+    {
+        error_t snapshot_error = v3_native_cache_read_active_manifest(
+            job->settings.internal.cachedirfull, job->settings.internal.librarydirfull,
+            job->settings.internal.overlayNumber, job->ruid,
+            &previous, &previous_length, &previous_version);
+        if (snapshot_error != NO_ERROR)
+        {
+            osFreeMem(previous);
+            previous = NULL;
+            if (snapshot_error != ERROR_FILE_NOT_FOUND && snapshot_error != ERROR_INVALID_FILE)
+                return snapshot_error;
+        }
+    }
     contentJson_t content = {0};
     content.source = "";
     content.cloud_auth = job->auth;
@@ -5487,7 +5515,31 @@ error_t original_content_download_v3(original_content_cache_job_t *job)
     content.cloud_ruid = job->upstream_ruid;
     client_ctx_t ctx = {0};
     ctx.settings = &job->settings;
-    return v3_content_download_run(NULL, job->ruid, &content, &ctx, job);
+    uint32_t completed_version = 0;
+    error_t error = v3_content_download_run(NULL, job->ruid, &content, &ctx, job,
+                                           &completed_version);
+    if (error == NO_ERROR && job->refresh_v3)
+    {
+        uint8_t *current = NULL;
+        size_t current_length = 0;
+        uint32_t current_version = 0;
+        bool_t same = FALSE;
+        error = v3_native_cache_read_active_manifest(
+            job->settings.internal.cachedirfull, job->settings.internal.librarydirfull,
+            job->settings.internal.overlayNumber, job->ruid,
+            &current, &current_length, &current_version);
+        /* A concurrent generation change is not the result of this request. */
+        if (error == NO_ERROR && current_version != completed_version)
+            error = ERROR_ABORTED;
+        if (error == NO_ERROR && previous != NULL)
+            error = v3_native_cache_manifests_same_content(previous, previous_length,
+                                                            current, current_length, &same);
+        if (error == NO_ERROR)
+            job->refresh_result = previous == NULL ? "downloaded" : same ? "unchanged" : "updated";
+        osFreeMem(current);
+    }
+    osFreeMem(previous);
+    return error;
 }
 
 error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)

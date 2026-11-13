@@ -47,6 +47,7 @@ static const char *ruid = "8194F21C500304E0";
 static const char *raw = "content/8194F21C/500304E0";
 static uint8_t taf_bytes[TONIEFILE_FRAME_SIZE * 2];
 static unsigned requests;
+static unsigned v3_downloads, v3_imports;
 
 settings_t *get_settings(void) { return &settings[0]; }
 settings_t *get_settings_id(uint8_t id) { assert(id < 3); return &settings[id]; }
@@ -77,7 +78,43 @@ void getContentPathFromCharRUID(char id[17], char **path, settings_t *config)
 bool original_content_cache_job_allowed(const original_content_cache_job_t *job, original_cache_format_t format)
 { (void)job; assert(format == ORIGINAL_CACHE_TAF); return true; }
 bool original_content_cache_job_current(const original_content_cache_job_t *job, original_cache_format_t format)
-{ (void)job; assert(format == ORIGINAL_CACHE_TAF); return true; }
+{ (void)job; assert(format == ORIGINAL_CACHE_TAF || format == ORIGINAL_CACHE_V3); return true; }
+
+bool_t v3_native_cache_active_info(const char *cache, const char *library, uint8_t overlay,
+    const char *id, uint32_t *version, size_t *objects, bool_t *tonieplay)
+{
+    (void)cache; (void)library; (void)overlay; (void)objects;
+    assert(!strcmp(id, ruid));
+    if (version) *version = 7;
+    if (tonieplay) *tonieplay = FALSE;
+    return TRUE;
+}
+
+error_t original_content_download_v3(original_content_cache_job_t *job)
+{
+    assert(job->refresh_v3);
+    v3_downloads++;
+    if (!strcmp(scenario, "v3-refresh-failed")) return ERROR_TIMEOUT;
+    job->refresh_result = "unchanged";
+    return NO_ERROR;
+}
+
+error_t v3_native_cache_import_active_library_version(const char *cache, const char *library,
+    uint8_t overlay, const char *id, uint32_t version, char **source)
+{
+    (void)cache; (void)library; (void)overlay; (void)source;
+    assert(!strcmp(id, ruid) && version == 7);
+    v3_imports++;
+    return !strcmp(scenario, "v3-import-failed") ? ERROR_WRITE_FAILED : NO_ERROR;
+}
+
+error_t v3_native_cache_import_active_tonieplay_library_version(const char *cache,
+    const char *library, uint8_t overlay, const char *id, uint32_t version)
+{
+    (void)cache; (void)library; (void)overlay; (void)id; (void)version;
+    assert(!"unexpected Tonieplay import");
+    return ERROR_INVALID_PARAMETER;
+}
 void fillBaseCtx(HttpConnection *connection, const char *uri, const char *query,
     cloudapi_t api, cbr_ctx_t *ctx, client_ctx_t *client)
 {
@@ -213,6 +250,28 @@ static void check_transfer(void)
     assert(!fsFileExists("content/8194F21C/500304E0.json"));
 }
 
+static void check_v3_materialize(void)
+{
+    original_content_cache_job_t job = {0};
+    job.settings = settings[0];
+    strcpy(job.ruid, ruid);
+    job.refresh_v3 = strcmp(scenario, "v3-cache-hit") != 0;
+    const char *reason = NULL;
+    bool import = !strcmp(scenario, "v3-import-failed");
+    error_t error = original_content_cache_materialize(&job, ORIGINAL_CACHE_V3, import, &reason);
+    assert(v3_downloads == (job.refresh_v3 ? 1U : 0U));
+    assert(v3_imports == (import ? 1U : 0U));
+    if (!strcmp(scenario, "v3-refresh-failed"))
+        assert(error == ERROR_TIMEOUT && reason == NULL);
+    else if (import)
+        assert(error == ERROR_WRITE_FAILED && reason == NULL && job.refresh_result == NULL);
+    else if (job.refresh_v3)
+        assert(error == NO_ERROR && reason && !strcmp(reason, "unchanged"));
+    else
+        assert(error == NO_ERROR && reason == NULL);
+    assert(requests == 0); /* Explicit V3 refresh never enters the TAF transport. */
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2); scenario = argv[1];
@@ -225,6 +284,7 @@ int main(int argc, char **argv)
     if (!strcmp(scenario, "query")) check_query();
     else if (!strcmp(scenario, "overlay")) check_overlay();
     else if (!strcmp(scenario, "uint")) check_uint();
+    else if (!strncmp(scenario, "v3-", 3)) check_v3_materialize();
     else check_transfer();
     for (size_t i = 0; i < MUTEX_LAST; i++) osDeleteMutex(&locks[i]);
     printf("PASS original API/transfer boundary: %s\n", scenario);

@@ -3006,7 +3006,22 @@
     },
     "tonies": {
         "cacheDownload": {
+            "refreshV3": "Refresh V3 content from TONIES",
+            "refreshGroupHint": "Refreshes original content for every TB2 in this content group. The existing version remains available until the download is complete.",
+            "refreshSaveFirst": "Save the changed source or original format selection first.",
+            "refreshBusy": "A download for this Tonie is already in progress.",
+            "rejected": "Not accepted",
             "reasons": {
+                "refresh_status_unavailable": "The job status is no longer available. The outcome is unknown; no new download is started automatically.",
+                "invalid_refresh": "Invalid V3 refresh request.",
+                "no_tb2_in_group": "This content group has no TB2.",
+                "refresh_not_accepted": "No TB2 accepted the refresh.",
+                "download_busy": "Another download is already running for this box and Tonie.",
+                "target_changed": "The box assignment or content directory changed.",
+                "already_queued": "The refresh is already queued.",
+                "unchanged": "Already up to date",
+                "updated": "Updated",
+                "downloaded": "Downloaded",
                 "private_source": "This Tonie has an assigned local source.",
                 "nocloud": "Cloud access is blocked for this Tonie. Local content remains available.",
                 "live_content": "Live content is not downloaded into the original cache.",

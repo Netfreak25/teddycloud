@@ -176,6 +176,12 @@ typedef struct
 /** Accept only one portable, unambiguous filename segment. */
 bool_t v3_native_cache_chapter_name_is_safe(const char *name);
 
+/** Compare validated content identity, ignoring refreshable auth values and
+ * JSON formatting. This reads no files and does not publish a runtime route. */
+error_t v3_native_cache_manifests_same_content(
+    const uint8_t *previous, size_t previous_length,
+    const uint8_t *current, size_t current_length, bool_t *same);
+
 /** Explicitly publish and pin a locally delivered manifest, unlike status reads. */
 error_t v3_native_cache_open_active_manifest(const char *cache_root,
                                              const char *library_root,

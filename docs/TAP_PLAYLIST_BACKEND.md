@@ -6,6 +6,30 @@ Display metadata for directly assigned custom TAF files is separate from this TB
 
 ## Implementation overview
 
+### Manual V3 cloud refresh (TAF behavior unchanged)
+
+The Tonie editor can explicitly check all TB2s in its content group for a current
+TONIES manifest. Unchanged content, including auth-only changes, causes no audio
+download. The operation uses the existing serial original-content worker; it is
+not a periodic check and never requests a TAF complement. See
+[TB2_V3_CONTENT_CACHE.md](TB2_V3_CONTENT_CACHE.md#explicit-manual-v3-refresh) for
+the API, per-box results and failure semantics.
+
+Changes by file:
+
+- `src/original_content_api.c`: optional `refresh=v3` admission with per-box
+  results; the existing empty-body normal download remains compatible.
+- `src/original_content_cache.c`, `include/original_content_cache.h`: explicit
+  refresh intent and owned group targets reuse existing jobs, locks and policy
+  checks instead of creating another worker or borrowing a group's first identity.
+- `src/original_content_transfer.c`: bypass only the V3 complete-cache shortcut
+  for refresh jobs. TAF transfer, dual-format defaults and Source remain unchanged.
+- `src/handler_cloud.c`: take a detached prior-manifest snapshot and report the
+  actual completed refresh result; reuse the source-preserving job download path
+  rather than the legacy direct downloader's automatic Source assignment.
+- `src/v3_native_cache.c`, `include/v3_native_cache.h`: reuse the existing parser
+  and stable content comparison instead of comparing raw JSON/auth bytes.
+
 ### Local V3 chapter HTTPS send diagnostics
 
 Assigned native collections and TAF-derived V3 chapters emit paired `HTTPS chapter

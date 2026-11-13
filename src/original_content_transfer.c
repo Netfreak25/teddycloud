@@ -155,7 +155,7 @@ error_t original_content_cache_materialize(original_content_cache_job_t *job,
     uint32_t version = 0;
     bool_t tonieplay = false;
     error_t error = NO_ERROR;
-    if (!v3_native_cache_active_info(settings->internal.cachedirfull,
+    if (job->refresh_v3 || !v3_native_cache_active_info(settings->internal.cachedirfull,
         settings->internal.librarydirfull, settings->internal.overlayNumber,
         job->ruid, &version, NULL, &tonieplay))
     {
@@ -176,5 +176,9 @@ error_t original_content_cache_materialize(original_content_cache_job_t *job,
                 settings->internal.librarydirfull, settings->internal.overlayNumber,
                 job->ruid, version, NULL);
     }
+    if (error == NO_ERROR && job->refresh_v3 && reason != NULL)
+        *reason = job->refresh_result;
+    if (error != NO_ERROR && job->refresh_v3)
+        job->refresh_result = NULL;
     return error;
 }
