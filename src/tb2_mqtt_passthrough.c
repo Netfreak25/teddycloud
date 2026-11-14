@@ -224,6 +224,7 @@ struct tb2_mqtt_passthrough_session {
     Socket *box_socket;
     settings_t *box_settings;
     tb2_mqtt_publish_observer_t observer;
+    tb2_mqtt_publish_observer_t cloud_interceptor;
     tb2_mqtt_control_observer_t control_observer;
     tb2_mqtt_publish_completed_t publish_completed;
     tb2_mqtt_subscription_snapshot_t subscription_snapshot;
@@ -2970,9 +2971,9 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
         }
     }
 
-    const bool_t local_consume =
+    bool_t local_consume =
         observer_result.action == TB2_MQTT_OBSERVER_CONSUME;
-    const bool_t local_rewrite =
+    bool_t local_rewrite =
         observer_result.action == TB2_MQTT_OBSERVER_REWRITE &&
         observer_result.payload != NULL;
 
@@ -3014,6 +3015,41 @@ static error_t tb2_mqtt_process_packet(tb2_mqtt_passthrough_session_t *session,
         blocked = mqtt_forward_filter_should_block(session->box_settings, topic,
             filtered_payload, filtered_payload_len, &manual_filter);
         if (blocked) filter_id = manual_filter;
+    }
+
+    /* A cloud refresh may be deferred until the replacement is complete. This
+     * hook cannot schedule work for a publish rejected by either filter. */
+    if (!blocked && !box_to_upstream && session->cloud_interceptor != NULL)
+    {
+        tb2_mqtt_observer_result_t intercepted = {0};
+        error_t intercept_error = session->cloud_interceptor(
+            session->observer_context, FALSE, topic, filtered_payload,
+            filtered_payload_len, qos, &intercepted);
+        if (!intercept_error &&
+            (intercepted.action == TB2_MQTT_OBSERVER_CONSUME ||
+             (intercepted.action == TB2_MQTT_OBSERVER_REWRITE && intercepted.payload != NULL)))
+        {
+            osFreeMem(observer_result.payload);
+            observer_result = intercepted;
+            local_consume = intercepted.action == TB2_MQTT_OBSERVER_CONSUME;
+            local_rewrite = !local_consume;
+            blocked = local_consume;
+            filter_id = intercepted.filter_id;
+            if (local_rewrite)
+            {
+                filtered_payload = intercepted.payload;
+                filtered_payload_len = intercepted.payload_len;
+            }
+        }
+        else
+        {
+            osFreeMem(intercepted.payload);
+            if (intercept_error)
+            {
+                TRACE_WARNING("TB2 MQTT permitted cloud publish interception failed code=%d; forwarding retained\r\n",
+                              (int)intercept_error);
+            }
+        }
     }
 
     uint8_t *rebuilt_packet = NULL;
@@ -3629,6 +3665,12 @@ bool_t tb2_mqtt_passthrough_is_upstream_connected(const tb2_mqtt_passthrough_ses
         !session->capture_failed && !session->privacy_failed;
     osReleaseMutex(&mqtt_passthrough_status.mutex);
     return connected && tb2_mqtt_passthrough_is_enabled();
+}
+
+void tb2_mqtt_passthrough_set_cloud_interceptor(tb2_mqtt_passthrough_session_t *session,
+                                               tb2_mqtt_publish_observer_t interceptor)
+{
+    if (session != NULL) session->cloud_interceptor = interceptor;
 }
 
 error_t tb2_mqtt_passthrough_start(TlsContext *box_tls, Socket *box_socket,

@@ -26,6 +26,7 @@
 #include "tb2_client_identity.h"
 #include "tb2_ota_cache.h"
 #include "tb2_ruid.h"
+#include "tb2_nocloud_policy.h"
 #include "v3_local_content.h"
 #include "v3_native_cache.h"
 #include "original_content_cache.h"
@@ -58,12 +59,15 @@ static bool_t v3_native_original_content_allowed(settings_t *settings,
                                                   const char *ruid,
                                                   bool_t require_cloud);
 static error_t v3_local_write_empty_status(HttpConnection *connection, uint16_t status_code);
+static void freshness_original_passive_complete(settings_t *settings,
+    const char *ruid, uint32_t version);
 
 typedef struct
 {
     cbr_ctx_t passthrough;
     v3_native_cache_meta_capture_t cache;
     const original_content_cache_job_t *job;
+    uint64_t sync_generation;
     error_t cache_error;
     bool_t finished;
 } v3_native_meta_cbr_t;
@@ -102,6 +106,8 @@ static void v3_native_import_library_if_enabled(client_ctx_t *client_ctx,
     {
         return;
     }
+
+    freshness_original_passive_complete(client_ctx->settings, ruid, active_version);
 
     if (!tonieplay)
     {
@@ -313,6 +319,10 @@ static void v3_native_meta_body(void *source, HttpClientContext *cloud,
         }
         else if (context->job == NULL)
         {
+            uint64_t uid = 0;
+            if (tb2_ruid_to_uid(context->cache.ruid, &uid))
+                mqtt_server_original_manifest_observed(settings->internal.overlayNumber,
+                    uid, context->sync_generation, context->cache.version);
             v3_native_import_library_if_enabled(
                 context->passthrough.client_ctx, context->cache.ruid,
                 context->cache.version);
@@ -2185,17 +2195,22 @@ static bool_t freshness_uid_array_contains(const uint64_t *items, size_t len, ui
     return FALSE;
 }
 
-static bool_t freshness_settings_array_contains(settings_t *settings, const char *key, uint64_t uid)
+static bool_t freshness_settings_array_contains_locked(settings_t *settings, const char *key, uint64_t uid)
 {
     if (settings == NULL || key == NULL)
     {
         return FALSE;
     }
 
-    mutex_lock(MUTEX_MQTT_SESSION);
     size_t len = 0;
     uint64_t *items = settings_get_u64_array_id(key, settings->internal.overlayNumber, &len);
-    bool_t found = freshness_uid_array_contains(items, len, uid);
+    return freshness_uid_array_contains(items, len, uid);
+}
+
+static bool_t freshness_settings_array_contains(settings_t *settings, const char *key, uint64_t uid)
+{
+    mutex_lock(MUTEX_MQTT_SESSION);
+    bool_t found = freshness_settings_array_contains_locked(settings, key, uid);
     mutex_unlock(MUTEX_MQTT_SESSION);
     return found;
 }
@@ -2382,17 +2397,15 @@ void freshness_cache_sync_source_changed_uids(settings_t *settings)
     osFreeMem(updated);
 }
 
-static bool_t freshness_cache_remove_uid(settings_t *settings, uint64_t uid)
+static bool_t freshness_cache_remove_uid_locked(settings_t *settings, uint64_t uid)
 {
     if (settings == NULL)
     {
         return FALSE;
     }
 
-    mutex_lock(MUTEX_MQTT_SESSION);
     if (!freshness_settings_array_remove_uid(settings, "internal.freshnessCache", uid))
     {
-        mutex_unlock(MUTEX_MQTT_SESSION);
         return FALSE;
     }
     freshness_cache_remove_source_changed_uid(settings, uid);
@@ -2403,8 +2416,15 @@ static bool_t freshness_cache_remove_uid(settings_t *settings, uint64_t uid)
     {
         settings_set_bool_id("internal.freshnessCacheChanged", false, settings->internal.overlayNumber);
     }
-    mutex_unlock(MUTEX_MQTT_SESSION);
     return TRUE;
+}
+
+static bool_t freshness_cache_remove_uid(settings_t *settings, uint64_t uid)
+{
+    mutex_lock(MUTEX_MQTT_SESSION);
+    bool_t removed = freshness_cache_remove_uid_locked(settings, uid);
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    return removed;
 }
 
 static void freshness_clear_cache_after_v3_request(settings_t *settings, const char *ruid)
@@ -2437,7 +2457,13 @@ static void freshness_clear_cache_after_content_request(client_ctx_t *client_ctx
         return;
     }
 
-    freshness_clear_cache_after_v3_request(client_ctx->settings, ruid);
+    /* Original V3 delivery is not proof that the box adopted this version. */
+    tonie_info_t *info = getTonieInfoFromRuid((char *)ruid, FALSE, client_ctx->settings);
+    bool_t original = info != NULL &&
+        (info->json.source == NULL || info->json.source[0] == '\0');
+    if (info != NULL) freeTonieInfo(info);
+    if (!original)
+        freshness_clear_cache_after_v3_request(client_ctx->settings, ruid);
 }
 
 static void freshness_store_v3_inventory(settings_t *settings, TonieFreshnessCheckRequest *freshReq)
@@ -2532,7 +2558,30 @@ static uint32_t freshness_audio_id_compare_value(uint32_t audio_id, bool_t *isCu
     return audio_id;
 }
 
-static bool_t freshness_get_natural_server_audio_id(tonie_info_t *tonieInfo, uint32_t *audio_id, bool_t *tap_has_audio_id)
+/** Read the same complete original generation that the TB2 metadata route serves.
+ * Source assignments and an available explicitly selected TAF remain authoritative. */
+static bool_t freshness_original_selected_version(settings_t *settings,
+    tonie_info_t *tonie_info, uint64_t uid, uint32_t *version)
+{
+    if (settings == NULL || tonie_info == NULL || version == NULL ||
+        settings->toniebox.boxGeneration != GENERATION_TB2 ||
+        (tonie_info->json.source != NULL && tonie_info->json.source[0] != '\0'))
+        return FALSE;
+    bool_t prefer_taf = tonie_info->json.cache_preference != NULL &&
+        !osStrcmp(tonie_info->json.cache_preference, CONTENT_JSON_CACHE_PREFERENCE_TAF);
+    if (prefer_taf && tonie_info->exists && tonie_info->valid &&
+        tonie_info->tafHeader != NULL &&
+        tonie_info->json._source_type != CT_SOURCE_TAF_INCOMPLETE)
+        return FALSE;
+    char ruid[TB2_RUID_SIZE];
+    tb2_ruid_from_uid(uid, ruid);
+    return v3_native_cache_active_info(settings->internal.cachedirfull,
+        settings->internal.librarydirfull, settings->internal.overlayNumber,
+        ruid, version, NULL, NULL);
+}
+
+static bool_t freshness_get_natural_server_audio_id(settings_t *settings,
+    tonie_info_t *tonieInfo, uint64_t uid, uint32_t *audio_id, bool_t *tap_has_audio_id)
 {
     if (tap_has_audio_id != NULL)
     {
@@ -2568,6 +2617,9 @@ static bool_t freshness_get_natural_server_audio_id(tonie_info_t *tonieInfo, uin
         return TRUE;
     }
 
+    if (freshness_original_selected_version(settings, tonieInfo, uid, audio_id))
+        return TRUE;
+
     if (tonieInfo->valid && tonieInfo->tafHeader != NULL)
     {
         *audio_id = tonieInfo->tafHeader->audio_id;
@@ -2575,6 +2627,198 @@ static bool_t freshness_get_natural_server_audio_id(tonie_info_t *tonieInfo, uin
     }
 
     return FALSE;
+}
+
+/** Automatic cloud synchronization is narrower than legacy cloud_override:
+ * private sources, NoCloud and explicit TAF selection are never auto-refreshed. */
+uint64_t freshness_original_cloud_hint_for_target(settings_t *settings, const char *ruid)
+{
+    uint64_t uid = 0;
+    tb2_nocloud_policy_t policy;
+    if (settings == NULL || !settings->internal.config_used ||
+        settings->internal.overlayNumber == 0 ||
+        settings->toniebox.boxGeneration != GENERATION_TB2 ||
+        !tb2_ruid_to_uid(ruid, &uid) ||
+        !tb2_nocloud_policy_resolve(settings, ruid, &policy) ||
+        policy.kind != TB2_RUID_CONTENT || policy.nocloud)
+        return 0;
+    tonie_info_t *info = getTonieInfoFromUid(uid, FALSE, settings);
+    bool_t eligible = info != NULL && !info->json.live &&
+        (info->json.source == NULL || info->json.source[0] == '\0') &&
+        (info->json.cache_preference == NULL ||
+         osStrcmp(info->json.cache_preference, CONTENT_JSON_CACHE_PREFERENCE_TAF));
+    if (info != NULL) freeTonieInfo(info);
+    return eligible ? mqtt_server_original_cloud_hint(settings->internal.overlayNumber, uid) : 0;
+}
+
+uint64_t freshness_original_cloud_pending_for_target(settings_t *settings, const char *ruid)
+{
+    uint64_t uid = 0;
+    return settings != NULL && tb2_ruid_to_uid(ruid, &uid)
+        ? mqtt_server_original_cloud_pending(settings->internal.overlayNumber, uid) : 0;
+}
+
+bool_t freshness_original_cloud_hint(settings_t *settings, const char *ruid)
+{
+    return original_content_cache_sync_group(settings, ruid) == NO_ERROR;
+}
+
+/** The caller has resolved immutable cache data outside the lifetime lock.
+ * Reuse the notification ledger; equal targets must not restart its QoS flow. */
+static void freshness_original_reconcile_locked(settings_t *settings, uint64_t uid,
+    uint32_t version, bool_t box_known, uint32_t box_version, bool_t notify_unknown)
+{
+    /* A consumed explicit cloud hint must not disappear simply because this
+     * connection has not submitted an inventory yet. Manual imports stay quiet. */
+    if (!box_known && !notify_unknown)
+        return;
+    bool_t source_changed = freshness_settings_array_contains_locked(settings,
+        "internal.freshnessCacheSourceChangedUids", uid);
+    if (box_known && box_version == version && !source_changed)
+    {
+        if (mqtt_server_original_confirm_locked(settings->internal.overlayNumber, uid, version))
+            freshness_cache_remove_uid_locked(settings, uid);
+    }
+    else if (freshness_cache_add_uid(settings, uid, NULL))
+        mqtt_server_original_target_locked(settings->internal.overlayNumber, uid, version);
+}
+
+/* A box-driven download can finish even if no background job was admitted.
+ * Only the manifest observed for this exact hint/version may finish its check. */
+static void freshness_original_passive_complete(settings_t *settings,
+    const char *ruid, uint32_t version)
+{
+    uint64_t uid = 0;
+    if (settings == NULL || !tb2_ruid_to_uid(ruid, &uid)) return;
+    tonie_info_t *info = getTonieInfoFromUid(uid, FALSE, settings);
+    uint32_t selected = 0;
+    bool_t matches = freshness_original_selected_version(settings, info, uid, &selected) &&
+        selected == version;
+    if (info != NULL) freeTonieInfo(info);
+    if (!matches) return;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    if (mqtt_server_original_cached_locked(settings->internal.overlayNumber, uid, version))
+    {
+        uint32_t box_version = 0;
+        bool_t known = freshness_inventory_find_uid(settings, uid, &box_version);
+        freshness_original_reconcile_locked(settings, uid, version, known, box_version, FALSE);
+    }
+    mutex_unlock(MUTEX_MQTT_SESSION);
+}
+
+void original_content_cache_v3_complete(original_content_cache_job_t *job, uint32_t version)
+{
+    if (job == NULL || !original_content_cache_job_current(job, ORIGINAL_CACHE_V3))
+        return;
+    settings_t *settings = get_settings_id(job->settings.internal.overlayNumber);
+    uint64_t uid = 0;
+    if (settings == NULL || !tb2_ruid_to_uid(job->ruid, &uid) ||
+        settings->internal.overlayUniqueId == NULL ||
+        osStrcmp(settings->internal.overlayUniqueId, job->owner))
+        return;
+    tonie_info_t *info = getTonieInfoFromUid(uid, FALSE, settings);
+    uint32_t selected = 0;
+    bool_t matches = freshness_original_selected_version(settings, info, uid, &selected) &&
+        selected == version;
+    if (info != NULL) freeTonieInfo(info);
+    if (!matches)
+        return;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    if (settings->internal.overlayUniqueId != NULL &&
+        !osStrcmp(settings->internal.overlayUniqueId, job->owner) &&
+        settings->internal.contentdirfull != NULL &&
+        !osStrcmp(settings->internal.contentdirfull, job->settings.internal.contentdirfull) &&
+        mqtt_server_original_cloud_checked_locked(settings->internal.overlayNumber,
+                                                  uid, job->sync_generation))
+    {
+        uint32_t box_version = 0;
+        bool_t known = freshness_inventory_find_uid(settings, uid, &box_version);
+        freshness_original_reconcile_locked(settings, uid, version, known, box_version,
+                                             job->sync_generation != 0);
+    }
+    mutex_unlock(MUTEX_MQTT_SESSION);
+}
+
+/** Defer only original-cache mismatches until their cloud comparison is known.
+ * No network or slow cache reads are performed while holding the state lock. */
+void freshness_original_finish_response(cbr_ctx_t *ctx)
+{
+    if (ctx == NULL || ctx->freshnessOriginals == NULL || ctx->client_ctx == NULL)
+        return;
+    settings_t *settings = ctx->client_ctx->settings;
+    if (settings == NULL || ctx->freshnessOwner == NULL ||
+        settings->internal.overlayUniqueId == NULL ||
+        osStrcmp(ctx->freshnessOwner, settings->internal.overlayUniqueId))
+        return;
+    TonieFreshnessCheckResponse *response = ctx->customData;
+    for (size_t i = 0; i < ctx->freshnessOriginalCount; i++)
+    {
+        v3_original_freshness_t *entry = &ctx->freshnessOriginals[i];
+        if (!entry->original) continue;
+        tonie_info_t *info = getTonieInfoFromUid(entry->uid, FALSE, settings);
+        uint32_t version = 0;
+        bool_t complete = freshness_original_selected_version(settings, info, entry->uid, &version);
+        bool_t local_only = info != NULL && info->json.nocloud;
+        bool_t still_original = info != NULL && !info->json.live &&
+            (info->json.source == NULL || info->json.source[0] == '\0');
+        if (info != NULL) freeTonieInfo(info);
+        if (!still_original) continue;
+        bool_t needs_cloud = entry->requested && ctx->freshnessCloudValid &&
+            (entry->stale || (entry->complete && entry->query_version != entry->cache_version));
+        bool_t same_cache = complete == entry->complete && (!complete || version == entry->cache_version);
+        uint64_t pending = mqtt_server_original_cloud_pending(settings->internal.overlayNumber, entry->uid);
+        char ruid[TB2_RUID_SIZE];
+        tb2_ruid_from_uid(entry->uid, ruid);
+        bool_t admitted = FALSE;
+        bool_t attempted = !local_only && needs_cloud && same_cache && pending == entry->hint_generation;
+        if (attempted)
+            admitted = freshness_original_cloud_hint(settings, ruid);
+
+        /* Remove the speculative old-cache decision; append only the resolved
+         * current target below. Unrelated/private decisions remain untouched. */
+        size_t kept = 0;
+        for (size_t n = 0; n < response->n_tonie_marked; n++)
+            if (response->tonie_marked[n] != entry->uid)
+                response->tonie_marked[kept++] = response->tonie_marked[n];
+        response->n_tonie_marked = kept;
+
+        mutex_lock(MUTEX_MQTT_SESSION);
+        if (settings->internal.overlayUniqueId == NULL ||
+            osStrcmp(ctx->freshnessOwner, settings->internal.overlayUniqueId))
+        {
+            mutex_unlock(MUTEX_MQTT_SESSION);
+            continue;
+        }
+        bool_t verified = entry->requested && ctx->freshnessCloudValid && !needs_cloud && same_cache;
+        if (local_only || verified)
+            mqtt_server_original_cloud_checked_locked(settings->internal.overlayNumber,
+                entry->uid, local_only
+                    ? mqtt_server_original_cloud_pending_locked(settings->internal.overlayNumber, entry->uid)
+                    : entry->hint_generation);
+        pending = mqtt_server_original_cloud_pending_locked(settings->internal.overlayNumber, entry->uid);
+        /* Unknown/failed cloud state must not newly roll a box back. A new
+         * completed job independently queues its version-checked target. */
+        bool_t use_local = complete && pending == 0 &&
+            (local_only || verified || !entry->requested || !same_cache);
+        if (use_local)
+        {
+            freshness_original_reconcile_locked(settings, entry->uid, version, TRUE, entry->box_version, FALSE);
+            if (version != entry->box_version || freshness_settings_array_contains_locked(settings,
+                    "internal.freshnessCacheSourceChangedUids", entry->uid))
+            {
+                if (freshness_response_add_uid(response, ctx->customDataLen, entry->uid) &&
+                    !mqtt_server_freshness_bind_original_locked(ctx->freshnessSnapshot, entry->uid, version))
+                    TRACE_WARNING("Could not reserve original V3 notification for HTTP; MQTT remains pending\r\n");
+            }
+        }
+        else if (attempted && !admitted)
+        {
+            /* No worker capacity/cache/auth: retain the ordinary permitted
+             * box-driven cloud route, with the explicit recheck reason intact. */
+            freshness_response_add_uid(response, ctx->customDataLen, entry->uid);
+        }
+        mutex_unlock(MUTEX_MQTT_SESSION);
+    }
 }
 
 static void freshness_forced_version_clear(settings_t *settings)
@@ -2855,13 +3099,15 @@ static bool_t freshness_get_effective_server_audio_id(settings_t *settings, toni
     {
         *forced = FALSE;
     }
-    if (!freshness_get_natural_server_audio_id(tonieInfo, &naturalAudioId, tap_has_audio_id))
+    if (!freshness_get_natural_server_audio_id(settings, tonieInfo, uid, &naturalAudioId, tap_has_audio_id))
     {
         return FALSE;
     }
 
     uint32_t forcedAudioId = 0;
-    if (freshness_forced_version_find(settings, uid, naturalAudioId, &forcedAudioId))
+    uint32_t originalVersion = 0;
+    if (!freshness_original_selected_version(settings, tonieInfo, uid, &originalVersion) &&
+        freshness_forced_version_find(settings, uid, naturalAudioId, &forcedAudioId))
     {
         *audio_id = forcedAudioId;
         if (forced != NULL)
@@ -2882,7 +3128,14 @@ static bool_t freshness_set_forced_version_for_source_change(settings_t *setting
                                                              uint32_t boxAudioId)
 {
     uint32_t naturalAudioId = 0;
-    if (!freshness_get_natural_server_audio_id(tonieInfo, &naturalAudioId, NULL))
+    /* Original manifests retain their real TONIES version, including when
+     * switching back from a private source. Never synthesize an original ID. */
+    if (freshness_original_selected_version(settings, tonieInfo, uid, &naturalAudioId))
+    {
+        freshness_forced_version_remove(settings, uid);
+        return TRUE;
+    }
+    if (!freshness_get_natural_server_audio_id(settings, tonieInfo, uid, &naturalAudioId, NULL))
     {
         return FALSE;
     }
@@ -2963,13 +3216,31 @@ bool_t freshness_confirm_v3_content_version(settings_t *settings, const char *ru
 {
     uint64_t uid = 0;
     if (settings == NULL || settings->toniebox.boxGeneration != GENERATION_TB2 ||
-        !freshness_ruid_to_uid(ruid, &uid) ||
-        !freshness_cache_source_changed_contains(settings, uid))
+        !freshness_ruid_to_uid(ruid, &uid))
     {
         return FALSE;
     }
 
     tonie_info_t *tonieInfo = getTonieInfoFromUid(uid, false, settings);
+    uint32_t originalVersion = 0;
+    if (freshness_original_selected_version(settings, tonieInfo, uid, &originalVersion))
+    {
+        freeTonieInfo(tonieInfo);
+        mutex_lock(MUTEX_MQTT_SESSION);
+        bool_t matching = content_version == originalVersion &&
+            mqtt_server_original_confirm_locked(settings->internal.overlayNumber, uid, originalVersion);
+        bool_t confirmed = matching && freshness_cache_remove_uid_locked(settings, uid);
+        mutex_unlock(MUTEX_MQTT_SESSION);
+        if (confirmed)
+            TRACE_INFO("Confirmed original V3 version for rUID %s via MQTT playback: %" PRIu32 "\r\n",
+                       ruid, originalVersion);
+        return confirmed;
+    }
+    if (!freshness_cache_source_changed_contains(settings, uid))
+    {
+        if (tonieInfo != NULL) freeTonieInfo(tonieInfo);
+        return FALSE;
+    }
     uint32_t expectedVersion = freshness_v3_content_meta_version(settings,
                                                                   tonieInfo,
                                                                   ruid,
@@ -3024,12 +3295,14 @@ static void freshness_evaluate_tonie(settings_t *settings, tonie_info_t *tonieIn
     bool_t tap_has_audio_id = FALSE;
     uint32_t naturalServerAudioId = 0;
 
-    if (freshness_get_natural_server_audio_id(tonieInfo, &naturalServerAudioId, &tap_has_audio_id))
+    if (freshness_get_natural_server_audio_id(settings, tonieInfo, uid, &naturalServerAudioId, &tap_has_audio_id))
     {
         uint32_t effectiveServerAudioId = naturalServerAudioId;
         uint32_t forcedServerAudioId = 0;
         decision->naturalServerAudioIdRaw = naturalServerAudioId;
-        if (freshness_forced_version_find(settings, uid, naturalServerAudioId, &forcedServerAudioId))
+        uint32_t originalVersion = 0;
+        if (!freshness_original_selected_version(settings, tonieInfo, uid, &originalVersion) &&
+            freshness_forced_version_find(settings, uid, naturalServerAudioId, &forcedServerAudioId))
         {
             effectiveServerAudioId = forcedServerAudioId;
             decision->forced_server_audio_id = TRUE;
@@ -3161,7 +3434,7 @@ static void freshness_evaluate_tonie(settings_t *settings, tonie_info_t *tonieIn
     }
 }
 
-void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckRequest *freshReq, TonieFreshnessCheckResponse *freshResp, TonieFreshnessCheckRequest *freshReqCloud, size_t *freshnessCacheLenOut, bool_t allow_cloud_override, const mqtt_freshness_snapshot_t *snapshot)
+void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckRequest *freshReq, TonieFreshnessCheckResponse *freshResp, TonieFreshnessCheckRequest *freshReqCloud, size_t *freshnessCacheLenOut, bool_t allow_cloud_override, const mqtt_freshness_snapshot_t *snapshot, cbr_ctx_t *v3_ctx)
 {
     settings_t *settings = client_ctx->settings;
     TRACE_INFO("Found %" PRIuSIZE " tonies:\n", freshReq->n_tonie_infos);
@@ -3227,6 +3500,26 @@ void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckReques
         tonie_info_t *tonieInfo = getTonieInfoFromUid(uid, false, settings);
         freshness_decision_t decision;
 
+        v3_original_freshness_t *original = v3_ctx != NULL ? &v3_ctx->freshnessOriginals[i] : NULL;
+        if (original != NULL && tonieInfo != NULL &&
+            (tonieInfo->json.source == NULL || tonieInfo->json.source[0] == '\0') &&
+            !tonieInfo->json.live)
+        {
+            original->uid = uid;
+            original->upstream_uid = uid;
+            original->box_version = freshReq->tonie_infos[i]->audio_id;
+            original->complete = freshness_original_selected_version(settings, tonieInfo, uid,
+                                                                       &original->cache_version);
+            original->original = original->complete || tonieInfo->json.cache_preference == NULL ||
+                osStrcmp(tonieInfo->json.cache_preference, CONTENT_JSON_CACHE_PREFERENCE_TAF);
+            original->cloud_allowed = !tonieInfo->json.nocloud;
+            if (tonieInfo->json.cloud_override &&
+                !tb2_ruid_to_uid(tonieInfo->json.cloud_ruid, &original->upstream_uid))
+                original->cloud_allowed = FALSE;
+            original->hint_generation = mqtt_server_original_cloud_pending(
+                settings->internal.overlayNumber, uid);
+        }
+
         freshness_evaluate_tonie(settings, tonieInfo, uid, freshReq->tonie_infos[i]->audio_id, FALSE, TRUE, &decision);
 
         if (cache_stale && !source_changed_stale && !decision.should_mark_freshness)
@@ -3248,10 +3541,13 @@ void process_freshness_check(client_ctx_t *client_ctx, TonieFreshnessCheckReques
         bool_t forward_to_cloud = tonieInfo != NULL &&
                                   (!tonieInfo->json.nocloud ||
                                    (allow_cloud_override && tonieInfo->json.cloud_override));
+        if (original != NULL && original->original && !original->cloud_allowed)
+            forward_to_cloud = FALSE;
         if (forward_to_cloud)
         {
             freshReqCloud->tonie_infos[freshReqCloud->n_tonie_infos] = freshReq->tonie_infos[i];
-            if (decision.serverAudioIdAvailable)
+            /* V3 builds owned cloud values later; never replace the box inventory. */
+            if (decision.serverAudioIdAvailable && !allow_cloud_override)
             {
                 freshReqCloud->tonie_infos[freshReqCloud->n_tonie_infos]->audio_id = decision.serverAudioId;
             }
@@ -3311,6 +3607,9 @@ static bool_t freshness_mark_content_mapping_changed_for_overlay(settings_t *set
                                  &decision);
         should_mark_freshness = should_mark_freshness || decision.should_mark_freshness;
     }
+    uint32_t original_version = 0;
+    bool_t selected_original = freshness_original_selected_version(settings,
+        tonieInfo, uid, &original_version);
 
     /* Publish the cache, source marker and notification generation as one
      * state change. Slow content/version evaluation above stays outside. */
@@ -3332,6 +3631,8 @@ static bool_t freshness_mark_content_mapping_changed_for_overlay(settings_t *set
                        (source_changed ? "source changed" : "freshness comparison"),
                    inventory_available ? "present" : "absent");
         mqtt_server_publish_fresh_tonie_for_overlay_locked(settings->internal.overlayNumber, uid);
+        if (selected_original)
+            mqtt_server_original_target_locked(settings->internal.overlayNumber, uid, original_version);
         queued = TRUE;
     }
     mutex_unlock(MUTEX_MQTT_SESSION);
@@ -3445,7 +3746,7 @@ error_t handleCloudFreshnessCheck(HttpConnection *connection, const char_t *uri,
             TonieFreshnessCheckRequest freshReqCloud = TONIE_FRESHNESS_CHECK_REQUEST__INIT;
             size_t freshnessCacheLen = 0;
 
-            process_freshness_check(client_ctx, freshReq, &freshResp, &freshReqCloud, &freshnessCacheLen, FALSE, NULL);
+            process_freshness_check(client_ctx, freshReq, &freshResp, &freshReqCloud, &freshnessCacheLen, FALSE, NULL, NULL);
 
             if (settings->cloud.enabled && settings->cloud.enableV1FreshnessCheck)
             {
@@ -3575,7 +3876,9 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
         i++;
     }
     freshReq.n_tonie_infos = i;
+    mutex_lock(MUTEX_MQTT_SESSION);
     freshness_store_v3_inventory(client_ctx->settings, validContent ? &freshReq : NULL);
+    mutex_unlock(MUTEX_MQTT_SESSION);
     
     TonieFreshnessCheckResponse freshResp = TONIE_FRESHNESS_CHECK_RESPONSE__INIT;
     TonieFreshnessCheckRequest freshReqCloud = TONIE_FRESHNESS_CHECK_REQUEST__INIT;
@@ -3592,13 +3895,29 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
         return ERROR_OUT_OF_MEMORY;
     }
 
+    ctx.freshnessOriginalCount = freshReq.n_tonie_infos;
+    ctx.freshnessOriginals = calloc(ctx.freshnessOriginalCount, sizeof(*ctx.freshnessOriginals));
+    ctx.freshnessOwner = client_ctx->settings->internal.overlayUniqueId != NULL
+        ? strdup(client_ctx->settings->internal.overlayUniqueId) : NULL;
+    if (ctx.freshnessOwner == NULL || (ctx.freshnessOriginalCount != 0 && ctx.freshnessOriginals == NULL))
+    {
+        mqtt_server_freshness_finish(ctx.freshnessSnapshot, FALSE);
+        free(ctx.freshnessOriginals);
+        free(ctx.freshnessOwner);
+        free(fcInfos);
+        free(freshReq.tonie_infos);
+        cJSON_Delete(inputJson);
+        return ERROR_OUT_OF_MEMORY;
+    }
     process_freshness_check(client_ctx, &freshReq, &freshResp, &freshReqCloud,
-                            &freshnessCacheLen, TRUE, ctx.freshnessSnapshot);
+                            &freshnessCacheLen, TRUE, ctx.freshnessSnapshot, &ctx);
     ctx.customDataLen = freshReq.n_tonie_infos + freshnessCacheLen;
     if ((ctx.customDataLen > 0 && freshResp.tonie_marked == NULL) ||
         (freshReq.n_tonie_infos > 0 && freshReqCloud.tonie_infos == NULL))
     {
         mqtt_server_freshness_finish(ctx.freshnessSnapshot, FALSE);
+        free(ctx.freshnessOriginals);
+        free(ctx.freshnessOwner);
         free(fcInfos);
         free(freshReq.tonie_infos);
         free(freshReqCloud.tonie_infos);
@@ -3617,15 +3936,45 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
         for (size_t k = 0; requestReady && k < freshReqCloud.n_tonie_infos; k++)
         {
             char ruidStr[17], uidStr[17];
-            osSprintf(uidStr, "%016" PRIX64, freshReqCloud.tonie_infos[k]->uid);
+            uint64_t upstream_uid = freshReqCloud.tonie_infos[k]->uid;
+            uint32_t upstream_version = freshReqCloud.tonie_infos[k]->audio_id;
+            for (size_t n = 0; n < ctx.freshnessOriginalCount; n++)
+            {
+                v3_original_freshness_t *original = &ctx.freshnessOriginals[n];
+                if (original->original && original->uid == upstream_uid)
+                {
+                    upstream_uid = original->upstream_uid;
+                    upstream_version = original->complete ? original->cache_version : original->box_version;
+                    original->requested = TRUE;
+                    break;
+                }
+            }
+            osSprintf(uidStr, "%016" PRIX64, upstream_uid);
             for (size_t j = 0; j < 8; j++)
             {
                 ruidStr[j * 2] = uidStr[14 - j * 2];
                 ruidStr[j * 2 + 1] = uidStr[15 - j * 2];
             }
             ruidStr[16] = '\0';
-            requestReady = cJSON_AddNumberToObject(cloudContentObj, ruidStr,
-                               freshReqCloud.tonie_infos[k]->audio_id) != NULL;
+            cJSON *previous = cJSON_GetObjectItemCaseSensitive(cloudContentObj, ruidStr);
+            /* Aliases sharing one cloud RUID use the lowest known version so a
+             * stale cache cannot be hidden by another local alias. */
+            if (previous != NULL)
+            {
+                if (upstream_version < previous->valuedouble)
+                    cJSON_SetNumberValue(previous, upstream_version);
+            }
+            else
+                requestReady = cJSON_AddNumberToObject(cloudContentObj, ruidStr, upstream_version) != NULL;
+        }
+        for (size_t n = 0; requestReady && n < ctx.freshnessOriginalCount; n++)
+        {
+            v3_original_freshness_t *original = &ctx.freshnessOriginals[n];
+            if (!original->requested) continue;
+            char mapped_ruid[TB2_RUID_SIZE];
+            tb2_ruid_from_uid(original->upstream_uid, mapped_ruid);
+            const cJSON *sent = cJSON_GetObjectItemCaseSensitive(cloudContentObj, mapped_ruid);
+            if (cJSON_IsNumber(sent)) original->query_version = (uint32_t)sent->valuedouble;
         }
         char *cloudRequest = requestReady ? cJSON_PrintUnformatted(cloudReqJson) : NULL;
         ctx.freshnessCloudUids = malloc(sizeof(uint64_t) * freshReqCloud.n_tonie_infos);
@@ -3634,7 +3983,19 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
         {
             ctx.freshnessCloudUidCount = freshReqCloud.n_tonie_infos;
             for (size_t k = 0; k < ctx.freshnessCloudUidCount; k++)
+            {
                 ctx.freshnessCloudUids[k] = freshReqCloud.tonie_infos[k]->uid;
+                for (size_t n = 0; n < ctx.freshnessOriginalCount; n++)
+                {
+                    const v3_original_freshness_t *original = &ctx.freshnessOriginals[n];
+                    if (original->original && original->requested &&
+                        original->uid == ctx.freshnessCloudUids[k])
+                    {
+                        ctx.freshnessCloudUids[k] = original->upstream_uid;
+                        break;
+                    }
+                }
+            }
             error = cloud_request_tb2_post(client_ctx->settings->cloud.remote_hostname_tb2,
                 0, uri, queryString, (const uint8_t *)cloudRequest,
                 osStrlen(cloudRequest), NULL, &cbr);
@@ -3651,6 +4012,8 @@ error_t handleCloudFreshnessCheckV3(HttpConnection *connection, const char_t *ur
     /* Also covers a failed cloud connect/read: if no response was started,
      * answer the existing local decision. DONE prevents any second response. */
     error = finishFreshnessResponseV3(&ctx);
+    free(ctx.freshnessOriginals);
+    free(ctx.freshnessOwner);
     free(ctx.freshnessCloudUids);
     osFreeMem(ctx.buffer);
     free(fcInfos);
@@ -5570,11 +5933,13 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
     bool_t source_configured = tonieInfo->json.source != NULL &&
                                tonieInfo->json.source[0] != '\0';
     uint64_t cache_uid = 0;
-    bool_t cache_stale = cache_ruid_valid &&
+    bool_t cache_stale = cache_ruid_valid && !source_configured && !tonieInfo->json.nocloud &&
                          freshness_ruid_to_uid(canonical_ruid, &cache_uid) &&
-                         freshness_settings_array_contains(client_ctx->settings,
-                                                           "internal.freshnessCache",
-                                                           cache_uid);
+                         mqtt_server_original_cloud_pending(
+                             client_ctx->settings->internal.overlayNumber, cache_uid) != 0;
+    /* A box mismatch alone never invalidates a complete original cache. */
+    if (cache_ruid_valid)
+        freshness_ruid_to_uid(canonical_ruid, &cache_uid);
     bool_t prefer_taf_cache =
         tonieInfo->json.cache_preference != NULL &&
         !osStrcmp(tonieInfo->json.cache_preference,
@@ -5595,11 +5960,11 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
                              tonieInfo->json._source_type == CT_SOURCE_TAP_STREAM ||
                              (tonieInfo->exists && tonieInfo->valid &&
                               tonieInfo->json._source_type != CT_SOURCE_TAF_INCOMPLETE);
-    if (local_candidate)
+    if (local_candidate && !(cache_stale && !source_configured && !prefer_taf_cache))
     {
         uint32_t naturalVersion = 0;
         if (tonieInfo->json._source_type == CT_SOURCE_TONIEPLAY_COLLECTION &&
-            freshness_get_natural_server_audio_id(tonieInfo,
+            freshness_get_natural_server_audio_id(client_ctx->settings, tonieInfo, cache_uid,
                                                   &naturalVersion, NULL))
         {
             uint32_t contentVersion = freshness_v3_content_meta_version(
@@ -5637,7 +6002,7 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
             client_ctx->settings->internal.overlayNumber);
         v3_local_content_generation_t generation;
         osMemset(&generation, 0, sizeof(generation));
-        if (!freshness_get_natural_server_audio_id(tonieInfo, &naturalVersion, NULL))
+        if (!freshness_get_natural_server_audio_id(client_ctx->settings, tonieInfo, cache_uid, &naturalVersion, NULL))
         {
             error = ERROR_INVALID_FILE;
         }
@@ -5735,6 +6100,8 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
 
         v3_native_meta_cbr_t cache_ctx;
         osMemset(&cache_ctx, 0, sizeof(cache_ctx));
+        cache_ctx.sync_generation = cache_ruid_valid
+            ? freshness_original_cloud_pending_for_target(client_ctx->settings, canonical_ruid) : 0;
         fillBaseCtx(connection, uri, queryString, V3_CONTENT_META,
                     &cache_ctx.passthrough, client_ctx);
         if (cache_ruid_valid && client_ctx->settings->cloud.cacheContentV3)
@@ -5781,7 +6148,12 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
             freeTonieInfo(tonieInfo);
             return NO_ERROR;
         }
-        freshness_clear_cache_after_content_request(client_ctx, V3_CONTENT_META, ruid);
+        /* Never append another response after TONIES headers/body were emitted. */
+        if (cache_ctx.passthrough.status >= PROX_STATUS_HEAD)
+        {
+            freeTonieInfo(tonieInfo);
+            return request_error;
+        }
     }
     else if (!tonie_cloud_access_allowed(tonieInfo))
     {
@@ -5791,7 +6163,7 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
     freeTonieInfo(tonieInfo);
 
     httpPrepareHeader(connection, NULL, 0);
-    connection->response.statusCode = 404;
+    connection->response.statusCode = cache_stale ? 503 : 404;
     return httpWriteResponse(connection, NULL, 0, false);
 }
 
@@ -5842,7 +6214,9 @@ error_t handleCloudChapterV3(HttpConnection *connection, const char_t *uri, cons
         }
 
         uint32_t naturalVersion = 0;
-        if (!freshness_get_natural_server_audio_id(tonieInfo, &naturalVersion, NULL))
+        uint64_t chapter_uid = 0;
+        tb2_ruid_to_uid(request.ruid, &chapter_uid);
+        if (!freshness_get_natural_server_audio_id(client_ctx->settings, tonieInfo, chapter_uid, &naturalVersion, NULL))
         {
             TRACE_DEBUG("Rejecting V3 local chapter for rUID %s: content version unavailable\r\n",
                         request.ruid);

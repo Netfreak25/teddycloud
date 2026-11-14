@@ -48,6 +48,7 @@ static const char *raw = "content/8194F21C/500304E0";
 static uint8_t taf_bytes[TONIEFILE_FRAME_SIZE * 2];
 static unsigned requests;
 static unsigned v3_downloads, v3_imports;
+static unsigned v3_completions;
 
 settings_t *get_settings(void) { return &settings[0]; }
 settings_t *get_settings_id(uint8_t id) { assert(id < 3); return &settings[id]; }
@@ -97,6 +98,13 @@ error_t original_content_download_v3(original_content_cache_job_t *job)
     if (!strcmp(scenario, "v3-refresh-failed")) return ERROR_TIMEOUT;
     job->refresh_result = "unchanged";
     return NO_ERROR;
+}
+
+void original_content_cache_v3_complete(original_content_cache_job_t *job,
+    uint32_t version)
+{
+    assert(job && version == 7 && v3_imports == 0);
+    v3_completions++;
 }
 
 error_t v3_native_cache_import_active_library_version(const char *cache, const char *library,
@@ -261,6 +269,7 @@ static void check_v3_materialize(void)
     error_t error = original_content_cache_materialize(&job, ORIGINAL_CACHE_V3, import, &reason);
     assert(v3_downloads == (job.refresh_v3 ? 1U : 0U));
     assert(v3_imports == (import ? 1U : 0U));
+    assert(v3_completions == (!strcmp(scenario, "v3-refresh-failed") ? 0U : 1U));
     if (!strcmp(scenario, "v3-refresh-failed"))
         assert(error == ERROR_TIMEOUT && reason == NULL);
     else if (import)

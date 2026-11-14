@@ -334,6 +334,7 @@ error_t finishFreshnessResponseV3(cbr_ctx_t *ctx)
     /* DONE is terminal even on a partial header/body write. A later cloud EOF
      * or failure must never append another HTTP response to this connection. */
     ctx->status = PROX_STATUS_DONE;
+    freshness_original_finish_response(ctx);
     TonieFreshnessCheckResponse *freshResp = ctx->customData;
     cJSON *json = cJSON_CreateObject();
     cJSON *items = json != NULL ? cJSON_AddArrayToObject(json, "items") : NULL;
@@ -404,6 +405,7 @@ static void mergeFreshnessCloudResponseV3(cbr_ctx_t *ctx)
         return;
     }
     cJSON *item = NULL;
+    ctx->freshnessCloudValid = TRUE;
     cJSON_ArrayForEach(item, items)
     {
         if (!cJSON_IsString(item) || osStrlen(item->valuestring) != 16)
@@ -421,6 +423,17 @@ static void mergeFreshnessCloudResponseV3(cbr_ctx_t *ctx)
         }
         uid[16] = '\0';
         uint64_t marked_uid = strtoull(uid, NULL, 16);
+        bool original_match = false;
+        for (size_t j = 0; j < ctx->freshnessOriginalCount; j++)
+        {
+            v3_original_freshness_t *original = &ctx->freshnessOriginals[j];
+            if (original->original && original->requested && original->upstream_uid == marked_uid)
+            {
+                original->stale = TRUE;
+                original_match = true;
+            }
+        }
+        if (original_match) continue;
         bool requested = false, found = false;
         for (size_t j = 0; j < ctx->freshnessCloudUidCount; j++)
             requested = requested || marked_uid == ctx->freshnessCloudUids[j];

@@ -18,8 +18,12 @@ struct mqtt_freshness_snapshot { unsigned generation; };
 static unsigned generation, delivered_generation;
 static unsigned prepare_count, finish_count, headers, bodies, flushes;
 static unsigned fail_phase, change_phase;
+static unsigned original_completions;
 static bool_t claim;
 static char written_body[4096];
+
+/* Original-version orchestration is exercised in test_v3_original_sync_runtime. */
+void freshness_original_finish_response(cbr_ctx_t *ctx) { (void)ctx; original_completions++; }
 
 void *osAllocMem(size_t size) { return malloc(size); }
 void osFreeMem(void *pointer) { free(pointer); }
@@ -97,6 +101,7 @@ static void reset(void)
     delivered_generation = 0;
     prepare_count = finish_count = headers = bodies = flushes = 0;
     fail_phase = change_phase = 0;
+    original_completions = 0;
     written_body[0] = '\0';
     uids[0] = UINT64_C(0xE00403501CF29481);
     cloud_uids[0] = UINT64_C(0xE00403501CF29482);
@@ -129,6 +134,29 @@ static void test_body_and_eof_complete_once(void)
     receiveFreshnessCloudResponseV3(&context, &cloud, NULL, 0, ERROR_END_OF_STREAM);
     assert(finishFreshnessResponseV3(&context) == NO_ERROR);
     assert(headers == 1 && finish_count == 1 && flushes == 1);
+    assert(original_completions == 1);
+}
+
+static void test_cloud_alias_matches_only_requested_originals(void)
+{
+    reset();
+    v3_original_freshness_t originals[3] = {
+        {.original = TRUE, .requested = TRUE, .uid = uids[0], .upstream_uid = cloud_uids[0]},
+        {.original = TRUE, .requested = TRUE, .uid = UINT64_C(0xE00403501CF29484), .upstream_uid = cloud_uids[0]},
+        {.original = TRUE, .requested = FALSE, .uid = UINT64_C(0xE00403501CF29483), .upstream_uid = cloud_uids[0]},
+    };
+    context.freshnessOriginals = originals;
+    context.freshnessOriginalCount = 3;
+    const char *body = "{\"items\":[\"8294F21C500304E0\",\"8194F21C500304E0\",\"8394F21C500304E0\"]}";
+    cloud.bodyLen = strlen(body);
+    receiveFreshnessCloudResponseV3(&context, &cloud, body, strlen(body), NO_ERROR);
+    assert(context.freshnessCloudValid);
+    assert(originals[0].stale && originals[1].stale && !originals[2].stale);
+    /* Cloud aliases are reconciled to their local targets, never directly
+     * appended to the box response or used to adopt an unrequested RUID. */
+    assert(response.n_tonie_marked == 1 && uids[0] == originals[0].uid);
+    context.freshnessOriginals = NULL;
+    context.freshnessOriginalCount = 0;
 }
 
 static void test_write_errors_are_not_acknowledged_or_retried(void)
@@ -202,6 +230,7 @@ int main(void)
     test_cloud_failure_preserves_local_answer();
     test_unknown_length_and_invalid_trailing_data();
     test_completion_uses_captured_generation();
+    test_cloud_alias_matches_only_requested_originals();
     free(context.buffer);
     puts("V3 freshness response runtime: PASS (completion, transport failures, fallback, captured generation)");
     return 0;

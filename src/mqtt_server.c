@@ -6,6 +6,7 @@
 #include <byteswap.h>
 #include <stdatomic.h>
 #include <stddef.h>
+#include <ctype.h>
 
 #include "core/net.h"
 #include "core/socket.h"
@@ -71,6 +72,11 @@ typedef struct {
 typedef struct MqttFreshTonieEntry {
     uint64_t uid;
     uint64_t generation;
+    uint64_t cloud_hint_generation;
+    uint64_t cloud_observed_generation;
+    uint32_t cloud_observed_version;
+    uint32_t original_target_version;
+    bool_t cloud_recheck_required;
     bool_t present;
     bool_t delivered;
     bool_t invalidated;
@@ -3694,6 +3700,84 @@ static bool_t mqtt_settings_topic_matches(MqttClientConnection *conn,
         osStrcasecmp(conn->box_common_name, topic_id) == 0;
 }
 
+/** Only a recognized single-tonie hint may become local cache work. */
+static bool_t mqtt_original_cloud_hint_item(settings_t *settings, const cJSON *item)
+{
+    const cJSON *tonie = cJSON_IsObject(item) ?
+        cJSON_GetObjectItemCaseSensitive(item, "tonie") : item;
+    return cJSON_IsString(tonie) && mqtt_is_hex_string(tonie->valuestring, 16) &&
+           freshness_original_cloud_hint(settings, tonie->valuestring);
+}
+
+/** Called after both Internet filters. Accepted hints are replaced by the
+ * eventual version-specific local notification, not forwarded prematurely. */
+static error_t mqtt_passthrough_intercept_cloud_publish(
+    void *context, bool_t box_to_upstream, const char *topic,
+    const uint8_t *payload, size_t payload_len, uint8_t qos,
+    tb2_mqtt_observer_result_t *result)
+{
+    (void)qos;
+    MqttClientConnection *conn = context;
+    if (result == NULL) return ERROR_INVALID_PARAMETER;
+    osMemset(result, 0, sizeof(*result));
+    if (box_to_upstream || !mqtt_settings_topic_matches(conn, topic, "/fresh-tonies") ||
+        payload == NULL || payload_len == 0 || payload_len > MQTT_MAX_PACKET_SIZE)
+        return NO_ERROR;
+    const char *end = NULL;
+    cJSON *json = cJSON_ParseWithLengthOpts((const char *)payload, payload_len, &end, FALSE);
+    while (end != NULL && end < (const char *)payload + payload_len && isspace((unsigned char)*end))
+        end++;
+    if (json == NULL || end != (const char *)payload + payload_len ||
+        (!cJSON_IsObject(json) && !cJSON_IsArray(json)))
+    {
+        cJSON_Delete(json);
+        return NO_ERROR;
+    }
+    size_t accepted = 0;
+    if (cJSON_IsObject(json))
+        accepted = mqtt_original_cloud_hint_item(conn->client_ctx.settings, json) ? 1 : 0;
+    else
+    {
+        cJSON *item = json->child;
+        while (item != NULL)
+        {
+            cJSON *next = item->next;
+            if (mqtt_original_cloud_hint_item(conn->client_ctx.settings, item))
+            {
+                cJSON_Delete(cJSON_DetachItemViaPointer(json, item));
+                accepted++;
+            }
+            item = next;
+        }
+    }
+    if (accepted != 0)
+    {
+        if (cJSON_IsObject(json) || cJSON_GetArraySize(json) == 0)
+            result->action = TB2_MQTT_OBSERVER_CONSUME;
+        else
+        {
+            result->payload = (uint8_t *)cJSON_PrintUnformatted(json);
+            if (result->payload != NULL)
+            {
+                result->payload_len = osStrlen((char *)result->payload);
+                result->action = TB2_MQTT_OBSERVER_REWRITE;
+            }
+            else
+            {
+                TRACE_WARNING("MQTT original refresh hint rewrite unavailable; retaining permitted hint\r\n");
+            }
+        }
+        result->locally_processed = TRUE;
+        result->filter_id = "original_content.refresh";
+        result->capture_action = result->action == TB2_MQTT_OBSERVER_CONSUME ?
+            "original_refresh_deferred" : "original_refresh_partial";
+        TRACE_INFO("MQTT original refresh hints accepted box=%s count=%" PRIuSIZE "\r\n",
+                   conn->box_common_name, accepted);
+    }
+    cJSON_Delete(json);
+    return NO_ERROR;
+}
+
 /** Transport completion only: never import Cloud settings or change ownership. */
 static void mqtt_passthrough_publish_completed(void *context, bool_t box_to_upstream,
     const char *topic, const uint8_t *payload, size_t payload_len)
@@ -3979,6 +4063,8 @@ void mqtt_server_task()
                                                                &passthrough_box_settings);
                             if (!error && handled)
                             {
+                                tb2_mqtt_passthrough_set_cloud_interceptor(conn->passthrough,
+                                    mqtt_passthrough_intercept_cloud_publish);
                                 atomic_store_explicit(&conn->debug_owner,
                                     tb2_mqtt_passthrough_debug_owner(conn->passthrough), memory_order_release);
                                 if (passthrough_box_settings != NULL)
@@ -4865,6 +4951,25 @@ static MqttFreshTonieEntry *mqtt_fresh_tonie_find(
     return NULL;
 }
 
+/** Retain cloud work independently from a pending notification to the box. */
+static MqttFreshTonieEntry *mqtt_fresh_tonie_get(
+    MqttFreshToniesPublishState *state, uint64_t uid)
+{
+    MqttFreshTonieEntry *entry = mqtt_fresh_tonie_find(state, uid);
+    if (entry == NULL && state != NULL)
+    {
+        entry = osAllocMem(sizeof(*entry));
+        if (entry != NULL)
+        {
+            osMemset(entry, 0, sizeof(*entry));
+            entry->uid = uid;
+            entry->next = state->entries;
+            state->entries = entry;
+        }
+    }
+    return entry;
+}
+
 /** Caller holds the lifetime/state mutex. Entries are never borrowed by transport. */
 static bool_t mqtt_fresh_tonies_sync(settings_t *settings)
 {
@@ -4936,7 +5041,8 @@ static bool_t mqtt_fresh_tonies_sync(settings_t *settings)
         MqttFreshTonieEntry *entry = remaining;
         remaining = entry->next;
         entry->present = FALSE;
-        if (state->snapshots != 0)
+        entry->original_target_version = 0;
+        if (state->snapshots != 0 || entry->cloud_recheck_required || entry->cloud_observed_version != 0)
         {
             entry->next = NULL;
             *tail = entry;
@@ -4957,7 +5063,8 @@ static MqttFreshTonieEntry *mqtt_fresh_tonies_next(
     MqttFreshTonieEntry *entry = state != NULL ? state->entries : NULL;
     while (entry != NULL)
     {
-        if (entry->present && !entry->delivered && entry->http_claims == 0)
+        if (entry->present && !entry->delivered && entry->http_claims == 0 &&
+            !entry->cloud_recheck_required)
         {
             return entry;
         }
@@ -4978,6 +5085,155 @@ static bool_t mqtt_fresh_tonies_cache_contains(settings_t *settings,
             return TRUE;
     }
     return FALSE;
+}
+
+uint64_t mqtt_server_original_cloud_hint(uint8_t overlay_id, uint64_t uid)
+{
+    if (!fresh_tonies_ready || overlay_id == 0 || overlay_id >= MAX_OVERLAYS)
+        return 0;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    settings_t *settings = get_settings_id(overlay_id);
+    MqttFreshToniesPublishState *state = settings != NULL && settings->internal.config_used &&
+        mqtt_fresh_tonies_sync(settings) ? mqtt_fresh_tonies_publish_state(settings) : NULL;
+    MqttFreshTonieEntry *entry = mqtt_fresh_tonie_get(state, uid);
+    uint64_t generation = 0;
+    if (entry != NULL)
+    {
+        entry->cloud_recheck_required = TRUE;
+        entry->cloud_observed_version = 0;
+        entry->cloud_observed_generation = 0;
+        generation = entry->cloud_hint_generation = ++fresh_tonies_generation;
+        mqtt_debug_fresh_generation(state, "freshness_cloud_hint", uid, generation);
+    }
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    return generation;
+}
+
+uint64_t mqtt_server_original_cloud_pending_locked(uint8_t overlay_id, uint64_t uid)
+{
+    if (!fresh_tonies_ready || overlay_id == 0 || overlay_id >= MAX_OVERLAYS)
+        return 0;
+    MqttFreshTonieEntry *entry = mqtt_fresh_tonie_find(
+        mqtt_fresh_tonies_publish_state(get_settings_id(overlay_id)), uid);
+    return entry != NULL && entry->cloud_recheck_required ? entry->cloud_hint_generation : 0;
+}
+
+uint64_t mqtt_server_original_cloud_pending(uint8_t overlay_id, uint64_t uid)
+{
+    if (!fresh_tonies_ready) return 0;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    uint64_t generation = mqtt_server_original_cloud_pending_locked(overlay_id, uid);
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    return generation;
+}
+
+bool_t mqtt_server_original_cloud_checked_locked(uint8_t overlay_id, uint64_t uid,
+                                                uint64_t generation)
+{
+    if (!fresh_tonies_ready || overlay_id == 0 || overlay_id >= MAX_OVERLAYS)
+        return FALSE;
+    settings_t *settings = get_settings_id(overlay_id);
+    MqttFreshToniesPublishState *state = settings != NULL && settings->internal.config_used ?
+        mqtt_fresh_tonies_publish_state(settings) : NULL;
+    if (state == NULL) return FALSE;
+    MqttFreshTonieEntry *entry = mqtt_fresh_tonie_find(state, uid);
+    uint64_t pending = entry != NULL && entry->cloud_recheck_required ? entry->cloud_hint_generation : 0;
+    if (pending != generation) return FALSE;
+    /* Manual refresh can complete without a prior cloud hint, but never clear
+     * a hint received after that job began. */
+    if (generation == 0) return TRUE;
+    entry->cloud_recheck_required = FALSE;
+    entry->cloud_hint_generation = 0;
+    entry->cloud_observed_version = 0;
+    entry->cloud_observed_generation = 0;
+    mqtt_debug_fresh_generation(state, "freshness_cloud_checked", uid, generation);
+    return TRUE;
+}
+
+bool_t mqtt_server_original_cloud_checked(uint8_t overlay_id, uint64_t uid,
+                                         uint64_t generation)
+{
+    if (!fresh_tonies_ready) return FALSE;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    bool_t matched = mqtt_server_original_cloud_checked_locked(overlay_id, uid, generation);
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    return matched;
+}
+
+bool_t mqtt_server_original_manifest_observed(uint8_t overlay_id, uint64_t uid,
+                                             uint64_t generation, uint32_t version)
+{
+    if (!fresh_tonies_ready || overlay_id == 0 || overlay_id >= MAX_OVERLAYS || version == 0)
+        return FALSE;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    settings_t *settings = get_settings_id(overlay_id);
+    MqttFreshToniesPublishState *state = settings != NULL && settings->internal.config_used &&
+        mqtt_fresh_tonies_sync(settings) ? mqtt_fresh_tonies_publish_state(settings) : NULL;
+    MqttFreshTonieEntry *entry = state != NULL &&
+        mqtt_server_original_cloud_pending_locked(overlay_id, uid) == generation ?
+        mqtt_fresh_tonie_get(state, uid) : NULL;
+    if (entry != NULL)
+    {
+        entry->cloud_observed_generation = generation;
+        entry->cloud_observed_version = version;
+    }
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    return entry != NULL;
+}
+
+bool_t mqtt_server_original_cached_locked(uint8_t overlay_id, uint64_t uid, uint32_t version)
+{
+    if (!fresh_tonies_ready || overlay_id == 0 || overlay_id >= MAX_OVERLAYS || version == 0)
+        return FALSE;
+    MqttFreshTonieEntry *entry = mqtt_fresh_tonie_find(
+        mqtt_fresh_tonies_publish_state(get_settings_id(overlay_id)), uid);
+    if (entry == NULL || entry->cloud_observed_version != version ||
+        !mqtt_server_original_cloud_checked_locked(overlay_id, uid, entry->cloud_observed_generation))
+        return FALSE;
+    entry->cloud_observed_version = 0;
+    entry->cloud_observed_generation = 0;
+    return TRUE;
+}
+
+bool_t mqtt_server_original_target_locked(uint8_t overlay_id, uint64_t uid,
+                                         uint32_t version)
+{
+    if (!fresh_tonies_ready || overlay_id == 0 || overlay_id >= MAX_OVERLAYS)
+        return FALSE;
+    settings_t *settings = get_settings_id(overlay_id);
+    if (version == 0 || settings == NULL || !settings->internal.config_used ||
+        fresh_tonies_reload_pending || !mqtt_fresh_tonies_cache_contains(settings, uid) ||
+        !mqtt_fresh_tonies_sync(settings))
+        return FALSE;
+    MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
+    MqttFreshTonieEntry *entry = mqtt_fresh_tonie_find(state, uid);
+    if (entry == NULL) return FALSE;
+    if (entry->original_target_version == version)
+    {
+        if (!entry->delivered && !entry->cloud_recheck_required)
+            mqtt_mark_fresh_tonies_pending(settings, "original_version");
+        return TRUE;
+    }
+    entry->original_target_version = version;
+    entry->generation = ++fresh_tonies_generation;
+    entry->delivered = FALSE;
+    entry->invalidated = TRUE;
+    entry->http_claims = 0;
+    mqtt_debug_fresh_generation(state, "freshness_original_target", uid, entry->generation);
+    if (!entry->cloud_recheck_required)
+        mqtt_mark_fresh_tonies_pending(settings, "original_version");
+    return TRUE;
+}
+
+bool_t mqtt_server_original_confirm_locked(uint8_t overlay_id, uint64_t uid,
+                                          uint32_t version)
+{
+    if (version == 0 || !fresh_tonies_ready || overlay_id == 0 || overlay_id >= MAX_OVERLAYS)
+        return FALSE;
+    MqttFreshTonieEntry *entry = mqtt_fresh_tonie_find(
+        mqtt_fresh_tonies_publish_state(get_settings_id(overlay_id)), uid);
+    return entry != NULL && entry->present && !entry->cloud_recheck_required &&
+           entry->original_target_version == version;
 }
 
 void mqtt_server_freshness_init(void)
@@ -5064,6 +5320,46 @@ const uint64_t *mqtt_server_freshness_cache(const mqtt_freshness_snapshot_t *sna
     return snapshot != NULL ? snapshot->uids : NULL;
 }
 
+bool_t mqtt_server_freshness_bind_original_locked(mqtt_freshness_snapshot_t *snapshot,
+                                                 uint64_t uid, uint32_t version)
+{
+    if (snapshot == NULL || snapshot->prepared ||
+        !mqtt_server_original_confirm_locked(snapshot->overlay_id, uid, version))
+        return FALSE;
+    MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(get_settings_id(snapshot->overlay_id));
+    if (state == NULL || state->epoch != snapshot->epoch ||
+        osStrcmp(state->identity, snapshot->identity) != 0)
+        return FALSE;
+    MqttFreshTonieEntry *entry = mqtt_fresh_tonie_find(state, uid);
+    for (size_t i = 0; i < snapshot->count; i++)
+    {
+        if (snapshot->uids[i] != uid) continue;
+        snapshot->generations[i] = entry->generation;
+        return TRUE;
+    }
+    if (snapshot->count >= SIZE_MAX / sizeof(uint64_t)) return FALSE;
+    size_t size = (snapshot->count + 1) * sizeof(uint64_t);
+    uint64_t *uids = osAllocMem(size), *generations = osAllocMem(size);
+    if (uids == NULL || generations == NULL)
+    {
+        osFreeMem(uids);
+        osFreeMem(generations);
+        return FALSE;
+    }
+    if (snapshot->count != 0)
+    {
+        osMemcpy(uids, snapshot->uids, snapshot->count * sizeof(uint64_t));
+        osMemcpy(generations, snapshot->generations, snapshot->count * sizeof(uint64_t));
+    }
+    uids[snapshot->count] = uid;
+    generations[snapshot->count++] = entry->generation;
+    osFreeMem(snapshot->uids);
+    osFreeMem(snapshot->generations);
+    snapshot->uids = uids;
+    snapshot->generations = generations;
+    return TRUE;
+}
+
 static uint64_t mqtt_freshness_snapshot_generation(const mqtt_freshness_snapshot_t *snapshot,
                                                   uint64_t uid)
 {
@@ -5126,7 +5422,8 @@ error_t mqtt_server_freshness_prepare(mqtt_freshness_snapshot_t *snapshot,
     for (MqttFreshTonieEntry *entry = state->entries; entry != NULL; entry = entry->next)
     {
         if (entry->present &&
-            mqtt_freshness_snapshot_generation(snapshot, entry->uid) != entry->generation &&
+            (mqtt_freshness_snapshot_generation(snapshot, entry->uid) != entry->generation ||
+             entry->cloud_recheck_required || entry->original_target_version != 0) &&
             !mqtt_freshness_uid_contains(merged, merged_count, entry->uid))
             merged[merged_count++] = entry->uid;
     }
@@ -5276,7 +5573,8 @@ static bool_t mqtt_send_fresh_tonie(MqttClientConnection *conn,
     MqttFreshToniesPublishState *state = mqtt_fresh_tonies_publish_state(settings);
     MqttFreshTonieEntry *current = mqtt_fresh_tonie_find(state, entry->uid);
     if (!duplicate && (current == NULL || !current->present || current->delivered ||
-                       current->http_claims != 0 || current->generation != entry->generation))
+                       current->cloud_recheck_required || current->http_claims != 0 ||
+                       current->generation != entry->generation))
     {
         mutex_unlock(MUTEX_MQTT_SESSION);
         osFreeMem(payload);
@@ -5544,6 +5842,11 @@ bool_t mqtt_server_publish_fresh_tonie_for_overlay_locked(uint8_t overlay_id, ui
     MqttFreshTonieEntry *entry = mqtt_fresh_tonie_find(mqtt_fresh_tonies_publish_state(settings), uid);
     if (entry == NULL) return FALSE;
     entry->generation = ++fresh_tonies_generation;
+    entry->original_target_version = 0;
+    entry->cloud_recheck_required = FALSE;
+    entry->cloud_hint_generation = 0;
+    entry->cloud_observed_version = 0;
+    entry->cloud_observed_generation = 0;
     entry->delivered = FALSE;
     entry->invalidated = TRUE;
     entry->http_claims = 0;

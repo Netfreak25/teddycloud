@@ -1206,6 +1206,43 @@ payload read could leave unread bytes. A TC full write cannot prove that the box
 consumed those bytes. The suite adds **no** packet reshaping, synthetic ACKs,
 timeouts or transport workaround for that unproven cause.
 
+## Original V3 updates and box inventory
+
+The notification ledger distinguishes **a TONIES recheck is required** from
+**the box has a different version of a complete local original**. A stale box
+marker alone never invalidates the original cache or selects a neighbouring TAF.
+
+- Allowed cloud `fresh-tonies` hints reach the original-cache worker only after
+  the automatic protection and manual forwarding filters. Accepted entries are
+  held until the checked cache is complete; unaccepted entries keep the existing
+  filtered forwarding path. MQTT acknowledgements remain transport-level ACKs.
+- The existing serial downloader checks eligible configured TB2 overlays sharing
+  the content directory, each with its own identity and credentials. NoCloud,
+  private sources, explicit TAF selection and disabled cloud/cache paths are not
+  bypassed. There is no new timer, Tonie-change query or automatic error retry.
+- A new hint has its own RAM generation. A completion for an older hint cannot
+  confirm a newer check. An in-progress job may retain one newer follow-up; this
+  is not an offline download journal.
+- After a complete cache is available, only a different known box version needs
+  a notification. Repeating the same target does not reset an acknowledged
+  notification. An unchanged cloud manifest may still require a box update.
+- A successful HTTPS freshness response reserves and confirms the exact target
+  it contains, avoiding an additional MQTT notification of that same change.
+  Failed HTTP writes keep notification work pending. Existing in-flight QoS
+  exchanges are not cancelled or artificially acknowledged.
+- Matching inventory or playback content versions establish actual box adoption;
+  PUBACK, serving a manifest and serving one chapter do not. Source-change
+  markers still require matching playback. Original TONIES versions are never
+  replaced with synthetic private-content versions.
+
+`src/mqtt_server.c` owns the bounded-lifetime ledger and notification generations;
+`src/tb2_mqtt_passthrough.c` exposes the post-filter interception point without a
+second filter pipeline. `src/handler_cloud.c` resolves original versions and
+updates the ledger after validation; `src/handler.c` merges only the requested
+cloud RUIDs and finishes each HTTP response once. Diagnosis distinguishes cloud
+hint/check and original target events from notification ACKs. State remains
+volatile across a TC restart, while complete cache generations remain on disk.
+
 ## Practical Notes
 
 - The `mqtt.*` settings belong to the external MQTT client/broker path and are

@@ -31,6 +31,7 @@ def main():
         "tb2_mqtt_passthrough_release_local_packet_id",
         "tb2_mqtt_passthrough_write_local_publish",
         "tb2_mqtt_status_start", "tb2_mqtt_status_finish", "tb2_mqtt_passthrough_write_status",
+        "tb2_mqtt_passthrough_set_cloud_interceptor",
     }
     selected = set()
     while required:

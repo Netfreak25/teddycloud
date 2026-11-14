@@ -99,6 +99,10 @@ error_t tb2_mqtt_passthrough_start(struct _TlsContext *box_tls,
                                    settings_t **box_settings_out);
 error_t tb2_mqtt_passthrough_forward_initial(tb2_mqtt_passthrough_session_t *session,
                                              const uint8_t *data, size_t length);
+/** Set during session setup, before processing packets. Runs only for permitted
+ * cloud publishes, after privacy/manual filtering and before box admission. */
+void tb2_mqtt_passthrough_set_cloud_interceptor(tb2_mqtt_passthrough_session_t *session,
+                                               tb2_mqtt_publish_observer_t interceptor);
 error_t tb2_mqtt_passthrough_task(tb2_mqtt_passthrough_session_t *session);
 bool_t tb2_mqtt_passthrough_is_established(const tb2_mqtt_passthrough_session_t *session);
 bool_t tb2_mqtt_passthrough_is_upstream_connected(const tb2_mqtt_passthrough_session_t *session);

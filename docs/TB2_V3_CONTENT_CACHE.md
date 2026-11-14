@@ -726,6 +726,56 @@ The generation key uses the effective V3 version, including an overlay-local for
 
 The marker is cleared only when the local MQTT observer receives playback state for the same RUID and the reported `contentVersion` exactly equals the current effective version. Stale or unknown playback versions are ignored.
 
+## Keeping originals and box inventory aligned
+
+A complete selected V3 original is authoritative over a neighbouring old TAF.
+An explicitly selected and complete TAF or a private Source remains authoritative
+instead. The same original-version selection is used for freshness comparison,
+metadata routing and box confirmation; original manifests keep their exact
+TONIES version and object names.
+
+The existing HTTPS freshness request compares TONIES against the complete local
+V3 version, not the TAF version. The actual box inventory remains a separate
+snapshot. `cloud_ruid` aliases are mapped back to their local RUID; replies about
+unrequested entries cannot modify local state. A cloud stale hint requests an
+immediate background refresh through the existing original-content worker. MQTT
+hints use the same worker after both forwarding filters. No new periodic cloud
+request, playback-triggered check or error-retry loop is introduced.
+
+Eligible TB2 overlays sharing the content directory are checked independently,
+including offline boxes, with their own credentials. NoCloud blocks this automatic
+synchronization even with `cloud_override`; private sources and explicit TAF
+selection are not overwritten. Existing cache and endpoint permissions still apply.
+NoCloud can continue using complete local originals and align a box to that local
+version without cloud access.
+
+`src/original_content_cache.c` adds a V3-only synchronization reason and immutable
+hint generation to existing jobs. A queued job can be superseded by a newer hint;
+a running job retains at most one newer follow-up. `src/original_content_transfer.c`
+finishes version reconciliation after complete activation, before optional Library
+import. A Library error does not discard the valid original cache or its box target.
+Auth-only manifest changes reuse audio; conflicting objects under the same version
+remain errors. Partial/new generations never replace a complete active generation.
+
+`src/handler_cloud.c` also records the generation/version of a successfully parsed
+box-driven cloud manifest. Completion of its chapters can finish that check without
+a background job; an older transfer cannot finish a newer cloud hint. A cache hit
+alone never proves that a pending TONIES check succeeded. While a required check
+is unresolved, the original route must not silently substitute an old TAF. Failed
+metadata requests return 503 before response headers when a recheck is outstanding;
+after response transmission has begun, no second fallback response is appended.
+
+The box's stale-content marker and notification delivery remain separate. Repeated
+completion of the same version does not continually resend `fresh-tonies`.
+Matching inventory/playback confirms adoption, not a manifest/chapter response or
+PUBACK. Source-switch playback confirmation and private-content versions keep their
+existing semantics. New state is RAM-only; no persisted schema or setting changes.
+
+Focused tests execute production selection, HTTP merge/completion, worker and MQTT
+ledger logic, including newer-hint races, unchanged manifests, NoCloud, mixed cloud
+messages and a complete 24-chapter original beside an old 11-chapter TAF. Device
+adoption still requires separate hardware verification.
+
 ## Source and file map
 
 ### `include/v3_local_content.h`

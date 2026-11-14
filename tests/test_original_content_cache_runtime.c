@@ -16,6 +16,8 @@ static unsigned order[64];
 static bool library_flags[64];
 static uint8_t owners[64];
 static bool refresh_flags[64];
+static uint64_t sync_generations[64], pending_hints[MAX_OVERLAYS];
+static original_content_cache_reason_t job_reasons[64];
 static atomic_bool adapter_wait;
 static error_t adapter_error[ORIGINAL_CACHE_FORMAT_COUNT];
 static bool local_complete[ORIGINAL_CACHE_FORMAT_COUNT];
@@ -23,10 +25,22 @@ static const char *test_ruid = "8194F21C500304E0";
 static const char *auth_hex = "0102030405060708010203040506070801020304050607080102030405060708";
 static const char *cache_preference = "auto";
 static const char *refresh_result = "unchanged";
+static bool policy_override;
 static cJSON *http_result;
 
 settings_t *get_settings(void) { return &settings[0]; }
 settings_t *get_settings_id(uint8_t index) { assert(index < MAX_OVERLAYS); return &settings[index]; }
+uint64_t freshness_original_cloud_pending_for_target(settings_t *value, const char *ruid)
+{ (void)ruid; return pending_hints[value->internal.overlayNumber]; }
+uint64_t freshness_original_cloud_hint_for_target(settings_t *value, const char *ruid)
+{
+    original_policy_t policy;
+    const char *reason = read_policy(value, ruid, &policy);
+    if (!value->internal.config_used || value->toniebox.boxGeneration != GENERATION_TB2 ||
+        policy.preferred != ORIGINAL_CACHE_V3 || (reason && strcmp(reason, "missing_content_auth")))
+        return 0;
+    return ++pending_hints[value->internal.overlayNumber];
+}
 uint8_t get_overlay_id(const char *owner)
 {
     for (unsigned i = 1; i < MAX_OVERLAYS; i++)
@@ -81,6 +95,8 @@ error_t original_content_cache_materialize(original_content_cache_job_t *job,
     library_flags[index] = library;
     owners[index] = job->settings.internal.overlayNumber;
     refresh_flags[index] = job->refresh_v3;
+    sync_generations[index] = job->sync_generation;
+    job_reasons[index] = job->reason;
     assert(job->settings.cloud.remote_hostname != settings[1].cloud.remote_hostname);
     assert(!strcmp(job->settings.cloud.remote_hostname, "boxine.test"));
     assert(job->tb1_identity.key != settings[1].internal.client_tb1.key);
@@ -103,8 +119,8 @@ static void write_policy(const char *ruid, const char *source, bool nocloud, con
     char path[100]; snprintf(path, sizeof(path), "%s.json", ruid);
     FILE *file = fopen(path, "wb"); assert(file);
     assert(fprintf(file, "{\"source\":\"%s\",\"nocloud\":%s,\"cloud_ruid\":\"%s\","
-        "\"cloud_auth\":\"%s\",\"cloud_override\":false,\"cache_preference\":\"%s\"}", source,
-        nocloud ? "true" : "false", ruid, auth, cache_preference) > 0);
+        "\"cloud_auth\":\"%s\",\"cloud_override\":%s,\"cache_preference\":\"%s\"}", source,
+        nocloud ? "true" : "false", ruid, auth, policy_override ? "true" : "false", cache_preference) > 0);
     assert(fclose(file) == 0);
 }
 
@@ -332,7 +348,10 @@ static void configure_refresh_group(void)
 static void discard_queued_jobs(void)
 {
     for (unsigned i = 0; i < ORIGINAL_CONTENT_CACHE_CAPACITY; i++)
+    {
         free_job(original_cache.records[i].job);
+        free_job(original_cache.records[i].followup);
+    }
     memset(original_cache.records, 0, sizeof(original_cache.records));
 }
 
@@ -479,6 +498,85 @@ static void refresh_worker_tests(void)
     puts("PASS refresh worker: serial own-box V3-only jobs, honest outcomes/failures, no automatic follow-up");
 }
 
+static void sync_group_tests(void)
+{
+    configure_refresh_group();
+    settings[1].internal.config_used = false;
+    settings[4].internal.config_used = false;
+    settings[0].cloud.cacheBothFormatsOnDownload = false;
+    settings[0].cloud.cacheBothFormatsOnPlayback = false;
+    assert(osCreateEvent(&original_cache.wake)); original_cache.ready = true;
+    assert(!original_content_cache_sync_group(&settings[2], test_ruid));
+    assert(!mixed_boxes() && pending_count() == 2);
+    for (unsigned i = 0; i < 2; i++)
+    {
+        const original_content_cache_job_t *job = original_cache.records[i].job;
+        assert(job->reason == ORIGINAL_CACHE_REASON_V3_SYNC && job->refresh_v3);
+        assert(job->sync_generation == 1 && !job->automatic && !job->both_formats);
+        assert(job->settings.internal.overlayNumber == i + 2);
+    }
+    assert(!original_content_cache_sync_group(&settings[2], test_ruid));
+    assert(pending_count() == 2 && original_cache.records[0].job->sync_generation == 2);
+    assert(!original_cache.records[0].followup); /* Queued work is simply superseded. */
+    discard_queued_jobs();
+    settings[2].cloud.enableV3Chapter = false;
+    assert(original_content_cache_sync_group(&settings[2], test_ruid) == ERROR_ACCESS_DENIED);
+    assert(pending_count() == 1 && pending_hints[2] == 3 && pending_hints[3] == 3);
+    assert(original_cache.records[0].job->settings.internal.overlayNumber == 3);
+    discard_queued_jobs(); settings[2].cloud.enableV3Chapter = true;
+    write_policy(test_ruid, "", false, "");
+    assert(original_content_cache_sync_group(&settings[2], test_ruid) == ERROR_ACCESS_DENIED);
+    assert(!pending_count() && pending_hints[2] == 4); /* Hint survives absent credentials. */
+    policy_override = true; write_policy(test_ruid, "", true, auth_hex);
+    assert(original_content_cache_sync_group(&settings[2], test_ruid) == ERROR_ACCESS_DENIED);
+    assert(!pending_count() && pending_hints[2] == 4); /* Override never bypasses NoCloud. */
+    policy_override = false; cache_preference = "taf"; write_policy(test_ruid, "", false, auth_hex);
+    assert(original_content_cache_sync_group(&settings[2], test_ruid) == ERROR_ACCESS_DENIED);
+    assert(!pending_count());
+    cache_preference = "v3"; write_policy(test_ruid, "lib://private.taf", false, auth_hex);
+    assert(original_content_cache_sync_group(&settings[2], test_ruid) == ERROR_ACCESS_DENIED);
+    assert(!pending_count());
+    write_policy(test_ruid, "", false, auth_hex);
+    const char *reason = NULL;
+    assert(!original_content_cache_submit(&settings[2], test_ruid, ORIGINAL_CACHE_TAF, false, 0, &reason));
+    assert(!original_content_cache_sync_group(&settings[2], test_ruid));
+    assert(!original_cache.records[0].job->refresh_v3 && original_cache.records[0].followup);
+    assert(original_cache.records[0].followup->reason == ORIGINAL_CACHE_REASON_V3_SYNC);
+    discard_queued_jobs();
+    puts("PASS V3 sync admission: no dual-format requirement, strict policy, current-target acceptance, normal-job follow-up");
+}
+
+static void sync_worker_tests(void)
+{
+    configure_refresh_group();
+    settings[0].cloud.cacheBothFormatsOnDownload = false;
+    settings[0].cloud.cacheBothFormatsOnPlayback = false;
+    atomic_store(&adapter_wait, true);
+    original_content_cache_init(); assert(original_cache.ready);
+    assert(!original_content_cache_sync_group(&settings[2], test_ruid));
+    for (unsigned spin = 0; !atomic_load(&calls) && spin < 3000; spin++) osDelayTask(1);
+    assert(atomic_load(&calls) == 1);
+    settings[2].internal.client_tb2.key = "new-blue-key";
+    for (unsigned repeat = 0; repeat < 3; repeat++)
+        assert(!original_content_cache_sync_group(&settings[2], test_ruid));
+    mutex_lock(MUTEX_ORIGINAL_CONTENT_CACHE);
+    assert(original_cache.records[0].job->sync_generation == 1);
+    assert(original_cache.records[0].followup->sync_generation == 4);
+    assert(!strcmp(original_cache.records[0].followup->tb2_identity.key, "new-blue-key"));
+    assert(original_cache.records[1].job->sync_generation == 4 && !original_cache.records[1].followup);
+    mutex_unlock(MUTEX_ORIGINAL_CONTENT_CACHE);
+    atomic_store(&adapter_wait, false);
+    wait_idle();
+    assert(atomic_load(&calls) == 3);
+    assert(owners[0] == 2 && owners[1] == 3 && owners[2] == 2);
+    assert(sync_generations[0] == 1 && sync_generations[1] == 4 && sync_generations[2] == 4);
+    for (unsigned i = 0; i < 3; i++)
+        assert(order[i] == ORIGINAL_CACHE_V3 && job_reasons[i] == ORIGINAL_CACHE_REASON_V3_SYNC);
+    osDelayTask(30); assert(atomic_load(&calls) == 3);
+    original_content_cache_deinit();
+    puts("PASS V3 sync worker: one coalesced follow-up, fresh owned credentials, no TAF and no timer retry");
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2); setup();
@@ -488,6 +586,8 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "refresh-group")) refresh_group_tests();
     else if (!strcmp(argv[1], "refresh-api")) refresh_api_tests();
     else if (!strcmp(argv[1], "refresh-worker")) refresh_worker_tests();
+    else if (!strcmp(argv[1], "sync-group")) sync_group_tests();
+    else if (!strcmp(argv[1], "sync-worker")) sync_worker_tests();
     else assert(!"unknown case");
     return 0;
 }

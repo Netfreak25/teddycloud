@@ -1,5 +1,6 @@
 /* Bounded original-content work, deliberately independent of box playback. */
 #include "original_content_cache.h"
+#include "handler_cloud.h"
 #include "mutex_manager.h"
 #include "tb2_client_identity.h"
 #include "v3_native_cache.h"
@@ -34,6 +35,8 @@ typedef struct
     bool valid;
     bool running;
     original_content_cache_job_t *job;
+    original_content_cache_job_t *followup;
+    uint64_t sync_generation;
     format_status_t formats[ORIGINAL_CACHE_FORMAT_COUNT];
 } original_record_t;
 
@@ -348,6 +351,7 @@ static bool check_current_job(const original_content_cache_job_t *job,
         same_text(live->internal.librarydirfull, snapshot->internal.librarydirfull) &&
         same_text(live->internal.cachedirfull, snapshot->internal.cachedirfull) &&
         !read_policy(live, job->ruid, &policy) &&
+        (job->reason != ORIGINAL_CACHE_REASON_V3_SYNC || policy.preferred == ORIGINAL_CACHE_V3) &&
         same_text(policy.upstream_ruid, job->upstream_ruid) &&
         !memcmp(policy.auth, job->auth, sizeof(job->auth)) &&
         (format == ORIGINAL_CACHE_TAF
@@ -463,22 +467,35 @@ static void original_worker(void *unused)
         process_record(selected);
         mutex_lock(MUTEX_ORIGINAL_CONTENT_CACHE);
         free_job(selected->job);
-        selected->job = NULL;
+        selected->job = selected->followup;
+        selected->followup = NULL;
         selected->running = false;
+        if (selected->job)
+        {
+            selected->sequence = ++original_cache.sequence;
+            selected->formats[ORIGINAL_CACHE_V3] = (format_status_t){"queued", NULL};
+            selected->formats[ORIGINAL_CACHE_TAF] = (format_status_t){"skipped", "not_requested"};
+        }
         mutex_unlock(MUTEX_ORIGINAL_CONTENT_CACHE);
     }
 }
 
 static error_t submit_original_job(settings_t *settings, const char *ruid,
-    original_cache_format_t preferred, bool automatic, uint32_t observed_version,
-    bool refresh_v3, const char *expected_owner, const char *expected_root,
+    original_cache_format_t preferred, original_content_cache_reason_t request_reason,
+    uint32_t observed_version, uint64_t sync_generation,
+    const char *expected_owner, const char *expected_root,
     const char **reason)
 {
+    bool automatic = request_reason == ORIGINAL_CACHE_REASON_PLAYBACK;
+    bool sync_v3 = request_reason == ORIGINAL_CACHE_REASON_V3_SYNC;
+    bool refresh_v3 = sync_v3 || request_reason == ORIGINAL_CACHE_REASON_V3_REFRESH;
     if (reason) *reason = NULL;
     if (!original_cache.ready || atomic_load(&original_cache.stopping))
     { if (reason) *reason = "worker_unavailable"; return ERROR_OUT_OF_RESOURCES; }
     if (!settings || preferred >= ORIGINAL_CACHE_FORMAT_COUNT)
         return ERROR_INVALID_PARAMETER;
+    if (refresh_v3 && !sync_v3)
+        sync_generation = freshness_original_cloud_pending_for_target(settings, ruid);
     mutex_lock(MUTEX_SETTINGS);
     bool mixed = mixed_boxes();
     bool both = !refresh_v3 && mixed && (automatic ? get_settings()->cloud.cacheBothFormatsOnPlayback :
@@ -495,6 +512,8 @@ static error_t submit_original_job(settings_t *settings, const char *ruid,
          !same_text(settings->internal.overlayUniqueId, expected_owner) ||
          !same_text(settings->internal.contentdirfull, expected_root))
         ? "target_changed" : read_policy(settings, ruid, &policy);
+    if (!blocked && sync_v3 && (!sync_generation || policy.preferred != ORIGINAL_CACHE_V3))
+        blocked = "not_original_v3";
     if (!blocked && !automatic && !both)
     {
         blocked = format_policy(settings, preferred);
@@ -510,6 +529,8 @@ static error_t submit_original_job(settings_t *settings, const char *ruid,
     job->automatic = automatic;
     job->both_formats = both;
     job->refresh_v3 = refresh_v3;
+    job->reason = request_reason;
+    job->sync_generation = sync_generation;
     job->preferred = preferred;
     job->observed_version = observed_version;
     mutex_lock(MUTEX_ORIGINAL_CONTENT_CACHE);
@@ -524,6 +545,36 @@ static error_t submit_original_job(settings_t *settings, const char *ruid,
     {
         original_record_t *record = &original_cache.records[i];
         if (!record->valid || strcmp(record->owner, job->owner) || strcmp(record->ruid, job->ruid)) continue;
+        if (sync_v3 && record->job)
+        {
+            /* One newer hint may follow an already running operation. Keep
+             * the newest owned policy snapshot; never mutate a running job. */
+            if (sync_generation > record->sync_generation)
+            {
+                record->sync_generation = sync_generation;
+                if (!record->running && record->job->refresh_v3)
+                {
+                    free_job(record->job);
+                    record->job = job;
+                }
+                else
+                {
+                    free_job(record->followup);
+                    record->followup = job;
+                }
+            }
+            else free_job(job);
+            mutex_unlock(MUTEX_ORIGINAL_CONTENT_CACHE);
+            if (reason) *reason = "already_queued";
+            return NO_ERROR;
+        }
+        if (sync_v3 && !record->job && sync_generation <= record->sync_generation)
+        {
+            mutex_unlock(MUTEX_ORIGINAL_CONTENT_CACHE);
+            free_job(job);
+            if (reason) *reason = "already_attempted";
+            return ERROR_ABORTED;
+        }
         if (record->job && record->job->refresh_v3 != refresh_v3)
         {
             mutex_unlock(MUTEX_ORIGINAL_CONTENT_CACHE);
@@ -565,6 +616,7 @@ static error_t submit_original_job(settings_t *settings, const char *ruid,
     slot->sequence = ++original_cache.sequence;
     slot->observed_version = observed_version;
     slot->observed_format = preferred;
+    slot->sync_generation = sync_generation;
     memcpy(slot->owner, job->owner, sizeof(slot->owner));
     memcpy(slot->ruid, job->ruid, sizeof(slot->ruid));
     for (unsigned format = 0; format < ORIGINAL_CACHE_FORMAT_COUNT; format++)
@@ -579,8 +631,9 @@ error_t original_content_cache_submit(settings_t *settings, const char *ruid,
     original_cache_format_t preferred, bool automatic, uint32_t observed_version,
     const char **reason)
 {
-    return submit_original_job(settings, ruid, preferred, automatic, observed_version,
-                               false, NULL, NULL, reason);
+    return submit_original_job(settings, ruid, preferred,
+        automatic ? ORIGINAL_CACHE_REASON_PLAYBACK : ORIGINAL_CACHE_REASON_DOWNLOAD,
+        observed_version, 0, NULL, NULL, reason);
 }
 
 error_t original_content_cache_refresh_group(settings_t *settings,
@@ -623,7 +676,7 @@ error_t original_content_cache_refresh_group(settings_t *settings,
         const char *owner = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(target, "overlay"));
         const char *reason = NULL;
         error = submit_original_job(get_settings_id(ids[index++]), ruid,
-            ORIGINAL_CACHE_V3, false, 0, true, owner, root, &reason);
+            ORIGINAL_CACHE_V3, ORIGINAL_CACHE_REASON_V3_REFRESH, 0, 0, owner, root, &reason);
         cJSON_AddBoolToObject(target, "accepted", error == NO_ERROR);
         cJSON_AddStringToObject(target, "state", error == NO_ERROR ? "queued" : "rejected");
         if (reason) cJSON_AddStringToObject(target, "reason", reason);
@@ -633,6 +686,40 @@ error_t original_content_cache_refresh_group(settings_t *settings,
     }
     free(root);
     return accepted ? NO_ERROR : rejection;
+}
+
+error_t original_content_cache_sync_group(settings_t *settings, const char *ruid)
+{
+    if (!settings || !ruid) return ERROR_INVALID_PARAMETER;
+    struct { uint8_t id; char owner[ORIGINAL_CONTENT_CACHE_OWNER_SIZE]; } targets[MAX_OVERLAYS];
+    size_t count = 0;
+    mutex_lock(MUTEX_SETTINGS);
+    char *root = settings->internal.contentdirfull ? strdup(settings->internal.contentdirfull) : NULL;
+    uint8_t requesting_box = settings->internal.overlayNumber;
+    for (unsigned i = 1; root && i < MAX_OVERLAYS; i++)
+    {
+        settings_t *box = get_settings_id(i);
+        if (box->internal.config_used && box->toniebox.boxGeneration == GENERATION_TB2 &&
+            same_text(root, box->internal.contentdirfull) &&
+            copy_text(targets[count].owner, sizeof(targets[count].owner), box->internal.overlayUniqueId))
+            targets[count++].id = (uint8_t)i;
+    }
+    mutex_unlock(MUTEX_SETTINGS);
+    if (!root) return ERROR_OUT_OF_MEMORY;
+    error_t current_result = ERROR_ACCESS_DENIED;
+    for (size_t i = 0; i < count; i++)
+    {
+        settings_t *box = get_settings_id(targets[i].id);
+        /* Mark the real hint even when download credentials/cache permission
+         * are missing. Admission must not silently declare stale data current. */
+        uint64_t generation = freshness_original_cloud_hint_for_target(box, ruid);
+        error_t result = generation ? submit_original_job(box, ruid, ORIGINAL_CACHE_V3,
+            ORIGINAL_CACHE_REASON_V3_SYNC, 0, generation, targets[i].owner, root, NULL)
+            : ERROR_ACCESS_DENIED;
+        if (targets[i].id == requesting_box) current_result = result;
+    }
+    free(root);
+    return current_result;
 }
 
 void original_content_cache_add_status(cJSON *cache_state, const settings_t *settings,
@@ -693,6 +780,8 @@ void original_content_cache_deinit(void)
     {
         free_job(original_cache.records[i].job);
         original_cache.records[i].job = NULL;
+        free_job(original_cache.records[i].followup);
+        original_cache.records[i].followup = NULL;
     }
     mutex_unlock(MUTEX_ORIGINAL_CONTENT_CACHE);
     /* Like HTTP state, keep the event valid while handlers finish shutdown. */

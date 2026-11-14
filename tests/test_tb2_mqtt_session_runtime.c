@@ -28,6 +28,9 @@ static bool read_header, read_would_block;
 static bool filter_allowed = true, privacy_blocked, capture_fails, consume_once;
 static bool box_write_fails, capture_fails_after_write;
 static bool box_write_pauses;
+static bool privacy_rewritten;
+static unsigned intercepted;
+static tb2_mqtt_observer_action_t intercept_action;
 static error_t box_write_failure = ERROR_WRITE_FAILED;
 static unsigned observed, local_acks, worker_resets, worker_sends;
 static unsigned publish_completions;
@@ -111,6 +114,10 @@ void mqtt_nocloud_filter_publish(settings_t *settings, bool_t box_to_upstream,
     if (privacy_blocked) {
         result->action = MQTT_NOCLOUD_BLOCK;
         result->filter_id = "test.protected";
+    } else if (privacy_rewritten) {
+        result->action = MQTT_NOCLOUD_REWRITE;
+        result->payload = strdup("{\"safe\":true}");
+        result->payload_len = strlen(result->payload);
     }
 }
 void mqtt_nocloud_filter_result_free(mqtt_nocloud_filter_result_t *result)
@@ -258,6 +265,23 @@ static void observe_control(void *context, tb2_mqtt_control_event_t event,
     (void)context; (void)id; (void)payload; (void)length;
     if (event == TB2_MQTT_CONTROL_LOCAL_PUBACK) local_acks++;
 }
+
+static error_t intercept_cloud(void *context, bool_t incoming, const char *topic,
+    const uint8_t *payload, size_t length, uint8_t qos, tb2_mqtt_observer_result_t *result)
+{
+    (void)context; (void)topic; (void)qos;
+    assert(!incoming && filter_allowed && !privacy_blocked);
+    if (privacy_rewritten) assert(length == 13 && !memcmp(payload, "{\"safe\":true}", length));
+    intercepted++;
+    result->action = intercept_action;
+    result->locally_processed = intercept_action != TB2_MQTT_OBSERVER_FORWARD;
+    result->capture_action = "original_refresh_deferred";
+    if (intercept_action == TB2_MQTT_OBSERVER_REWRITE) {
+        result->payload = (uint8_t *)strdup("{\"remaining\":true}");
+        result->payload_len = strlen((char *)result->payload);
+    }
+    return NO_ERROR;
+}
 static void publish_completed(void *context, bool_t incoming, const char *topic,
     const uint8_t *payload, size_t length)
 {
@@ -320,6 +344,9 @@ static void initialize(tb2_mqtt_passthrough_session_t *session)
     box_write_pauses = false;
     box_write_failure = ERROR_WRITE_FAILED;
     publish_completions = 0;
+    intercepted = 0;
+    privacy_rewritten = false;
+    intercept_action = TB2_MQTT_OBSERVER_FORWARD;
     subscription_grant = 2;
     session->saved_slot = -1;
     wall_shift = 0;
@@ -843,6 +870,39 @@ static void test_downlink_subscription_qos(void)
     }
 }
 
+static void test_postfilter_refresh_interceptor(void)
+{
+    for (unsigned variant = 0; variant < 5; variant++) {
+        tb2_mqtt_passthrough_session_t session;
+        initialize(&session);
+        session.established = true;
+        session.worker = (tb2_mqtt_upstream_worker_t *)1;
+        session.epoch = 1;
+        session.cloud_phase = TB2_MQTT_CLOUD_READY;
+        tb2_mqtt_passthrough_set_cloud_interceptor(&session, intercept_cloud);
+        filter_allowed = variant != 0;
+        privacy_blocked = variant == 1;
+        privacy_rewritten = variant == 4;
+        intercept_action = variant == 2 ? TB2_MQTT_OBSERVER_CONSUME :
+            variant == 4 ? TB2_MQTT_OBSERVER_REWRITE : TB2_MQTT_OBSERVER_FORWARD;
+        send_publish_direction(&session, 1, 501, false, false);
+        assert(observed == 1 && intercepted == (variant >= 2 ? 1U : 0U));
+        assert(box_write_count == (variant >= 3 ? 1U : 0U));
+        assert(cloud_write_count == 1 && cloud_writes[0].bytes[0] == 0x40);
+        assert(LOAD16BE(cloud_writes[0].bytes + 2) == 501); /* Accepted or consumed: real upstream ACK. */
+        if (variant == 4) {
+            const uint8_t *wire = box_writes[0].bytes;
+            size_t start = 4 + LOAD16BE(wire + 2) + 2;
+            assert(box_writes[0].length == start + 18);
+            assert(!memcmp(wire + start, "{\"remaining\":true}", 18));
+        }
+        tb2_mqtt_packet_ids_clear(&session.packet_ids);
+        tb2_mqtt_cloud_reset(&session, "test_done");
+        free(session.upstream_stream.data);
+        osDeleteMutex(&session.ids_mutex); osDeleteMutex(&session.io_mutex);
+    }
+}
+
 typedef struct {
     tb2_mqtt_passthrough_session_t *session;
     unsigned sent, failed;
@@ -1314,6 +1374,7 @@ int main(void)
     test_independent_keepalives();
     test_downlink_completion();
     test_downlink_subscription_qos();
+    test_postfilter_refresh_interceptor();
     test_atomic_queue_and_owned_completion();
     test_coalesced_protocol_backpressure_once();
     test_cancel_preserves_only_transmitted_exchanges();

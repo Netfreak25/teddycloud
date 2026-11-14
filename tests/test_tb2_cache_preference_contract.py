@@ -77,13 +77,19 @@ class Tb2CachePreferenceContractTests(unittest.TestCase):
             "error_t handleCloudChapterV3(",
         )
         first_cache = meta.index("v3_native_serve_cached_original")
-        local = meta.index("if (local_candidate)")
+        local = meta.index("if (local_candidate &&")
         second_cache = meta.index("v3_native_serve_cached_original", first_cache + 1)
         self.assertLess(first_cache, local)
         self.assertGreater(second_cache, local)
         self.assertIn("!prefer_taf_cache", meta[:local])
         self.assertIn("prefer_taf_cache", meta[local:second_cache])
         self.assertNotIn("cloud.cacheContentV3 && !cache_stale", meta)
+        cache_decision = self.section(meta, "bool_t cache_stale =", ";")
+        self.assertIn("mqtt_server_original_cloud_pending", cache_decision)
+        self.assertIn("!tonieInfo->json.nocloud", cache_decision)
+        self.assertIn("!source_configured", cache_decision)
+        self.assertNotIn("freshnessCache", cache_decision)
+        self.assertIn("!(cache_stale && !source_configured && !prefer_taf_cache)", meta)
 
     def test_api_exposes_both_cache_states_and_safe_playlist_fallbacks(self) -> None:
         tag_info = self.section(self.api, "error_t getTagInfoJson(", "error_t handleApiTagInfo(")

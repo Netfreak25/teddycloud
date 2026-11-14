@@ -58,6 +58,22 @@ typedef struct
 
 } ota_ctx_t;
 
+/** Owned V3 comparison; cloud aliases never overwrite the box's inventory. */
+typedef struct
+{
+    uint64_t uid;
+    uint64_t upstream_uid;
+    uint64_t hint_generation;
+    uint32_t box_version;
+    uint32_t cache_version;
+    uint32_t query_version;
+    bool_t original;
+    bool_t complete;
+    bool_t cloud_allowed;
+    bool_t requested;
+    bool_t stale;
+} v3_original_freshness_t;
+
 typedef struct
 {
     const char_t *uri;
@@ -74,6 +90,10 @@ typedef struct
     size_t customDataLen;
     uint64_t *freshnessCloudUids;
     size_t freshnessCloudUidCount;
+    v3_original_freshness_t *freshnessOriginals;
+    size_t freshnessOriginalCount;
+    bool_t freshnessCloudValid;
+    char *freshnessOwner;
     struct mqtt_freshness_snapshot *freshnessSnapshot;
     error_t freshnessResponseError;
     HttpConnection *connection;

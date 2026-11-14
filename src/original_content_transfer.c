@@ -1,4 +1,5 @@
 #include "original_content_transfer.h"
+#include "handler_cloud.h"
 #include "taf_original_cache.h"
 #include "v3_native_cache.h"
 #include "fs_ext.h"
@@ -164,6 +165,12 @@ error_t original_content_cache_materialize(original_content_cache_job_t *job,
             settings->internal.librarydirfull, settings->internal.overlayNumber,
             job->ruid, &version, NULL, &tonieplay))
             error = ERROR_INVALID_FILE;
+    }
+    if (error == NO_ERROR)
+    {
+        if (!original_content_cache_job_current(job, format))
+            return ERROR_ACCESS_DENIED;
+        original_content_cache_v3_complete(job, version);
     }
     if (error == NO_ERROR && (tonieplay ? settings->cloud.cacheTonieplayToLibraryV3 : import_to_library))
     {

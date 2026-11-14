@@ -7,6 +7,7 @@
 #include <time.h>
 #include <inttypes.h>
 #include <stdatomic.h>
+#include <ctype.h>
 #include "mqtt_debug.h"
 #include "core/net.h"
 #include "core/socket.h"
@@ -61,6 +62,15 @@ static struct {
     char payload[40];
 } publishes[512];
 static size_t publish_count;
+static size_t cloud_hint_calls;
+static bool cloud_hint_accepted;
+
+bool_t freshness_original_cloud_hint(settings_t *target, const char *ruid)
+{
+    assert(target == &settings && strlen(ruid) == 16);
+    cloud_hint_calls++;
+    return cloud_hint_accepted && !strcmp(ruid, "00112233445566E0");
+}
 
 static void record_log(unsigned severity, const char *format, ...)
 {
@@ -577,6 +587,255 @@ static void test_cached_diagnostic_owner_has_no_relay_dependency(void)
     assert(mqtt_connection_debug_owner(&conn) == 0);
 }
 
+static void test_original_cloud_hint_lifetime_and_exact_completion(void)
+{
+    MqttClientConnection *conn = initialize(0);
+    const uint64_t uid = 7;
+    assert(mqtt_server_original_cloud_checked(1, uid, 0)); /* Manual refresh without a hint. */
+    assert(!mqtt_server_original_cloud_checked(0, uid, 0));
+    uint64_t first = mqtt_server_original_cloud_hint(1, uid);
+    assert(first && mqtt_server_original_cloud_pending(1, uid) == first);
+    assert(!mqtt_server_original_cloud_checked(1, uid, 0)); /* Hint arriving during manual work wins. */
+    assert(find_entry(uid) && !find_entry(uid)->present);
+    sync_entries();
+    mqtt_fresh_tonies_reset_connection(conn);
+    assert(mqtt_server_original_cloud_pending(1, uid) == first);
+    uint64_t next = mqtt_server_original_cloud_hint(1, uid);
+    assert(next != first && !mqtt_server_original_cloud_checked(1, uid, first));
+    assert(mqtt_server_original_cloud_pending(1, uid) == next);
+    mqtt_freshness_snapshot_t *snapshot = mqtt_server_freshness_begin(1);
+    assert(snapshot && mqtt_server_freshness_prepare(snapshot, NULL, 0) == NO_ERROR);
+    mqtt_server_freshness_finish(snapshot, TRUE);
+    assert(mqtt_server_original_cloud_pending(1, uid) == next);
+    assert(mqtt_server_original_cloud_checked(1, uid, next));
+    assert(mqtt_server_original_cloud_checked(1, uid, 0));
+    sync_entries();
+    assert(!find_entry(uid) && !mqtt_server_original_cloud_pending(1, uid));
+    first = mqtt_server_original_cloud_hint(1, uid);
+    assert(first);
+    settings.internal.overlayUniqueId = "REASSIGNED";
+    mqtt_server_freshness_reconcile_overlays();
+    assert(!mqtt_server_original_cloud_pending(1, uid));
+    assert(!mqtt_server_original_cloud_checked(1, uid, first));
+    allocation_succeeds = FALSE;
+    assert(!mqtt_server_original_cloud_hint(1, uid));
+    allocation_succeeds = TRUE;
+}
+
+static void test_passive_cache_requires_current_live_manifest(void)
+{
+    MqttClientConnection *conn = initialize(0);
+    const uint64_t uid = 7;
+    assert(mqtt_server_original_manifest_observed(1, uid, 0, 100));
+    sync_entries();
+    mqtt_fresh_tonies_reset_connection(conn);
+    assert(find_entry(uid)->cloud_observed_version == 100 && !find_entry(uid)->present);
+    mutex_lock(MUTEX_MQTT_SESSION);
+    assert(!mqtt_server_original_cached_locked(1, uid, 99));
+    assert(mqtt_server_original_cached_locked(1, uid, 100));
+    assert(!mqtt_server_original_cached_locked(1, uid, 100));
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    sync_entries();
+    assert(!find_entry(uid));
+
+    uint64_t first = mqtt_server_original_cloud_hint(1, uid);
+    assert(mqtt_server_original_manifest_observed(1, uid, first, 101));
+    sync_entries(); /* Partial download does not clear the cloud check. */
+    assert(mqtt_server_original_cloud_pending(1, uid) == first);
+    uint64_t next = mqtt_server_original_cloud_hint(1, uid);
+    assert(!mqtt_server_original_manifest_observed(1, uid, first, 101));
+    mutex_lock(MUTEX_MQTT_SESSION);
+    assert(!mqtt_server_original_cached_locked(1, uid, 101));
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    assert(mqtt_server_original_cloud_pending(1, uid) == next);
+    assert(mqtt_server_original_manifest_observed(1, uid, next, 102));
+    mutex_lock(MUTEX_MQTT_SESSION);
+    assert(mqtt_server_original_cached_locked(1, uid, 102));
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    assert(!mqtt_server_original_cloud_pending(1, uid) && publish_count == 0);
+
+    first = mqtt_server_original_cloud_hint(1, uid);
+    assert(mqtt_server_original_manifest_observed(1, uid, first, 103));
+    assert(mqtt_server_original_cloud_checked(1, uid, first)); /* Worker completed instead. */
+    sync_entries();
+    assert(!find_entry(uid));
+
+    initialize(1);
+    assert(mqtt_server_original_manifest_observed(1, 1, 0, 100));
+    assert(mqtt_server_publish_fresh_tonie_for_overlay(1, 1));
+    assert(!find_entry(1)->cloud_observed_version); /* Source change cancels original work. */
+    mutex_lock(MUTEX_MQTT_SESSION);
+    assert(!mqtt_server_original_cached_locked(1, 1, 100));
+    mutex_unlock(MUTEX_MQTT_SESSION);
+}
+
+static void test_http_binds_only_resolved_original_generation(void)
+{
+    MqttClientConnection *conn = initialize(0);
+    mqtt_freshness_snapshot_t *snapshot = mqtt_server_freshness_begin(1);
+    cache[0] = 1; cache_count = 1;
+    mutex_lock(MUTEX_MQTT_SESSION);
+    assert(mqtt_server_original_target_locked(1, 1, 100));
+    assert(!mqtt_server_freshness_bind_original_locked(snapshot, 1, 99));
+    allocation_succeeds = FALSE;
+    assert(!mqtt_server_freshness_bind_original_locked(snapshot, 1, 100));
+    assert(snapshot->count == 0);
+    allocation_succeeds = TRUE;
+    assert(mqtt_server_freshness_bind_original_locked(snapshot, 1, 100));
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    assert(mqtt_server_freshness_prepare(snapshot, cache, 1) == NO_ERROR);
+    assert(find_entry(1)->http_claims == 1);
+    mqtt_server_freshness_finish(snapshot, TRUE);
+    assert(find_entry(1)->delivered);
+    pump_at(conn, monotonic_now);
+    assert(publish_count == 0);
+
+    /* A newer original target, or a private source invalidation, after binding
+     * is never confirmed by the older HTTP response. */
+    for (unsigned source_change = 0; source_change < 2; source_change++)
+    {
+        initialize(1);
+        snapshot = mqtt_server_freshness_begin(1);
+        mutex_lock(MUTEX_MQTT_SESSION);
+        assert(mqtt_server_original_target_locked(1, 1, 100));
+        assert(mqtt_server_freshness_bind_original_locked(snapshot, 1, 100));
+        if (source_change)
+            assert(mqtt_server_publish_fresh_tonie_for_overlay_locked(1, 1));
+        else
+            assert(mqtt_server_original_target_locked(1, 1, 101));
+        mutex_unlock(MUTEX_MQTT_SESSION);
+        assert(mqtt_server_freshness_prepare(snapshot, cache, 1) == NO_ERROR);
+        mqtt_server_freshness_finish(snapshot, TRUE);
+        assert(!find_entry(1)->delivered);
+    }
+}
+
+static void test_http_withheld_original_keeps_stale_state(void)
+{
+    initialize(1);
+    uint64_t hint = mqtt_server_original_cloud_hint(1, 1);
+    mqtt_freshness_snapshot_t *snapshot = mqtt_server_freshness_begin(1);
+    assert(snapshot && mqtt_server_freshness_prepare(snapshot, NULL, 0) == NO_ERROR);
+    mqtt_server_freshness_finish(snapshot, TRUE);
+    assert(cache_count == 1 && find_entry(1)->present && !find_entry(1)->delivered);
+    assert(mqtt_server_original_cloud_pending(1, 1) == hint);
+
+    mutex_lock(MUTEX_MQTT_SESSION);
+    assert(mqtt_server_original_cloud_checked_locked(1, 1, hint));
+    assert(mqtt_server_original_target_locked(1, 1, 100));
+    uint64_t generation = find_entry(1)->generation;
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    snapshot = mqtt_server_freshness_begin(1);
+    assert(snapshot && mqtt_server_freshness_prepare(snapshot, NULL, 0) == NO_ERROR);
+    mqtt_server_freshness_finish(snapshot, TRUE);
+    assert(cache_count == 1 && find_entry(1)->original_target_version == 100);
+    assert(find_entry(1)->generation == generation && !find_entry(1)->delivered);
+
+    /* A matching inventory observation explicitly removes the marker first;
+     * preserving omitted response entries must not resurrect it. */
+    snapshot = mqtt_server_freshness_begin(1);
+    cache_count = 0;
+    assert(mqtt_server_freshness_prepare(snapshot, NULL, 0) == NO_ERROR);
+    mqtt_server_freshness_finish(snapshot, TRUE);
+    assert(cache_count == 0 && find_entry(1) == NULL);
+}
+
+static void test_original_target_dedupe_and_cloud_pause(void)
+{
+    MqttClientConnection *conn = initialize(1);
+    mutex_lock(MUTEX_MQTT_SESSION);
+    assert(mqtt_server_original_target_locked(1, 1, 100));
+    uint64_t generation = find_entry(1)->generation;
+    assert(mqtt_server_original_target_locked(1, 1, 100));
+    assert(find_entry(1)->generation == generation);
+    assert(!mqtt_server_original_confirm_locked(1, 1, 99));
+    assert(mqtt_server_original_confirm_locked(1, 1, 100));
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    uint64_t hint = mqtt_server_original_cloud_hint(1, 1);
+    assert(hint);
+    wall_now += MQTT_FRESH_TONIES_DEBOUNCE_SEC;
+    pump_at(conn, monotonic_now);
+    assert(publish_count == 0);
+    mutex_lock(MUTEX_MQTT_SESSION);
+    assert(!mqtt_server_original_confirm_locked(1, 1, 100));
+    assert(mqtt_server_original_cloud_checked_locked(1, 1, hint));
+    assert(mqtt_server_original_target_locked(1, 1, 100)); /* Unchanged cache catches up once. */
+    assert(find_entry(1)->generation == generation);
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    wall_now += MQTT_FRESH_TONIES_DEBOUNCE_SEC;
+    pump_at(conn, monotonic_now);
+    assert(publish_count == 1);
+    assert(mqtt_handle_fresh_tonies_puback(conn, conn->fresh_tonie_packet_id));
+    mutex_lock(MUTEX_MQTT_SESSION);
+    assert(mqtt_server_original_target_locked(1, 1, 100));
+    assert(find_entry(1)->generation == generation && find_entry(1)->delivered);
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    pump_at(conn, monotonic_now);
+    assert(publish_count == 1);
+    hint = mqtt_server_original_cloud_hint(1, 1);
+    mutex_lock(MUTEX_MQTT_SESSION);
+    assert(mqtt_server_original_cloud_checked_locked(1, 1, hint));
+    assert(mqtt_server_original_target_locked(1, 1, 101));
+    assert(find_entry(1)->generation != generation && !find_entry(1)->delivered);
+    assert(!mqtt_server_original_confirm_locked(1, 1, 100));
+    mutex_unlock(MUTEX_MQTT_SESSION);
+    wall_now += MQTT_FRESH_TONIES_DEBOUNCE_SEC;
+    pump_at(conn, monotonic_now);
+    assert(publish_count == 2);
+    hint = mqtt_server_original_cloud_hint(1, 1);
+    pump_at(conn, monotonic_now + 5000); /* Existing QoS exchange is not cancelled. */
+    assert(publish_count == 3 && publishes[2].duplicate);
+    assert(mqtt_server_publish_fresh_tonie_for_overlay(1, 1)); /* Private source takes over. */
+    assert(!mqtt_server_original_cloud_pending(1, 1));
+    assert(!mqtt_server_original_cloud_checked(1, 1, hint));
+    assert(find_entry(1)->original_target_version == 0);
+}
+
+static void test_cloud_hint_interceptor_recognizes_only_owned_hints(void)
+{
+    MqttClientConnection *conn = initialize(0);
+    conn->box_overlay_id = 1;
+    strcpy(conn->box_common_name, settings.commonName);
+    const char *topic = "toniebox/AABBCCDDEEFF/fresh-tonies";
+    const char *payload = "{\"tonie\":\"00112233445566E0\"}";
+    tb2_mqtt_observer_result_t result;
+    cloud_hint_calls = 0;
+    cloud_hint_accepted = false;
+    assert(mqtt_passthrough_intercept_cloud_publish(conn, FALSE, topic,
+        (const uint8_t *)payload, strlen(payload), 1, &result) == NO_ERROR);
+    assert(cloud_hint_calls == 1 && result.action == TB2_MQTT_OBSERVER_FORWARD);
+    cloud_hint_accepted = true;
+    assert(mqtt_passthrough_intercept_cloud_publish(conn, FALSE, topic,
+        (const uint8_t *)payload, strlen(payload), 1, &result) == NO_ERROR);
+    assert(cloud_hint_calls == 2 && result.action == TB2_MQTT_OBSERVER_CONSUME);
+    assert(result.locally_processed && !result.payload);
+    const char *invalid[] = {"{\"tonie\":\"not-a-ruid\"}", "{\"tonie\":7}",
+        "{\"items\":[\"00112233445566E0\"]}", "{\"tonie\":\"00112233445566E0\"}garbage"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
+    {
+        assert(mqtt_passthrough_intercept_cloud_publish(conn, FALSE, topic,
+            (const uint8_t *)invalid[i], strlen(invalid[i]), 1, &result) == NO_ERROR);
+        assert(result.action == TB2_MQTT_OBSERVER_FORWARD && cloud_hint_calls == 2);
+    }
+    assert(mqtt_passthrough_intercept_cloud_publish(conn, TRUE, topic,
+        (const uint8_t *)payload, strlen(payload), 1, &result) == NO_ERROR);
+    assert(result.action == TB2_MQTT_OBSERVER_FORWARD && cloud_hint_calls == 2);
+    assert(mqtt_passthrough_intercept_cloud_publish(conn, FALSE, "toniebox/OTHER/fresh-tonies",
+        (const uint8_t *)payload, strlen(payload), 1, &result) == NO_ERROR);
+    assert(result.action == TB2_MQTT_OBSERVER_FORWARD && cloud_hint_calls == 2);
+    payload = "[{\"tonie\":\"00112233445566E0\"},\"00112233445566E0\","
+        "{\"tonie\":\"11223344556677E0\",\"unknown\":42},{\"extension\":true}]";
+    assert(mqtt_passthrough_intercept_cloud_publish(conn, FALSE, topic,
+        (const uint8_t *)payload, strlen(payload), 1, &result) == NO_ERROR);
+    assert(result.action == TB2_MQTT_OBSERVER_REWRITE && result.payload && cloud_hint_calls == 5);
+    cJSON *remaining = cJSON_ParseWithLength((const char *)result.payload, result.payload_len);
+    assert(cJSON_GetArraySize(remaining) == 2);
+    assert(cJSON_GetNumberValue(cJSON_GetObjectItem(cJSON_GetArrayItem(remaining, 0), "unknown")) == 42);
+    assert(cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetArrayItem(remaining, 1), "extension")));
+    cJSON_Delete(remaining);
+    osFreeMem(result.payload);
+}
+
 static void test_hass_diagnostic_throttle_has_no_relay_dependency(void)
 {
     MqttClientConnection conn = {0};
@@ -626,6 +885,12 @@ int main(void)
     test_concurrent_http_discovery_and_completion();
     test_snapshot_identity_and_allocation_failures();
     test_http_keeps_admitted_qos_and_boxes_independent();
+    test_original_cloud_hint_lifetime_and_exact_completion();
+    test_passive_cache_requires_current_live_manifest();
+    test_http_binds_only_resolved_original_generation();
+    test_http_withheld_original_keeps_stale_state();
+    test_original_target_dedupe_and_cloud_pause();
+    test_cloud_hint_interceptor_recognizes_only_owned_hints();
     mqtt_debug_test_reset(true, 5000);
     connections[0].debug_fresh_first_ms = 1000;
     connections[0].debug_fresh_last_ms = 2000;

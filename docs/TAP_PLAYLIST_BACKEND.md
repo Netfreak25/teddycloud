@@ -457,4 +457,15 @@ The parser is intentionally strict: surrounding whitespace is ignored, but signs
 
 ## Publish semantics
 
+### Boundary with native originals
+
+`src/handler_cloud.c` shares the selected complete original V3 version between
+freshness and metadata routing. A box's stale marker no longer falls through to
+an older neighbouring TAF. Assigned TAP/TAF Sources and an explicitly selected,
+complete original TAF keep their existing priority; TAP generation, shuffle,
+streaming and source-change confirmation are unchanged. Original TONIES versions
+remain unchanged instead of borrowing synthetic private-content versions. This
+keeps original-cache synchronization separate from the TAP materialization path
+rather than adding another source-selection or encoding pipeline.
+
 Generated TAP files are published with replace-safe semantics. Existing finals are moved to a `.replace.bak` backup before the new `.taf.tmp` is renamed into place. On file systems that support replacing rename this may be atomic, but portability is more important than claiming atomic behavior on every supported port.

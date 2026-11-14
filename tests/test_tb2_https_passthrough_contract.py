@@ -202,8 +202,10 @@ class Tb2HttpsPassthroughContractTests(unittest.TestCase):
             self.cloud_handler.index("error_t handleCloudFreshnessCheckV3(") :
             self.cloud_handler.index("error_t handleCloudCheckOtaV3(")
         ]
-        self.assertRegex(v1_call, r"process_freshness_check\([^;]+, FALSE\);")
-        self.assertRegex(v3_call, r"process_freshness_check\([^;]+, TRUE\);")
+        self.assertRegex(v1_call, r"process_freshness_check\([^;]+, FALSE, NULL, NULL\);")
+        self.assertRegex(v3_call, r"process_freshness_check\([^;]+, TRUE, ctx\.freshnessSnapshot, &ctx\);")
+        self.assertIn("original->cloud_allowed = !tonieInfo->json.nocloud;", handler)
+        self.assertIn("original->original && !original->cloud_allowed", handler)
 
     def test_transport_errors_do_not_switch_modes(self):
         self.assertNotIn("settings_set_bool", self.cloud_request)

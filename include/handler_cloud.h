@@ -2,6 +2,7 @@
 #define _HANDLER_CLOUD_H
 
 #include "debug.h"
+#include "original_content_cache.h"
 
 #include "core/net.h"
 #include "core/ethernet.h"
@@ -41,6 +42,14 @@ void freshness_mark_content_mapping_changed(settings_t *target_settings, const c
 /** Invalidate only runtime original routes sharing this content.json root. */
 void v3_native_content_source_changed(settings_t *target_settings, const char *ruid);
 void freshness_cache_sync_source_changed_uids(settings_t *settings);
+/** Accepted cloud hint; schedules V3-only work, never performs network I/O here. */
+bool_t freshness_original_cloud_hint(settings_t *settings, const char *ruid);
+uint64_t freshness_original_cloud_hint_for_target(settings_t *settings, const char *ruid);
+uint64_t freshness_original_cloud_pending_for_target(settings_t *settings, const char *ruid);
+/** Complete-cache handoff, before optional Library import; no source assignment. */
+void original_content_cache_v3_complete(original_content_cache_job_t *job, uint32_t version);
+/** Merge validated original-cache decisions before the one HTTP response. */
+void freshness_original_finish_response(cbr_ctx_t *ctx);
 bool_t freshness_confirm_v3_content_version(settings_t *settings, const char *ruid,
                                             uint64_t content_version);
 void v3_tap_playback_observe(settings_t *settings,

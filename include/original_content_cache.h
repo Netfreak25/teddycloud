@@ -15,6 +15,14 @@ typedef enum
     ORIGINAL_CACHE_FORMAT_COUNT = 2
 } original_cache_format_t;
 
+typedef enum
+{
+    ORIGINAL_CACHE_REASON_DOWNLOAD = 0,
+    ORIGINAL_CACHE_REASON_PLAYBACK,
+    ORIGINAL_CACHE_REASON_V3_REFRESH,
+    ORIGINAL_CACHE_REASON_V3_SYNC
+} original_content_cache_reason_t;
+
 /** Owned request snapshot. Adapters must not resolve identities from live
  * settings; use these copies in their HTTP/TLS callback contexts instead. */
 typedef struct
@@ -29,6 +37,8 @@ typedef struct
     bool automatic;
     bool both_formats;
     bool refresh_v3;
+    original_content_cache_reason_t reason;
+    uint64_t sync_generation;
     const char *refresh_result; /* Static outcome, set only after a successful cloud check. */
     original_cache_format_t preferred;
     uint32_t observed_version;
@@ -53,6 +63,11 @@ error_t original_content_cache_submit(settings_t *settings, const char *ruid,
  * one accepted job, never that any download has already completed. */
 error_t original_content_cache_refresh_group(settings_t *settings,
     const char *ruid, cJSON *targets);
+
+/** Recheck original V3 content after a real cloud hint, independently of the
+ * dual-format opt-in. NO_ERROR requires the requesting TB2 to be admitted;
+ * another target's admission alone must not consume its cloud notification. */
+error_t original_content_cache_sync_group(settings_t *settings, const char *ruid);
 
 /** Read the per-tag original preference without repairing/writing metadata.
  * Missing/invalid preference falls back to the existing generation default. */
