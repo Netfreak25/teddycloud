@@ -133,6 +133,8 @@ typedef struct
     size_t capacity;
     uint32_t status_code;
     uint32_t version;
+    /* Nonzero: fill only this version without changing the playback route. */
+    uint32_t metadata_version;
     bool_t store;
     bool_t failed;
     error_t error;
@@ -245,6 +247,14 @@ error_t v3_native_cache_import_active_library(const char *cache_root,
 error_t v3_native_cache_audio_snapshot(const char *cache_root,
     const char *library_root, uint8_t overlay_id, const char *ruid,
     uint32_t expected_version, uint32_t *version,
+    v3_native_library_collection_t *collection);
+
+/** Read an exact retained or staged manifest without selecting a runtime route.
+ * Missing audio has a NULL chapter path; all returned data is independently
+ * owned. Version zero selects the active marker, never an arbitrary generation. */
+error_t v3_native_cache_metadata_snapshot(const char *cache_root,
+    const char *library_root, uint8_t overlay_id, const char *ruid,
+    uint32_t version, uint8_t **manifest, size_t *length,
     v3_native_library_collection_t *collection);
 
 error_t v3_native_cache_import_active_library_version(

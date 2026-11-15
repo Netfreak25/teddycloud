@@ -14,3 +14,7 @@ error_t handleApiNativeImportOperation(HttpConnection *connection, const char_t 
 
 /** Validate a single complete, unmultiplexed Ogg/Opus stream with bounded RAM. */
 error_t encoder_validate_opus_file(const char *path, double *duration_seconds);
+
+/** Same bounded validation pass, optionally retaining the intrinsic TITLE tag. */
+error_t encoder_read_opus_metadata(const char *path, double *duration_seconds,
+    char *title, size_t title_size);

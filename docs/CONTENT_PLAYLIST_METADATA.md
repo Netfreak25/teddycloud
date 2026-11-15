@@ -1,8 +1,84 @@
-# Custom TAF playlist display metadata
+# Content-bound playlist display metadata
 
-This subsystem stores display names for directly assigned custom TAF files. It is independent of the TB1 TAP playlist subsystem and is not used for streams, TONIES original content, or playback routing. The read-only tag-info duration below also supports original cached TAFs without a source assignment.
+This subsystem stores content-specific display data independently of the TB1 TAP playlist subsystem and playback routing. Its TAF part stores names for directly assigned custom files; the separate native part resolves original and assigned V3 content by version. The read-only TAF total duration also supports original cached TAFs without a source assignment.
 
-## Behavior
+## Versioned native V3 playlists
+
+Native metadata is separate from figurine identity (`tonieInfo`, model, custom
+image). `getTagInfo` resolves the requested `contentVersion`, including retained
+older generations, rather than substituting the active newer cache. Without a
+requested version the existing content selection remains authoritative. Unknown
+native content still returns `playlist.kind = "native_collection"`; clients must
+not substitute the figure's catalog tracks or a nearby TAF timeline.
+
+```json
+{"playlist":{"kind":"native_collection","contentVersion":1794257325,
+ "chapterCount":3,"title":"","tracks":["Opening","","Ending"],
+ "durations":[33.125,null,32.875],"metadataState":"partial",
+ "metadataReason":"durations_unavailable","metadataRevision":"<sha256>"}}
+```
+
+`chapterCount` and `contentVersion` are omitted if structure/version cannot be
+resolved. Titles and durations retain manifest order; unknown names are empty,
+unknown durations `null`, not zero. Names prefer saved collection data, explicit
+manifest/Ogg titles, then a unique content-version catalog match. Equal counts
+alone and technical analytics slugs are not titles. Clients use localized
+`Chapter N` labels without changing indices.
+
+States are `pending`, `ready`, `partial`, `unavailable`. Names are optional:
+known structure and all known durations suffice for `ready`. `totalSeconds`
+appears only with all durations known, summing fractions before display rounding.
+The existing bounded Ogg/Opus validator reads immutable files once, without
+decoding: `(final_granule - pre_skip) / 48000`. Unsupported/incomplete streams
+remain unknown; this does not change their playback handling.
+
+Sanitized records live at
+`<datadir>/content-metadata/v3-playlists/<scope-hash>/<RUID>/<version>.json`.
+The scope includes stable box identity and effective content/library directories.
+Records contain chapter identities and attempt state, not auth tokens/raw
+manifests. Atomic same-directory publication is limited to 1 MiB. Intrinsic
+file durations/Ogg titles can enrich existing Library fields; manifest-specific
+names stay per RUID/version. Successfully served assigned collections bind their
+actual Library identity to the version, preserving it across source changes.
+
+Actual TB2 playback can submit a task to the existing serial worker. Local data
+comes first, followed by an exact-version manifest/missing-audio download only
+with existing Source/NoCloud/cache/cloud/certificate permissions. Another cloud
+version is not downloaded under the requested version. Metadata-only fills do
+not activate a cache generation, change Source, acknowledge freshness or send
+controls. List/status reads never enqueue cloud work. Attempts survive restarts;
+interrupted attempts are visible rather than retried. Manual V3 refresh resets
+the latch and permits rescanning previously unmeasurable files.
+
+`runtime.playback.metadataRevision` is an opaque string for local metadata
+reload through existing box polling. Both clients reject stale identities and
+versions. TeddyRemote retains fractional seconds internally as milliseconds and
+does not apply intro/outro shifts to native playlists. Box `chapterDuration`
+and `chapterUntilMs` remain the first choice for current position calculations.
+
+Changes by file:
+
+- `src/v3_playlist_metadata.c`, `include/v3_playlist_metadata.h`: isolated
+  version resolution, sanitized persistence and enrichment; no generic store
+  or second queue. `include/mutex_manager.h` adds the publication lock.
+- `src/encoder_api.c`, `include/encoder_api.h`: optional intrinsic `TITLE`
+  extraction during the existing validator pass, without another decoder.
+- `src/v3_native_cache.c`, `include/v3_native_cache.h`: passive retained/staging
+  snapshots and detached fills rather than activating old versions for inspection.
+- `src/original_content_cache.c`, `include/original_content_cache.h`,
+  `src/original_content_transfer.c`: owned playback jobs reuse bounded admission,
+  policy and transport, with persistent one-attempt state.
+- `src/handler_cloud.c`: observe manifests/completed files and bind served
+  collections; metadata completions skip route/freshness finalizers.
+- `src/mqtt_server.c`: enqueue real playback without file/network I/O in the
+  observer. `src/handler_api.c`: exact playlists/revisions, no figure/TAF bleed.
+- WebUI playlist helpers and TeddyRemote resolver: consistent nullable durations,
+  authoritative counts and revision reloads rather than cloud polling.
+
+Audio-restart investigation and hardware acceptance remain separate. Tests do
+not establish either. Existing TAF timing remains as described below.
+
+## TAF behavior
 
 The live TB2 playlist uses the custom TAF header as its authoritative structure. Its chapter count is always `n_track_page_nums`; metadata belonging only to the physical Tonie must not enlarge or relabel custom content. TAF track positions are chapter start offsets and the WebUI labels them accordingly.
 

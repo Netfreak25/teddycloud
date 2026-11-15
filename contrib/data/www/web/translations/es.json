@@ -3433,6 +3433,12 @@
             "titleSelect": "Seleccionar imagen"
         },
         "infoModal": {
+            "nativeMetadata": {
+                "pending": "Cargando los datos de capítulos de esta versión del contenido.",
+                "partial": "Algunas duraciones siguen siendo desconocidas. Los nombres que faltan se sustituyen por números de capítulo.",
+                "unavailable": "No hay datos de capítulos para esta versión del contenido.",
+                "totalDuration": "Duración total: {{time}}"
+            },
             "downloadNative": "Descargar capítulos de audio nativo como ZIP",
             "download": "Descargar TAF como *.ogg",
             "exists": "Existe:",

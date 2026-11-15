@@ -3612,6 +3612,9 @@ static error_t handle_mqtt_publish_playback_state(MqttClientConnection *conn, Mq
     {
         freshness_confirm_v3_content_version(settings, tonie->valuestring,
                                              content_version);
+        if (content_version != 0 && content_version <= UINT32_MAX)
+            original_content_cache_metadata_playback(settings, tonie->valuestring,
+                (uint32_t)content_version);
     }
     v3_tap_playback_observe(settings,
                             previous_ruid_ptr,

@@ -30,7 +30,7 @@ def main():
         subprocess.run(["gcc", *objects, "-Wl,--gc-sections", "-pthread", "-lm", "-o", str(executable)], check=True)
         for case in ["query", "overlay", "uint", "success", "repeated-eof", "missing-eof",
                      "partial", "write-error", "flush-error", "transport-error", "status-error",
-                     "v3-cache-hit", "v3-refresh", "v3-refresh-failed", "v3-import-failed"]:
+                     "v3-cache-hit", "v3-refresh", "v3-refresh-failed", "v3-import-failed", "v3-metadata"]:
             work = Path(directory) / case
             work.mkdir()
             subprocess.run([str(executable), case], cwd=work, timeout=15, check=True)

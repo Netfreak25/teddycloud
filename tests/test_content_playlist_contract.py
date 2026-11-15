@@ -43,10 +43,14 @@ int main(void) {
     chapters[1].has_duration=FALSE;
     catalog.tracks_count=1;
     api_native_collection_metadata(&collection, &catalog, result, TRUE);
-    assert(cJSON_GetArraySize(cJSON_GetObjectItem(result,"durations"))==0);
+    assert(cJSON_GetArraySize(cJSON_GetObjectItem(result,"durations"))==2);
+    assert(cJSON_GetArrayItem(cJSON_GetObjectItem(result,"durations"),0)->valuedouble==1.125);
+    assert(cJSON_IsNull(cJSON_GetArrayItem(cJSON_GetObjectItem(result,"durations"),1)));
     assert(!strcmp(cJSON_GetArrayItem(cJSON_GetObjectItem(result,"tracks"),1)->valuestring,"Chapter 2"));
     api_native_collection_metadata(&collection, &catalog, result, FALSE);
     assert(cJSON_GetArraySize(cJSON_GetObjectItem(result,"tracks"))==0);
+    assert(cJSON_GetArraySize(cJSON_GetObjectItem(result,"durations"))==2);
+    assert(cJSON_IsNull(cJSON_GetArrayItem(cJSON_GetObjectItem(result,"durations"),1)));
     cJSON_Delete(result);
     puts("PASS: imported native metadata priority, exact catalog count and durations");
 }
@@ -67,6 +71,7 @@ int main(void) {
     def setUpClass(cls):
         cls.playlist = (ROOT / "src/content_playlist.c").read_text(encoding="utf-8")
         cls.api = (ROOT / "src/handler_api.c").read_text(encoding="utf-8")
+        cls.native_metadata = (ROOT / "src/v3_playlist_metadata.c").read_text(encoding="utf-8")
         cls.handler = (ROOT / "src/handler.c").read_text(encoding="utf-8")
         cls.server = (ROOT / "src/server.c").read_text(encoding="utf-8")
         cls.controls = (
@@ -86,6 +91,9 @@ int main(void) {
         ).read_text(encoding="utf-8")
         cls.native_playback = (
             WEB / "src/utils/audio/nativeCollection.ts"
+        ).read_text(encoding="utf-8")
+        cls.playlist_metadata = (
+            WEB / "src/utils/audio/playlistMetadata.ts"
         ).read_text(encoding="utf-8")
         cls.audio_player_page = (
             WEB / "src/pages/tonies/TeddyAudioPlayerPage.tsx"
@@ -126,12 +134,16 @@ int main(void) {
         self.assertIn('REQ_POST, "/api/content/playlist/"', self.server)
 
     def test_custom_playlist_does_not_reuse_original_tonie_tracks(self):
-        custom_start = self.controls.index('tonie?.playlist?.kind === "direct_taf"')
-        original_start = self.controls.index("const trackCount = Math.max", custom_start)
-        custom_path = self.controls[custom_start:original_start]
-        self.assertIn("tonie.playlist.chapterCount", custom_path)
-        self.assertIn("tonie.trackSeconds.length || sourceTracks.length", custom_path)
-        self.assertNotIn("assignedTracks", custom_path)
+        custom_start = self.playlist_metadata.index("const playlist = tonie?.playlist;")
+        original_start = self.playlist_metadata.index("const figureTracks", custom_start)
+        custom_path = self.playlist_metadata[custom_start:original_start]
+        self.assertIn("playlist.chapterCount", custom_path)
+        self.assertIn("playlist.tracks[index]?.trim()", custom_path)
+        self.assertIn("if (nativePlayback) return [];", custom_path)
+        self.assertNotIn("figureTracks", custom_path)
+        self.assertNotIn("tonieInfo", custom_path)
+        self.assertIn("tonie.trackSeconds.length || sourceTracks.length", self.playlist_metadata)
+        self.assertIn("resolvePlaybackTracks(tonie,", self.controls)
 
     def test_active_tap_playlist_uses_the_reported_content_version(self):
         tap_api = self.api[
@@ -149,9 +161,11 @@ int main(void) {
         self.assertIn("contentVersion=${encodeURIComponent(contentVersion)}", self.web_api)
 
     def test_tap_playlist_and_drawer_share_the_resolved_generation_tracks(self):
-        self.assertIn('if (tonie?.playlist?.kind === "tap")', self.controls)
+        self.assertIn("const playlist = tonie?.playlist;", self.playlist_metadata)
+        self.assertIn("playlist.chapterCount", self.playlist_metadata)
+        self.assertIn("playlist.tracks[index]?.trim()", self.playlist_metadata)
         self.assertIn("tracks={tracks}", self.controls)
-        self.assertIn("trackDurations={tonie?.playlist?.durations}", self.controls)
+        self.assertIn("nativeContent ? nativePlaylist?.durations : tonie?.playlist?.durations", self.controls)
         self.assertIn("onEditExternal={tapEditRoute ? editTap : undefined}", self.controls)
         self.assertIn("onClick={onEditExternal ?? startEditing}", self.drawer)
 
@@ -174,7 +188,7 @@ int main(void) {
         self.assertIn("positions->total_seconds", self.playlist)
         self.assertIn('cJSON_AddArrayToObject(json, "durations")', self.playlist)
         self.assertIn('cJSON_AddArrayToObject(playlist, "durations")', self.api)
-        self.assertIn("trackDurations={tonie?.playlist?.durations}", self.controls)
+        self.assertIn("nativeContent ? nativePlaylist?.durations : tonie?.playlist?.durations", self.controls)
         self.assertIn("chapterDuration", self.drawer)
 
     def test_total_seconds_only_uses_the_selected_taf_content(self):
@@ -187,17 +201,54 @@ int main(void) {
             compact,
         )
         self.assertIn(
-            "bool_t use_original_v3_playlist = use_original_v3_content && "
-            "!v3_cache_tonieplay;",
+            "bool_t use_original_v3_playlist = !source_configured && "
+            "tb2_context && !v3_cache_tonieplay && "
+            "!requested_local_taf && (content_version_valid || use_original_v3_content || "
+            "(prefer_native_cache && !taf_cache_complete));",
             compact,
         )
         self.assertIn(
+            "bool_t requested_local_taf = content_version_valid && tb2_context && "
+            "v3_playlist_metadata_is_local_taf(client_ctx->settings, ruid, content_version);",
+            compact,
+        )
+        local_taf_proof = self.native_metadata[
+            self.native_metadata.index("bool_t v3_playlist_metadata_is_local_taf(") :
+            self.native_metadata.index("static bool_t json_end(")
+        ]
+        self.assertIn("version != 0", local_taf_proof)
+        self.assertIn("v3_local_content_generation_load", local_taf_proof)
+        self.assertIn("settings->internal.overlayNumber, ruid, version, &generation)", local_taf_proof)
+        self.assertIn("generation.source_kind == V3_LOCAL_CONTENT_SOURCE_DIRECT_TAF", local_taf_proof)
+        self.assertIn(
             "else { api_add_content_playlist(jsonEntry, tafInfo, "
-            "client_ctx->settings, item2); if (!use_original_v3_content) { "
+            "client_ctx->settings, item2); if (!use_original_v3_content || requested_local_taf) { "
             "api_add_taf_total_seconds(jsonEntry, tafInfo); } }",
             compact,
         )
         self.assertEqual(tag_info.count("api_add_taf_total_seconds("), 1)
+        self.assertIn(
+            'if (retained_native || use_original_v3_playlist || tafInfo->json._source_type == CT_SOURCE_NATIVE_COLLECTION) '
+            '{ cJSON_DeleteItemFromObjectCaseSensitive(jsonEntry, "trackSeconds"); '
+            'cJSON_AddArrayToObject(jsonEntry, "trackSeconds"); }',
+            compact,
+        )
+        self.assertIn(
+            "cJSON *retained_playlist = tb2_context && content_version_valid ? "
+            "v3_playlist_metadata_json(client_ctx->settings, ruid, content_version) : NULL;",
+            compact,
+        )
+        self.assertIn(
+            'if (retained_native) { cJSON_AddItemToObject(jsonEntry, "playlist", retained_playlist); '
+            'retained_playlist = NULL; } else if (tafInfo->json._source_type == CT_SOURCE_TAP_STREAM',
+            compact,
+        )
+        self.assertLess(compact.index("if (retained_native)"), compact.index("else if (use_original_v3_playlist)"))
+        tag_info_handler = self.api[self.api.index("error_t handleApiTagInfo(") :]
+        self.assertRegex(
+            tag_info_handler,
+            r"parsed == 0 \|\| parsed > UINT32_MAX\)\s*\{\s*return ERROR_INVALID_REQUEST;",
+        )
 
     def test_total_seconds_production_helper(self):
         """Compile the real helper with real types/cJSON and a controlled stat."""
@@ -228,7 +279,7 @@ int main(void) {
             subprocess.run([str(executable)], cwd=directory, check=True)
 
     def test_custom_title_uses_only_exact_taf_metadata_as_default(self):
-        custom_start = self.controls.index("const series = customContent")
+        custom_start = self.controls.index("const series = nativeContent")
         custom_title = self.controls[
             custom_start : self.controls.index(": tonie?.tonieInfo.series", custom_start)
         ]
@@ -254,8 +305,16 @@ int main(void) {
         ]
         self.assertIn("collection->origins", native_api)
         self.assertIn("item->tracks_count == collection->chapter_count", native_api)
-        self.assertIn('cJSON_AddStringToObject(playlist, "kind", "native_collection")', native_api)
-        self.assertIn('custom_asprintf("Chapter %u"', native_api)
+        self.assertIn("tonies_byAudioIdTrackCountUnique(", native_api)
+        self.assertIn("matched != NULL && matched != item", native_api)
+        self.assertIn("v3_playlist_metadata_json(settings, ruid, requested_version)", native_api)
+        self.assertIn("v3_playlist_collection_json(&collection,", native_api)
+        self.assertNotIn("requested_version == collection.audio_id", native_api)
+        self.assertNotIn("tonies_byModel", native_api)
+        self.assertIn('cJSON_AddStringToObject(playlist, "kind", "native_collection")', self.native_metadata)
+        self.assertIn('cJSON_AddNumberToObject(playlist, "chapterCount", (double)count)', self.native_metadata)
+        self.assertIn('cJSON_AddItemToArray(tracks, cJSON_CreateString(name))', self.native_metadata)
+        self.assertIn('cJSON_CreateNumber(duration->valuedouble) : cJSON_CreateNull()', self.native_metadata)
         self.assertIn('tonie?.playlist?.kind === "native_collection"', self.controls)
 
     def test_native_collection_metadata_reaches_file_browser_and_player(self):
@@ -270,13 +329,37 @@ int main(void) {
             self.api,
         )
         self.assertIn("item->tracks_count == collection->chapter_count", self.api)
-        self.assertIn("metadata?.tracks?.length === audio.chapters.length", self.native_playback)
+        self.assertIn("mergeChapterTitles(audio.chapters.length, metadata?.tracks)", self.native_playback)
+        self.assertIn("source?.length === count ? source[index]", self.playlist_metadata)
         self.assertIn("record.tonieInfo?.tracks", self.file_browser)
         self.assertIn("record.tonieInfo?.tracks", self.audio_player_page)
         tonie_audio = (WEB / "src/utils/audio/tonieAudio.ts").read_text(encoding="utf-8")
-        self.assertIn("tonie.playlist?.tracks", tonie_audio)
+        self.assertIn("matchingNativePlaylist(tonie.playlist, contentVersion)", tonie_audio)
+        self.assertIn("playlist?.tracks", tonie_audio)
+        self.assertIn("playlist?.durations", tonie_audio)
+        self.assertNotIn("tonie.tonieInfo.tracks", tonie_audio)
+        self.assertNotIn("tonie.sourceInfo?.tracks", tonie_audio)
         self.assertIn("loadTonieNativePlaybackItem", self.tonie_card)
         self.assertIn("record.tonieInfo?.tracks?.some", self.file_browser_columns)
+
+    def test_versioned_native_lookup_and_reload_do_not_fall_back_to_figure_metadata(self):
+        lookup = self.native_metadata[
+            self.native_metadata.index("cJSON *v3_playlist_metadata_json("):
+            self.native_metadata.index("void v3_playlist_metadata_revision(")
+        ]
+        self.assertIn("load(settings, ruid, version)", lookup)
+        self.assertIn("ruid, version, &manifest", lookup)
+        self.assertIn("resolved->valuedouble == version", lookup)
+        self.assertNotIn("original_content_cache_request", lookup)
+        self.assertNotIn("encoder_read_opus_metadata", lookup)
+        self.assertNotIn("tonies_byModel", self.native_metadata)
+        self.assertIn("playlist.contentVersion !== contentVersion", self.playlist_metadata)
+        self.assertIn("runtime?.playback.metadataRevision", self.card)
+        self.assertIn("currentMetadataKey.current !== metadataKey", self.card)
+        self.assertIn("request !== metadataRequest.current", self.card)
+        self.assertIn("loadedMetadataKey === metadataKey ? nowPlayingTonie : undefined", self.card)
+        self.assertIn("knownDuration(trackDurations?.[index])", self.drawer)
+        self.assertIn(': "—"', self.drawer)
 
     def test_tonieplay_name_uses_manifest_metadata_in_file_browser(self):
         self.assertIn("tonieplayCollectionDisplayName", self.native_playback)

@@ -165,7 +165,9 @@ class Tb2V3ManualDownloadContractTest(unittest.TestCase):
         self.assertIn("v3_native_cache_read_active_manifest", restore)
         self.assertNotIn("v3_native_cache_open_active_manifest", restore)
         self.assertNotIn("v3_native_cache_meta_capture_init", restore)
-        self.assertGreaterEqual(self.manual.count("TRUE);"), 4)
+        # Normal downloads validate the previous active cache; detached metadata
+        # enrichment must not select or restore any playback generation.
+        self.assertGreaterEqual(self.manual.count("!metadata_only);"), 4)
 
     def test_errors_are_stage_specific_for_api_and_logs(self):
         for stage in (

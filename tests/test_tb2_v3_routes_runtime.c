@@ -245,6 +245,63 @@ static void check_refresh_result(const char *scenario, const char *result)
     }
 }
 
+static void test_metadata_snapshot_and_detached_download(void)
+{
+    complete_generation(CONTENT_RUID, 9, "newer.opus");
+    /* A real, incomplete older manifest is already selected. Metadata must
+     * fill it without changing that route or the newer active cache marker. */
+    manifest(CONTENT_RUID, 7, "older.opus", "last.opus", TRUE);
+    v3_native_cache_meta_capture_t meta;
+    v3_native_cache_meta_capture_init(&meta, TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY, CONTENT_RUID);
+    meta.metadata_version = 7;
+    meta_body_auth(&meta, 7, "older.opus", "last.opus", "auth");
+    assert(v3_native_cache_meta_capture_finish(&meta) == NO_ERROR);
+    v3_native_cache_download_plan_t plan;
+    assert(v3_native_cache_download_plan_from_meta(&meta, &plan) == NO_ERROR);
+    v3_native_cache_meta_capture_abort(&meta);
+    uint8_t *raw = NULL;
+    size_t length = 0;
+    v3_native_library_collection_t metadata = {0};
+    assert(v3_native_cache_metadata_snapshot(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+        CONTENT_RUID, 7, &raw, &length, &metadata) == NO_ERROR);
+    assert(length && metadata.chapter_count == 2 && metadata.chapters[0].path == NULL);
+    free(raw);
+    v3_native_library_collection_free(&metadata);
+    for (size_t i = 0; i < plan.object_count; i++)
+    {
+        v3_native_cache_chapter_capture_t capture;
+        char *path = NULL;
+        assert(v3_native_cache_chapter_prepare_plan(TEST_CACHE, TEST_LIBRARY, &plan,
+            plan.objects[i].name, &capture, &path) == V3_NATIVE_CHAPTER_CAPTURE);
+        v3_native_cache_chapter_capture_t concurrent;
+        assert(prepare(plan.objects[i].name, &concurrent, &path) == V3_NATIVE_CHAPTER_FORWARD);
+        v3_native_cache_chapter_abort(&concurrent);
+        finish_object(&capture);
+    }
+    v3_native_cache_download_plan_free(&plan);
+    uint32_t active = 0;
+    assert(v3_native_cache_active_version(TEST_CACHE, TEST_OVERLAY, CONTENT_RUID, &active) && active == 9);
+    assert(!v3_native_cache_route_matches(TEST_OVERLAY, CONTENT_RUID, 9, "newer.opus"));
+    assert(v3_native_cache_route_matches(TEST_OVERLAY, CONTENT_RUID, 7, "older.opus"));
+    assert(v3_native_cache_metadata_snapshot(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+        CONTENT_RUID, 7, &raw, &length, &metadata) == NO_ERROR);
+    assert(metadata.chapter_count == 2 && metadata.chapters[0].path && metadata.chapters[1].path);
+    assert(!strcmp(metadata.chapters[1].original_name, "last.opus"));
+    free(raw);
+    v3_native_library_collection_free(&metadata);
+    assert(v3_native_cache_metadata_snapshot(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+        CONTENT_RUID, 8, &raw, &length, &metadata) != NO_ERROR);
+    v3_native_cache_meta_capture_init(&meta, TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY, CONTENT_RUID);
+    meta.metadata_version = 7;
+    meta_body_auth(&meta, 10, "wrong.opus", NULL, "auth");
+    assert(v3_native_cache_meta_capture_finish(&meta) == ERROR_WRONG_IDENTIFIER);
+    v3_native_cache_meta_capture_abort(&meta);
+    assert(v3_native_cache_active_version(TEST_CACHE, TEST_OVERLAY, CONTENT_RUID, &active) && active == 9);
+    /* A later real manifest may select the now-complete retained version. */
+    manifest(CONTENT_RUID, 7, "older.opus", "last.opus", TRUE);
+    assert(v3_native_cache_active_version(TEST_CACHE, TEST_OVERLAY, CONTENT_RUID, &active) && active == 7);
+}
+
 static void test_refresh_unchanged(void) { check_refresh_result("unchanged", "unchanged"); }
 static void test_refresh_updated(void) { check_refresh_result("updated", "updated"); }
 static void test_refresh_downloaded(void) { check_refresh_result("downloaded", "downloaded"); }
@@ -1803,6 +1860,21 @@ static void test_audio_snapshot_cache_and_library(void)
         {
             assert(v3_native_cache_import_active_library(TEST_CACHE, TEST_LIBRARY,
                 TEST_OVERLAY, CONTENT_RUID, &source) == NO_ERROR);
+            char entry_path[512];
+            snprintf(entry_path, sizeof(entry_path), "%s/%s", TEST_LIBRARY, source + strlen("lib://"));
+            char *stored = read_test_file(entry_path);
+            cJSON *entry = cJSON_Parse(stored);
+            assert(entry != NULL);
+            cJSON_AddStringToObject(entry, "title", "Stored collection title");
+            cJSON *first = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(entry, "chapters"), 0);
+            cJSON_AddStringToObject(first, "title", "Stored chapter title");
+            cJSON_AddNumberToObject(first, "durationSeconds", 33.125);
+            char *changed = cJSON_PrintUnformatted(entry);
+            assert(changed != NULL);
+            write_test_file(entry_path, changed);
+            cJSON_free(changed);
+            cJSON_Delete(entry);
+            free(stored);
             free(source);
         }
         assert(v3_native_cache_audio_snapshot(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
@@ -1817,6 +1889,20 @@ static void test_audio_snapshot_cache_and_library(void)
             free(bytes);
         }
         assert(strcmp(audio.chapters[0].path, audio.chapters[1].path) != 0);
+        v3_native_library_collection_free(&audio);
+        uint8_t *raw = NULL;
+        size_t length = 0;
+        assert(v3_native_cache_metadata_snapshot(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
+            CONTENT_RUID, 7, &raw, &length, &audio) == NO_ERROR);
+        assert(length && audio.chapter_count == 2 && audio.chapters[0].path != NULL);
+        assert(!strcmp(audio.chapters[0].original_name, "original.opus"));
+        if (backing)
+        {
+            assert(audio.title && !strcmp(audio.title, "Stored collection title"));
+            assert(audio.chapters[0].title && !strcmp(audio.chapters[0].title, "Stored chapter title"));
+            assert(audio.chapters[0].has_duration && audio.chapters[0].duration_seconds == 33.125);
+        }
+        free(raw);
         v3_native_library_collection_free(&audio);
         assert(v3_native_cache_audio_snapshot(TEST_CACHE, TEST_LIBRARY, TEST_OVERLAY,
             CONTENT_RUID, 8, &version, &audio) != NO_ERROR);
@@ -1858,6 +1944,7 @@ int main(int argc, char **argv)
 {
     struct { const char *name; void (*run)(void); } cases[] = {
         {"refresh-unchanged", test_refresh_unchanged},
+        {"metadata-detached", test_metadata_snapshot_and_detached_download},
         {"refresh-updated", test_refresh_updated},
         {"refresh-downloaded", test_refresh_downloaded},
         {"refresh-failure", test_refresh_failure},

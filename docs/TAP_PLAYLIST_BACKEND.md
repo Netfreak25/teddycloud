@@ -6,6 +6,24 @@ Display metadata for directly assigned custom TAF files is separate from this TB
 
 ## Implementation overview
 
+### Version-correct native display metadata
+
+Native playlists use requested V3 generations, not figurine catalog tracks or
+adjacent TAF offsets. TAF timing (next start minus current start; known end minus
+last start), TAP generation, shuffle, Source and HTTP audio delivery are unchanged.
+
+`src/handler_api.c` separates native metadata from the TAF timeline;
+`src/v3_playlist_metadata.c` owns sanitized per-version records and enrichment.
+`src/encoder_api.c` reuses bounded Ogg validation for fractional duration and
+optional intrinsic titles instead of decoding or scanning on every API call.
+`src/v3_native_cache.c` supplies passive exact snapshots and detached fills.
+`src/original_content_cache.c`, `src/original_content_transfer.c`,
+`src/handler_cloud.c` and `src/mqtt_server.c` reuse the existing worker for one
+permission-checked attempt per played version, without Source/freshness
+finalizers. This avoids a second downloader and prevents older metadata fills
+from replacing the active cache. API and per-file rationale:
+[CONTENT_PLAYLIST_METADATA.md](CONTENT_PLAYLIST_METADATA.md).
+
 ### Manual V3 cloud refresh (TAF behavior unchanged)
 
 The Tonie editor can explicitly check all TB2s in its content group for a current

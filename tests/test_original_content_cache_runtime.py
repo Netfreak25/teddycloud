@@ -27,7 +27,7 @@ def main():
             objects.append(str(output))
         subprocess.run(["gcc", *objects, "-Wl,--gc-sections", "-pthread", "-lm", "-o", str(executable)], check=True)
         for case in ["queue", "policy", "worker", "refresh-group", "refresh-api", "refresh-worker",
-                     "sync-group", "sync-worker"]:
+                     "sync-group", "sync-worker", "metadata-worker", "metadata-local-taf"]:
             work = Path(directory) / case
             work.mkdir()
             subprocess.run([str(executable), case], cwd=work, timeout=15, check=True)

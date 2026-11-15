@@ -4,6 +4,18 @@ This is the canonical description of TeddyCloud's local TB2 V3 content path. It 
 
 The transparent TB2 proxy is not part of this path. Local content routing is implemented by the content-aware V3 cloud path.
 
+## Read-only versioned playlist metadata
+
+Display lookup can read the exact retained/staged manifest even before every
+audio object exists. This is not evidence of a complete playback cache.
+An explicit metadata job reuses the original-content worker but fills a detached
+generation: it never changes the active marker, selected route, Source or
+freshness state. Existing writers remain exclusive; metadata cannot steal an
+object currently being downloaded. A different version returned by TONIES is
+rejected before chapter downloads. Missing/forbidden data stays visibly unknown.
+Titles, fractional durations, persistent attempt state and client reloads are
+documented in [CONTENT_PLAYLIST_METADATA.md](CONTENT_PLAYLIST_METADATA.md).
+
 The observed Tonieplay download protocol and the current gaps between its
 heterogeneous object model and this audio-oriented cache are documented in
 [`TB2_TONIEPLAY_DOWNLOADS.md`](TB2_TONIEPLAY_DOWNLOADS.md).

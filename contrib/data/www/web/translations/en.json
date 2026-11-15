@@ -3433,6 +3433,12 @@
             "titleSelect": "Select image"
         },
         "infoModal": {
+            "nativeMetadata": {
+                "pending": "Chapter metadata for this content version is being loaded.",
+                "partial": "Some chapter durations are still unknown. Missing names use chapter numbers.",
+                "unavailable": "Chapter metadata for this content version is unavailable.",
+                "totalDuration": "Total duration: {{time}}"
+            },
             "downloadNative": "Download native audio chapters as ZIP",
             "download": "Download TAF as *.ogg",
             "exists": "Exists:",

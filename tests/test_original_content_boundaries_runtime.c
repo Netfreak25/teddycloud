@@ -49,6 +49,8 @@ static uint8_t taf_bytes[TONIEFILE_FRAME_SIZE * 2];
 static unsigned requests;
 static unsigned v3_downloads, v3_imports;
 static unsigned v3_completions;
+error_t v3_playlist_metadata_enrich(settings_t *value, const char *ruid, uint32_t version)
+{ (void)value; (void)ruid; (void)version; return NO_ERROR; }
 
 settings_t *get_settings(void) { return &settings[0]; }
 settings_t *get_settings_id(uint8_t id) { assert(id < 3); return &settings[id]; }
@@ -93,7 +95,7 @@ bool_t v3_native_cache_active_info(const char *cache, const char *library, uint8
 
 error_t original_content_download_v3(original_content_cache_job_t *job)
 {
-    assert(job->refresh_v3);
+    assert(job->refresh_v3 || job->reason == ORIGINAL_CACHE_REASON_V3_METADATA);
     v3_downloads++;
     if (!strcmp(scenario, "v3-refresh-failed")) return ERROR_TIMEOUT;
     job->refresh_result = "unchanged";
@@ -266,6 +268,15 @@ static void check_v3_materialize(void)
     job.refresh_v3 = strcmp(scenario, "v3-cache-hit") != 0;
     const char *reason = NULL;
     bool import = !strcmp(scenario, "v3-import-failed");
+    if (!strcmp(scenario, "v3-metadata"))
+    {
+        job.reason = ORIGINAL_CACHE_REASON_V3_METADATA;
+        job.refresh_v3 = false;
+        job.observed_version = 6; /* Active version is seven; do not finalize it. */
+        assert(original_content_cache_materialize(&job, ORIGINAL_CACHE_V3, true, &reason) == NO_ERROR);
+        assert(v3_downloads == 1 && v3_imports == 0 && v3_completions == 0 && requests == 0);
+        return;
+    }
     error_t error = original_content_cache_materialize(&job, ORIGINAL_CACHE_V3, import, &reason);
     assert(v3_downloads == (job.refresh_v3 ? 1U : 0U));
     assert(v3_imports == (import ? 1U : 0U));

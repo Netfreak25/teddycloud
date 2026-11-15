@@ -68,7 +68,7 @@ class Tb2V3NativeCacheContractTests(unittest.TestCase):
         )
         self.assertIn("if (!v3_native_cache_files_complete(route))", activation)
         self.assertIn("return ERROR_IN_PROGRESS", activation)
-        self.assertIn("route->invalidated || !route->selected", activation)
+        self.assertIn("route->invalidated || (!route->selected && !route->metadata_only)", activation)
 
     def test_aborted_or_wrong_size_write_never_becomes_final(self):
         finish = self.section(

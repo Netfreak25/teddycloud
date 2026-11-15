@@ -4,9 +4,11 @@
 #include "mutex_manager.h"
 #include "tb2_client_identity.h"
 #include "v3_native_cache.h"
+#include "v3_playlist_metadata.h"
 #include "taf_original_cache.h"
 #include "fs_ext.h"
 #include <ctype.h>
+#include <inttypes.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +39,7 @@ typedef struct
     original_content_cache_job_t *job;
     original_content_cache_job_t *followup;
     uint64_t sync_generation;
+    uint32_t metadata_version;
     format_status_t formats[ORIGINAL_CACHE_FORMAT_COUNT];
 } original_record_t;
 
@@ -291,6 +294,7 @@ static void free_job(original_content_cache_job_t *job)
     free(job->settings.internal.contentdirfull);
     free(job->settings.internal.librarydirfull);
     free(job->settings.internal.cachedirfull);
+    free(job->settings.internal.datadirfull);
     free_identity(&job->tb1_identity);
     free_identity(&job->tb2_identity);
     memset(job->auth, 0, sizeof(job->auth));
@@ -317,6 +321,7 @@ static original_content_cache_job_t *copy_job(settings_t *source, const char *ru
     target->internal.contentdirfull = source->internal.contentdirfull ? strdup(source->internal.contentdirfull) : NULL;
     target->internal.librarydirfull = source->internal.librarydirfull ? strdup(source->internal.librarydirfull) : NULL;
     target->internal.cachedirfull = source->internal.cachedirfull ? strdup(source->internal.cachedirfull) : NULL;
+    target->internal.datadirfull = source->internal.datadirfull ? strdup(source->internal.datadirfull) : NULL;
     bool copied = copy_identity(&job->tb1_identity, tb1_identity(source)) &&
         copy_identity(&job->tb2_identity, tb2_client_identity_resolve(source, NULL));
     /* The adapter passes owned identity pointers, never live resolver results. */
@@ -326,6 +331,7 @@ static original_content_cache_job_t *copy_job(settings_t *source, const char *ru
     if (!copied || !target->cloud.remote_hostname || !target->cloud.remote_hostname_tb2 ||
         !target->internal.contentdirfull || !target->internal.librarydirfull ||
         !target->internal.cachedirfull ||
+        (source->internal.datadirfull && !target->internal.datadirfull) ||
         !copy_text(job->owner, sizeof(job->owner), source->internal.overlayUniqueId) ||
         !tb2_ruid_canonicalize(ruid, job->ruid))
     { free_job(job); return NULL; }
@@ -416,9 +422,63 @@ static void set_status(original_record_t *record, original_cache_format_t format
     mutex_unlock(MUTEX_ORIGINAL_CONTENT_CACHE);
 }
 
+/** All metadata disk work happens on the existing worker, never in the MQTT
+ * observer/lifetime lock. A persisted attempt is claimed before any cloud I/O. */
+static void process_metadata(original_content_cache_job_t *job)
+{
+    settings_t *settings = &job->settings;
+    uint32_t version = job->observed_version;
+    /* A proven TAF-derived generation already has a separate TAF timeline.
+     * It must not trigger native hydration just because MQTT supplies a version. */
+    if (v3_playlist_metadata_is_local_taf(settings, job->ruid, version))
+        return;
+    v3_playlist_metadata_enrich(settings, job->ruid, version);
+    if (!v3_playlist_metadata_needs_fetch(settings, job->ruid, version))
+        return;
+    error_t error = v3_playlist_metadata_begin_attempt(settings, job->ruid, version);
+    if (error != NO_ERROR)
+    {
+        if (error != ERROR_ABORTED)
+        {
+            TRACE_WARNING("V3 playlist attempt not persisted overlay=%u rUID=%s version=%" PRIu32 " error=%d\r\n",
+                (unsigned)settings->internal.overlayNumber, job->ruid, version, error);
+        }
+        return;
+    }
+    original_policy_t policy;
+    const char *reason = read_policy(settings, job->ruid, &policy);
+    if (reason == NULL)
+    {
+        memcpy(job->auth, policy.auth, sizeof(job->auth));
+        memcpy(job->upstream_ruid, policy.upstream_ruid, sizeof(job->upstream_ruid));
+        reason = original_content_cache_job_blocked_reason(job, ORIGINAL_CACHE_V3);
+    }
+    error = reason != NULL ? ERROR_ACCESS_DENIED
+        : original_content_cache_materialize(job, ORIGINAL_CACHE_V3, false, &reason);
+    if (error == NO_ERROR)
+    {
+        error = v3_playlist_metadata_enrich(settings, job->ruid, version);
+        if (error != NO_ERROR)
+            reason = "metadata_enrichment_failed";
+    }
+    if (error != NO_ERROR && reason == NULL)
+        reason = error == ERROR_WRONG_IDENTIFIER ? "cloud_version_changed" : "metadata_download_failed";
+    v3_playlist_metadata_finish_attempt(settings, job->ruid, version, reason);
+    TRACE_INFO("V3 playlist metadata overlay=%u rUID=%s version=%" PRIu32 " result=%d reason=%s\r\n",
+        (unsigned)settings->internal.overlayNumber, job->ruid, version, error,
+        reason != NULL ? reason : "complete");
+}
+
 static void process_record(original_record_t *record)
 {
     original_content_cache_job_t *job = record->job;
+    if (job->reason == ORIGINAL_CACHE_REASON_V3_METADATA)
+    {
+        process_metadata(job);
+        return;
+    }
+    if (job->reason == ORIGINAL_CACHE_REASON_V3_REFRESH)
+        v3_playlist_metadata_reset_attempt(&job->settings, job->ruid);
     for (unsigned phase = 0; phase < (job->both_formats ? 2U : 1U); phase++)
     {
         original_cache_format_t format = phase == 0 ? job->preferred :
@@ -473,8 +533,11 @@ static void original_worker(void *unused)
         if (selected->job)
         {
             selected->sequence = ++original_cache.sequence;
-            selected->formats[ORIGINAL_CACHE_V3] = (format_status_t){"queued", NULL};
-            selected->formats[ORIGINAL_CACHE_TAF] = (format_status_t){"skipped", "not_requested"};
+            if (selected->job->reason != ORIGINAL_CACHE_REASON_V3_METADATA)
+            {
+                selected->formats[ORIGINAL_CACHE_V3] = (format_status_t){"queued", NULL};
+                selected->formats[ORIGINAL_CACHE_TAF] = (format_status_t){"skipped", "not_requested"};
+            }
         }
         mutex_unlock(MUTEX_ORIGINAL_CONTENT_CACHE);
     }
@@ -559,6 +622,8 @@ static error_t submit_original_job(settings_t *settings, const char *ruid,
                 }
                 else
                 {
+                    if (record->followup && record->followup->reason == ORIGINAL_CACHE_REASON_V3_METADATA)
+                        record->metadata_version = 0;
                     free_job(record->followup);
                     record->followup = job;
                 }
@@ -634,6 +699,82 @@ error_t original_content_cache_submit(settings_t *settings, const char *ruid,
     return submit_original_job(settings, ruid, preferred,
         automatic ? ORIGINAL_CACHE_REASON_PLAYBACK : ORIGINAL_CACHE_REASON_DOWNLOAD,
         observed_version, 0, NULL, NULL, reason);
+}
+
+error_t original_content_cache_metadata_playback(settings_t *settings,
+    const char *ruid, uint32_t version)
+{
+    if (!settings || !version || tb2_ruid_classify(ruid) != TB2_RUID_CONTENT)
+        return ERROR_INVALID_PARAMETER;
+    if (!osStrcasecmp(ruid + TB2_RUID_HEX_LENGTH -
+        (sizeof(ORIGINAL_TONIEPLAY_RUID_SUFFIX) - 1U), ORIGINAL_TONIEPLAY_RUID_SUFFIX))
+        return ERROR_NOT_IMPLEMENTED;
+    if (!original_cache.ready || atomic_load(&original_cache.stopping))
+        return ERROR_OUT_OF_RESOURCES;
+    /* Snapshot configuration only. Private-source/auth checks intentionally
+     * remain in the worker because they require reading content metadata. */
+    mutex_lock(MUTEX_SETTINGS);
+    original_policy_t empty = {0};
+    original_content_cache_job_t *job = settings->internal.config_used &&
+        settings->toniebox.boxGeneration == GENERATION_TB2
+        ? copy_job(settings, ruid, &empty) : NULL;
+    mutex_unlock(MUTEX_SETTINGS);
+    if (job == NULL)
+        return ERROR_OUT_OF_MEMORY;
+    job->reason = ORIGINAL_CACHE_REASON_V3_METADATA;
+    job->preferred = ORIGINAL_CACHE_V3;
+    job->observed_version = version;
+    mutex_lock(MUTEX_ORIGINAL_CONTENT_CACHE);
+    original_record_t *slot = NULL;
+    error_t error = ERROR_OUT_OF_RESOURCES;
+    for (size_t i = 0; i < ORIGINAL_CONTENT_CACHE_CAPACITY; i++)
+    {
+        original_record_t *record = &original_cache.records[i];
+        if (record->valid && same_text(record->owner, job->owner) && same_text(record->ruid, job->ruid))
+        {
+            if (record->metadata_version == version)
+            {
+                error = NO_ERROR;
+                goto done;
+            }
+            if (record->job != NULL)
+            {
+                if (record->followup == NULL)
+                {
+                    record->followup = job;
+                    record->metadata_version = version;
+                    job = NULL;
+                    error = NO_ERROR;
+                }
+                else error = ERROR_IN_PROGRESS;
+                goto done;
+            }
+            slot = record;
+            break;
+        }
+        if (!record->job && (!slot || (slot->valid &&
+            (!record->valid || record->sequence < slot->sequence))))
+            slot = record;
+    }
+    if (slot != NULL && !atomic_load(&original_cache.stopping))
+    {
+        if (!slot->valid || !same_text(slot->owner, job->owner) || !same_text(slot->ruid, job->ruid))
+            memset(slot, 0, sizeof(*slot));
+        slot->valid = true;
+        slot->job = job;
+        slot->metadata_version = version;
+        slot->sequence = ++original_cache.sequence;
+        memcpy(slot->owner, job->owner, sizeof(slot->owner));
+        memcpy(slot->ruid, job->ruid, sizeof(slot->ruid));
+        job = NULL;
+        error = NO_ERROR;
+    }
+done:
+    mutex_unlock(MUTEX_ORIGINAL_CONTENT_CACHE);
+    free_job(job);
+    if (error == NO_ERROR)
+        osSetEvent(&original_cache.wake);
+    return error;
 }
 
 error_t original_content_cache_refresh_group(settings_t *settings,
@@ -739,7 +880,7 @@ void original_content_cache_add_status(cJSON *cache_state, const settings_t *set
         { memcpy(formats, record->formats, sizeof(formats)); found = true; break; }
     }
     mutex_unlock(MUTEX_ORIGINAL_CONTENT_CACHE);
-    if (!found) return;
+    if (!found || formats[ORIGINAL_CACHE_V3].state == NULL) return;
     cJSON *download = cJSON_AddObjectToObject(cache_state, "download");
     if (!download) return;
     for (unsigned format = 0; format < ORIGINAL_CACHE_FORMAT_COUNT; format++)

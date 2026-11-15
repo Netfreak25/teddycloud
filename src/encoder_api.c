@@ -215,8 +215,38 @@ static bool_t encoder_valid_tags(const ogg_packet *packet)
     return TRUE;
 }
 
-error_t encoder_validate_opus_file(const char *path, double *duration_seconds)
+static void encoder_opus_title(const ogg_packet *packet, char *title, size_t capacity)
 {
+    if (title == NULL || capacity == 0) return;
+    size_t position = 12U + encoder_le32(packet->packet + 8);
+    uint32_t count = encoder_le32(packet->packet + position);
+    position += 4;
+    /* Structural bounds have already been checked by encoder_valid_tags. */
+    for (uint32_t i = 0; i < count; i++)
+    {
+        uint32_t length = encoder_le32(packet->packet + position);
+        position += 4;
+        if (length > 6 && length - 6 < capacity &&
+            !osStrncasecmp((const char *)packet->packet + position, "TITLE=", 6))
+        {
+            bool_t safe = TRUE;
+            for (size_t j = 6; j < length; j++)
+                safe = safe && packet->packet[position + j] >= 0x20;
+            if (safe)
+            {
+                osMemcpy(title, packet->packet + position + 6, length - 6);
+                title[length - 6] = '\0';
+                return;
+            }
+        }
+        position += length;
+    }
+}
+
+error_t encoder_read_opus_metadata(const char *path, double *duration_seconds,
+    char *title, size_t title_size)
+{
+    if (title != NULL && title_size != 0) title[0] = '\0';
     if (path == NULL || duration_seconds == NULL)
         return ERROR_INVALID_PARAMETER;
     FsFile *file = fsOpenFile(path, FS_FILE_MODE_READ);
@@ -315,6 +345,7 @@ error_t encoder_validate_opus_file(const char *path, double *duration_seconds)
                         error = ERROR_INVALID_FILE;
                         break;
                     }
+                    encoder_opus_title(&packet, title, title_size);
                 }
                 else
                 {
@@ -369,7 +400,13 @@ error_t encoder_validate_opus_file(const char *path, double *duration_seconds)
         ogg_stream_clear(&stream);
     ogg_sync_clear(&sync);
     fsCloseFile(file);
+    if (error != NO_ERROR && title != NULL && title_size != 0) title[0] = '\0';
     return error;
+}
+
+error_t encoder_validate_opus_file(const char *path, double *duration_seconds)
+{
+    return encoder_read_opus_metadata(path, duration_seconds, NULL, 0);
 }
 
 error_t handleApiEncoderCapabilities(HttpConnection *connection, const char_t *uri,

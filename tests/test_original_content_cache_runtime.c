@@ -27,6 +27,29 @@ static const char *cache_preference = "auto";
 static const char *refresh_result = "unchanged";
 static bool policy_override;
 static cJSON *http_result;
+static unsigned metadata_enrichments, metadata_attempts, metadata_finishes;
+static uint32_t metadata_attempted_version;
+static bool metadata_missing = true;
+static bool metadata_local_taf;
+static unsigned metadata_local_taf_checks;
+static const char *metadata_failure;
+
+bool_t v3_playlist_metadata_is_local_taf(settings_t *value, const char *ruid, uint32_t version)
+{ (void)value; assert(ruid && version); metadata_local_taf_checks++; return metadata_local_taf; }
+error_t v3_playlist_metadata_enrich(settings_t *value, const char *ruid, uint32_t version)
+{ (void)value; assert(ruid && version); metadata_enrichments++; return NO_ERROR; }
+bool_t v3_playlist_metadata_needs_fetch(settings_t *value, const char *ruid, uint32_t version)
+{ (void)value; (void)ruid; (void)version; return metadata_missing; }
+error_t v3_playlist_metadata_begin_attempt(settings_t *value, const char *ruid, uint32_t version)
+{
+    (void)value; (void)ruid;
+    if (metadata_attempted_version == version) return ERROR_ABORTED;
+    metadata_attempted_version = version; metadata_attempts++; return NO_ERROR;
+}
+void v3_playlist_metadata_finish_attempt(settings_t *value, const char *ruid, uint32_t version, const char *reason)
+{ (void)value; (void)ruid; (void)version; metadata_finishes++; metadata_failure = reason; }
+void v3_playlist_metadata_reset_attempt(settings_t *value, const char *ruid)
+{ (void)value; (void)ruid; metadata_attempted_version = 0; }
 
 settings_t *get_settings(void) { return &settings[0]; }
 settings_t *get_settings_id(uint8_t index) { assert(index < MAX_OVERLAYS); return &settings[index]; }
@@ -546,6 +569,61 @@ static void sync_group_tests(void)
     puts("PASS V3 sync admission: no dual-format requirement, strict policy, current-target acceptance, normal-job follow-up");
 }
 
+static void metadata_worker_tests(void)
+{
+    configure_refresh_group();
+    settings[0].cloud.cacheBothFormatsOnDownload = false;
+    settings[0].cloud.cacheBothFormatsOnPlayback = false;
+    assert(osCreateEvent(&original_cache.wake)); original_cache.ready = true;
+    /* Admission must not inspect content JSON, even when it is unavailable. */
+    assert(original_content_cache_metadata_playback(&settings[2], "8194F21C500104e0", 7) == ERROR_NOT_IMPLEMENTED);
+    assert(pending_count() == 0);
+    assert(remove("8194F21C500304E0.json") == 0);
+    assert(original_content_cache_metadata_playback(&settings[2], test_ruid, 7) == NO_ERROR);
+    assert(metadata_enrichments == 0 && metadata_attempts == 0);
+    assert(pending_count() == 1 && !original_cache.records[0].job->both_formats);
+    assert(original_content_cache_metadata_playback(&settings[2], test_ruid, 7) == NO_ERROR);
+    assert(!original_cache.records[0].followup);
+    write_policy(test_ruid, "", false, auth_hex);
+    process_record(&original_cache.records[0]);
+    assert(calls == 1 && metadata_attempts == 1 && metadata_finishes == 1 && metadata_failure == NULL);
+    assert(order[0] == ORIGINAL_CACHE_V3 && !library_flags[0] && !refresh_flags[0]);
+    assert(job_reasons[0] == ORIGINAL_CACHE_REASON_V3_METADATA && metadata_enrichments == 2);
+    discard_queued_jobs();
+    /* Recreated queue state does not bypass the persisted once/version claim. */
+    memset(original_cache.records, 0, sizeof(original_cache.records));
+    assert(original_content_cache_metadata_playback(&settings[2], test_ruid, 7) == NO_ERROR);
+    process_record(&original_cache.records[0]);
+    assert(calls == 1 && metadata_attempts == 1);
+    discard_queued_jobs();
+    write_policy(test_ruid, "", true, auth_hex);
+    assert(original_content_cache_metadata_playback(&settings[2], test_ruid, 8) == NO_ERROR);
+    process_record(&original_cache.records[0]);
+    assert(calls == 1 && metadata_attempts == 2 && metadata_finishes == 2 && !strcmp(metadata_failure, "nocloud"));
+    discard_queued_jobs();
+    metadata_missing = false;
+    assert(original_content_cache_metadata_playback(&settings[2], test_ruid, 9) == NO_ERROR);
+    process_record(&original_cache.records[0]);
+    assert(calls == 1 && metadata_attempts == 2);
+    discard_queued_jobs();
+    puts("PASS metadata worker: memory-only admission, local-first, V3-only, persisted dedup and NoCloud");
+}
+
+static void metadata_local_taf_tests(void)
+{
+    configure_refresh_group();
+    assert(osCreateEvent(&original_cache.wake)); original_cache.ready = true;
+    metadata_local_taf = true;
+    assert(original_content_cache_metadata_playback(&settings[2], test_ruid, 7) == NO_ERROR);
+    /* Descriptor inspection belongs to the worker, not the MQTT observer. */
+    assert(metadata_local_taf_checks == 0 && pending_count() == 1);
+    process_record(&original_cache.records[0]);
+    assert(metadata_local_taf_checks == 1 && calls == 0);
+    assert(metadata_enrichments == 0 && metadata_attempts == 0 && metadata_finishes == 0);
+    discard_queued_jobs();
+    puts("PASS metadata worker: positively identified local TAF performs no native hydration or cloud request");
+}
+
 static void sync_worker_tests(void)
 {
     configure_refresh_group();
@@ -588,6 +666,8 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "refresh-worker")) refresh_worker_tests();
     else if (!strcmp(argv[1], "sync-group")) sync_group_tests();
     else if (!strcmp(argv[1], "sync-worker")) sync_worker_tests();
+    else if (!strcmp(argv[1], "metadata-worker")) metadata_worker_tests();
+    else if (!strcmp(argv[1], "metadata-local-taf")) metadata_local_taf_tests();
     else assert(!"unknown case");
     return 0;
 }

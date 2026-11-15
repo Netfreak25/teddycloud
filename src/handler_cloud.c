@@ -29,6 +29,7 @@
 #include "tb2_nocloud_policy.h"
 #include "v3_local_content.h"
 #include "v3_native_cache.h"
+#include "v3_playlist_metadata.h"
 #include "original_content_cache.h"
 #include "taf_original_cache.h"
 #include "cJSON.h"
@@ -129,6 +130,8 @@ static void v3_native_import_library_if_enabled(client_ctx_t *client_ctx,
 
     if (!client_ctx->settings->cloud.cacheContentV3)
     {
+        if (!tonieplay)
+            v3_playlist_metadata_enrich(client_ctx->settings, ruid, completed_version);
         return;
     }
 
@@ -136,6 +139,8 @@ static void v3_native_import_library_if_enabled(client_ctx_t *client_ctx,
          !client_ctx->settings->cloud.cacheTonieplayToLibraryV3) ||
         (!tonieplay && !client_ctx->settings->cloud.cacheToLibraryV3))
     {
+        if (!tonieplay)
+            v3_playlist_metadata_enrich(client_ctx->settings, ruid, completed_version);
         return;
     }
 
@@ -157,6 +162,8 @@ static void v3_native_import_library_if_enabled(client_ctx_t *client_ctx,
                       (unsigned)client_ctx->settings->internal.overlayNumber,
                       ruid, error2text(error));
     }
+    if (!tonieplay)
+        v3_playlist_metadata_enrich(client_ctx->settings, ruid, completed_version);
 }
 
 bool_t v3_original_content_metadata_complete(settings_t *settings,
@@ -304,12 +311,25 @@ static void v3_native_meta_body(void *source, HttpClientContext *cloud,
         if (!v3_native_original_content_allowed(settings, context->cache.ruid, TRUE) ||
             (context->job != NULL && !original_content_cache_job_allowed(context->job, ORIGINAL_CACHE_V3)))
         {
-            v3_native_cache_invalidate_routes(settings->internal.overlayNumber,
-                                               context->cache.ruid);
+            if (context->cache.metadata_version == 0)
+                v3_native_cache_invalidate_routes(settings->internal.overlayNumber,
+                                                   context->cache.ruid);
             context->cache_error = ERROR_ABORTED;
         }
         else
         {
+            /* Capture display metadata even when the audio cache is disabled.
+             * The observer validates and strips credentials before persistence. */
+            if (!context->cache.failed && context->cache.status_code == 200)
+            {
+                error_t metadata_error = v3_playlist_metadata_observe(settings, context->cache.ruid,
+                    context->cache.data, context->cache.length);
+                if (metadata_error != NO_ERROR && metadata_error != ERROR_NOT_IMPLEMENTED)
+                {
+                    TRACE_WARNING("V3 playlist manifest metadata unavailable overlay=%u rUID=%s error=%d\r\n",
+                        (unsigned)settings->internal.overlayNumber, context->cache.ruid, metadata_error);
+                }
+            }
             context->cache_error = v3_native_cache_meta_capture_finish(&context->cache);
         }
         if (context->cache_error != NO_ERROR)
@@ -405,8 +425,9 @@ static void v3_native_chapter_body(void *source, HttpClientContext *cloud,
             if (!v3_native_original_content_allowed(settings, context->cache.ruid, TRUE) ||
                 (context->job != NULL && !original_content_cache_job_allowed(context->job, ORIGINAL_CACHE_V3)))
             {
-                v3_native_cache_invalidate_routes(settings->internal.overlayNumber,
-                                                   context->cache.ruid);
+                if (context->job == NULL || context->job->reason != ORIGINAL_CACHE_REASON_V3_METADATA)
+                    v3_native_cache_invalidate_routes(settings->internal.overlayNumber,
+                                                       context->cache.ruid);
                 context->cache_error = ERROR_ABORTED;
             }
             else
@@ -5420,6 +5441,7 @@ static error_t v3_content_download_run(HttpConnection *connection, const char *r
                                      const original_content_cache_job_t *job,
                                      uint32_t *completed_version)
 {
+    bool_t metadata_only = job != NULL && job->reason == ORIGINAL_CACHE_REASON_V3_METADATA;
     if (completed_version != NULL)
         *completed_version = 0;
     char canonical_ruid[TB2_RUID_SIZE];
@@ -5497,6 +5519,8 @@ static error_t v3_content_download_run(HttpConnection *connection, const char *r
                                       settings->internal.librarydirfull,
                                       settings->internal.overlayNumber,
                                       canonical_ruid);
+    if (metadata_only)
+        meta.cache.metadata_version = job->observed_version;
     if (meta.cache.failed)
     {
         error_t reserve_error = meta.cache.error;
@@ -5507,7 +5531,7 @@ static error_t v3_content_download_run(HttpConnection *connection, const char *r
                                            ? V3_MANUAL_DOWNLOAD_CAPACITY
                                            : V3_MANUAL_DOWNLOAD_MANIFEST,
                                        reserve_error, canonical_ruid,
-                                       NULL, 0, 0, 0, 0, TRUE);
+                                       NULL, 0, 0, 0, 0, !metadata_only);
     }
     req_cbr_t meta_cbr = {
         .ctx = &meta,
@@ -5540,7 +5564,7 @@ static error_t v3_content_download_run(HttpConnection *connection, const char *r
         v3_native_cache_meta_capture_abort(&meta.cache);
         return v3_manual_download_fail(connection, settings, meta_stage, error,
                                        canonical_ruid, NULL, status_code, 0,
-                                       0, 0, TRUE);
+                                       0, 0, !metadata_only);
     }
 
     uint32_t meta_status = meta.cache.status_code;
@@ -5554,7 +5578,7 @@ static error_t v3_content_download_run(HttpConnection *connection, const char *r
                                                : V3_MANUAL_DOWNLOAD_MANIFEST;
         return v3_manual_download_fail(connection, settings, stage, plan_error,
                                        canonical_ruid, NULL, meta_status,
-                                       0, 0, 0, TRUE);
+                                       0, 0, 0, !metadata_only);
     }
 
     size_t completed = 0;
@@ -5564,8 +5588,9 @@ static error_t v3_content_download_run(HttpConnection *connection, const char *r
         if (!v3_native_original_content_allowed(settings, canonical_ruid, TRUE) ||
             (job != NULL && !original_content_cache_job_allowed(job, ORIGINAL_CACHE_V3)))
         {
-            v3_native_cache_invalidate_routes(settings->internal.overlayNumber,
-                                               canonical_ruid);
+            if (!metadata_only)
+                v3_native_cache_invalidate_routes(settings->internal.overlayNumber,
+                                                   canonical_ruid);
             error_t response_error = v3_manual_download_fail(
                 connection, settings, V3_MANUAL_DOWNLOAD_POLICY,
                 ERROR_ACCESS_DENIED, canonical_ruid, object->name, 0,
@@ -5595,7 +5620,7 @@ static error_t v3_content_download_run(HttpConnection *connection, const char *r
             error_t response_error = v3_manual_download_fail(
                 connection, settings, V3_MANUAL_DOWNLOAD_CHAPTER,
                 ERROR_UNEXPECTED_STATE, canonical_ruid, object->name, 0,
-                plan.version, completed, plan.object_count, TRUE);
+                plan.version, completed, plan.object_count, !metadata_only);
             v3_native_cache_download_plan_free(&plan);
             return response_error;
         }
@@ -5610,7 +5635,7 @@ static error_t v3_content_download_run(HttpConnection *connection, const char *r
             error_t response_error = v3_manual_download_fail(
                 connection, settings, V3_MANUAL_DOWNLOAD_CHAPTER,
                 ERROR_OUT_OF_MEMORY, canonical_ruid, object->name, 0,
-                plan.version, completed, plan.object_count, TRUE);
+                plan.version, completed, plan.object_count, !metadata_only);
             v3_native_cache_download_plan_free(&plan);
             return response_error;
         }
@@ -5666,11 +5691,24 @@ static error_t v3_content_download_run(HttpConnection *connection, const char *r
             error_t response_error = v3_manual_download_fail(
                 connection, settings, failure_stage, chapter_error,
                 canonical_ruid, object->name, chapter_status, plan.version,
-                completed, plan.object_count, TRUE);
+                completed, plan.object_count, !metadata_only);
             v3_native_cache_download_plan_free(&plan);
             return response_error;
         }
         completed++;
+    }
+
+    if (metadata_only)
+    {
+        /* Detached capture has fully validated every object but deliberately
+         * did not activate this version, change Source or acknowledge freshness. */
+        uint32_t version = plan.version;
+        v3_native_cache_download_plan_free(&plan);
+        if (!original_content_cache_job_allowed(job, ORIGINAL_CACHE_V3))
+            return ERROR_ABORTED;
+        if (completed_version != NULL)
+            *completed_version = version;
+        return NO_ERROR;
     }
 
     uint32_t active_version = 0;
@@ -6048,6 +6086,16 @@ error_t handleCloudContentMetaV3(HttpConnection *connection, const char_t *uri, 
                                                &generation);
                 if (error == NO_ERROR)
                 {
+                    if (tonieInfo->json._source_type == CT_SOURCE_NATIVE_COLLECTION)
+                    {
+                        error_t metadata_error = v3_playlist_metadata_bind_collection(client_ctx->settings,
+                            ruid, contentVersion, tonieInfo->json.source);
+                        if (metadata_error != NO_ERROR)
+                        {
+                            TRACE_WARNING("V3 playlist collection binding unavailable overlay=%u rUID=%s version=%" PRIu32 " error=%d\r\n",
+                                (unsigned)client_ctx->settings->internal.overlayNumber, ruid, contentVersion, metadata_error);
+                        }
+                    }
                     freshness_clear_cache_after_content_request(client_ctx,
                                                                 V3_CONTENT_META,
                                                                 ruid);

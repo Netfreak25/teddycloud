@@ -2,6 +2,7 @@
 #include "handler_cloud.h"
 #include "taf_original_cache.h"
 #include "v3_native_cache.h"
+#include "v3_playlist_metadata.h"
 #include "fs_ext.h"
 #include "mutex_manager.h"
 #include "server_helpers.h"
@@ -152,6 +153,8 @@ error_t original_content_cache_materialize(original_content_cache_job_t *job,
     }
     if (format == ORIGINAL_CACHE_TAF)
         return original_content_materialize_taf(job, import_to_library, reason);
+    if (job->reason == ORIGINAL_CACHE_REASON_V3_METADATA)
+        return original_content_download_v3(job);
     settings_t *settings = &job->settings;
     uint32_t version = 0;
     bool_t tonieplay = false;
@@ -187,5 +190,7 @@ error_t original_content_cache_materialize(original_content_cache_job_t *job,
         *reason = job->refresh_result;
     if (error != NO_ERROR && job->refresh_v3)
         job->refresh_result = NULL;
+    if (error == NO_ERROR && !tonieplay)
+        v3_playlist_metadata_enrich(settings, job->ruid, version);
     return error;
 }

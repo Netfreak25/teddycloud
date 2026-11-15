@@ -20,7 +20,8 @@ typedef enum
     ORIGINAL_CACHE_REASON_DOWNLOAD = 0,
     ORIGINAL_CACHE_REASON_PLAYBACK,
     ORIGINAL_CACHE_REASON_V3_REFRESH,
-    ORIGINAL_CACHE_REASON_V3_SYNC
+    ORIGINAL_CACHE_REASON_V3_SYNC,
+    ORIGINAL_CACHE_REASON_V3_METADATA
 } original_content_cache_reason_t;
 
 /** Owned request snapshot. Adapters must not resolve identities from live
@@ -68,6 +69,11 @@ error_t original_content_cache_refresh_group(settings_t *settings,
  * dual-format opt-in. NO_ERROR requires the requesting TB2 to be admitted;
  * another target's admission alone must not consume its cloud notification. */
 error_t original_content_cache_sync_group(settings_t *settings, const char *ruid);
+
+/** Playback-only metadata work. Admission owns memory but performs no file or
+ * network I/O; the existing worker validates the original source and policies. */
+error_t original_content_cache_metadata_playback(settings_t *settings,
+    const char *ruid, uint32_t version);
 
 /** Read the per-tag original preference without repairing/writing metadata.
  * Missing/invalid preference falls back to the existing generation default. */

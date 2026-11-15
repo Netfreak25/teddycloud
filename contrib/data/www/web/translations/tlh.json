@@ -505,6 +505,12 @@
             "noCloud": "Tonie-vaD cloud naw' botlu'. De' naQ DaqDaq polbogh lo'laH."
         },
         "infoModal": {
+            "nativeMetadata": {
+                "pending": "Dochvam 'ay' De' lI'lu'taH.",
+                "partial": "Hoch 'ay' poHmey Sovlu'be' qep. pong Hutlhchugh, mI' lo'lu'.",
+                "unavailable": "Dochvam 'ay' De' tu'lu'be'.",
+                "totalDuration": "Hoch poH: {{time}}"
+            },
             "downloadNative": "wab 'ay'mey ZIP yItlhap"
         },
         "addNewCustomTonieModal": {
